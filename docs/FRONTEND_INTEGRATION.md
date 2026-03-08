@@ -5,7 +5,7 @@
 This API uses **GraphQL** over HTTP POST requests. All requests go to a single endpoint:
 
 - **Development**: `http://localhost:3000/api/graphql`
-- **Production**: `https://api.easykonect.com/graphql` (when deployed)
+- **Production**: `https://backend-ehtm.onrender.com/api/graphql`
 
 ## Platform Support
 
@@ -28,7 +28,7 @@ All GraphQL requests are HTTP POST with JSON body:
 
 ```javascript
 // Using fetch
-const response = await fetch('http://localhost:3000/api/graphql', {
+const response = await fetch('https://backend-ehtm.onrender.com/api/graphql', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',

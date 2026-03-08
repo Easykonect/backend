@@ -5,7 +5,7 @@
 
 spectaql:
   # Output directory for generated documentation
-  targetDir: ./docs/api
+  targetDir: ./public/docs
 
   # Logo configuration
   logoFile: ./docs/assets/logo.png
