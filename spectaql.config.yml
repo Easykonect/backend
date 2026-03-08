@@ -1,0 +1,120 @@
+# ===========================================
+# SpectaQL Configuration
+# EasyKonnect API Documentation
+# ===========================================
+
+spectaql:
+  # Output directory for generated documentation
+  targetDir: ./docs/api
+
+  # Logo configuration
+  logoFile: ./docs/assets/logo.png
+  faviconFile: ./docs/assets/favicon.ico
+
+  # Display options
+  displayAllServers: true
+
+introspection:
+  # Use schema file directly (more reliable than URL introspection)
+  schemaFile: ./schema.graphql
+
+  # Metadata file for additional documentation
+  metadataFile: ./docs/api-metadata.json
+
+  # Query name depth limit
+  queryNameDepth: 10
+
+  # Remove deprecated fields
+  removeDeprecated: false
+
+info:
+  title: EasyKonnect API Documentation
+  description: |
+    # Welcome to EasyKonnect API
+    
+    EasyKonnect is a professional service marketplace platform connecting service users 
+    with verified service providers.
+    
+    ## Overview
+    
+    This API provides endpoints for:
+    - **Authentication**: User registration, login, email verification, password reset
+    - **User Management**: Profile management, user administration
+    - **Services**: Service listing, search, and management (coming soon)
+    - **Bookings**: Service booking and scheduling (coming soon)
+    - **Payments**: Secure payment processing (coming soon)
+    - **Reviews**: Rating and review system (coming soon)
+    
+    ## Authentication
+    
+    Most API operations require authentication. The API uses **JWT (JSON Web Tokens)** 
+    for authentication.
+    
+    ### Getting Started
+    
+    1. **Register** a new account using the `register` mutation
+    2. **Verify** your email with the 6-digit OTP sent to your email
+    3. **Login** to receive your access and refresh tokens
+    4. Include the access token in the `Authorization` header:
+    
+    ```
+    Authorization: Bearer <your_access_token>
+    ```
+    
+    ### Token Refresh
+    
+    Access tokens expire after 7 days. Use the `refreshToken` mutation to get a new 
+    access token without re-authenticating.
+    
+    ## Error Handling
+    
+    The API uses GraphQL errors with custom error codes. All errors include:
+    - `message`: Human-readable error description
+    - `extensions.code`: Machine-readable error code
+    
+    ### Common Error Codes
+    
+    | Code | Description |
+    |------|-------------|
+    | `UNAUTHENTICATED` | Missing or invalid authentication token |
+    | `UNAUTHORIZED` | Insufficient permissions for this operation |
+    | `USER_NOT_FOUND` | The specified user does not exist |
+    | `USER_ALREADY_EXISTS` | Email is already registered |
+    | `INVALID_CREDENTIALS` | Wrong email or password |
+    | `EMAIL_NOT_VERIFIED` | Email verification required before login |
+    | `ACCOUNT_LOCKED` | Too many failed login attempts |
+    | `OTP_EXPIRED` | Verification code has expired |
+    | `INVALID_OTP` | Verification code is incorrect |
+    
+    ## Rate Limiting
+    
+    To protect against abuse, the API implements rate limiting:
+    - **Login attempts**: 5 failed attempts result in 30-minute lockout
+    - **OTP requests**: Maximum 3 attempts before requesting new code
+    
+    ## Contact & Support
+    
+    For API support, please contact: api-support@easykonect.com
+    
+  version: 1.0.0
+  contact:
+    name: EasyKonnect API Support
+    email: api-support@easykonect.com
+    url: https://easykonect.com/support
+  license:
+    name: Proprietary
+    url: https://easykonect.com/terms
+
+servers:
+  - url: http://localhost:3000/api/graphql
+    description: Local Development Server
+    production: false
+  # Uncomment when deployed
+  # - url: https://api.easykonect.com/graphql
+  #   description: Production Server
+  #   production: true
+
+# Extensions for additional documentation features
+extensions:
+  # Generate examples from the schema
+  generateExamples: true

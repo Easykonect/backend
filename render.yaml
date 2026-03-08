@@ -1,0 +1,37 @@
+# Render Blueprint Configuration
+# This file auto-configures your service when connected to Render
+
+services:
+  - type: web
+    name: easykonect-api
+    runtime: node
+    region: oregon # Change to your preferred region
+    plan: free # Use 'starter' ($7/month) for always-on
+    buildCommand: npm install && npx prisma generate && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/graphql
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false # Set manually in dashboard
+      - key: JWT_SECRET
+        generateValue: true # Auto-generates secure random value
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: JWT_REFRESH_EXPIRES_IN
+        value: 30d
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_SECURE
+        value: "false"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: EMAIL_FROM_NAME
+        value: EasyKonnect
+      - key: EMAIL_FROM_ADDRESS
+        sync: false

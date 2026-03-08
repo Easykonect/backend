@@ -1,0 +1,262 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ==================
+// Enums
+// ==================
+
+enum UserRole {
+  SERVICE_USER
+  SERVICE_PROVIDER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum AccountStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum BookingStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  DISPUTED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum ServiceStatus {
+  DRAFT
+  PENDING_APPROVAL
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+// ==================
+// Models
+// ==================
+
+model User {
+  id        String        @id @default(auto()) @map("_id") @db.ObjectId
+  email     String        @unique
+  password  String
+  firstName String
+  lastName  String
+  phone     String?
+  role      UserRole      @default(SERVICE_USER)
+  status    AccountStatus @default(PENDING)
+
+  // Email verification
+  isEmailVerified   Boolean   @default(false)
+  emailVerifyToken  String?   // Hashed OTP
+  emailVerifyExpiry DateTime? // OTP expiry time
+  
+  // Security fields
+  failedLoginAttempts Int       @default(0)
+  lockoutUntil        DateTime?
+  lastLoginAt         DateTime?
+  lastLoginIp         String?
+  
+  // Password reset
+  passwordResetToken  String?
+  passwordResetExpiry DateTime?
+  
+  // Provider specific fields (only for SERVICE_PROVIDER role)
+  provider  ServiceProvider?
+  
+  // Relations
+  bookingsAsUser Booking[] @relation("UserBookings")
+  reviews        Review[]  @relation("UserReviews")
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+model ServiceProvider {
+  id                  String             @id @default(auto()) @map("_id") @db.ObjectId
+  userId              String             @unique @db.ObjectId
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  businessName        String
+  businessDescription String?
+  verificationStatus  VerificationStatus @default(UNVERIFIED)
+  
+  // Location
+  address             String
+  city                String
+  state               String
+  country             String
+  latitude            Float?
+  longitude           Float?
+  
+  // Documents for verification
+  documents           String[]
+  
+  // Relations
+  services            Service[]
+  bookings            Booking[] @relation("ProviderBookings")
+  reviews             Review[]  @relation("ProviderReviews")
+  
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@map("service_providers")
+}
+
+model ServiceCategory {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  name        String    @unique
+  slug        String    @unique
+  description String?
+  icon        String?
+  isActive    Boolean   @default(true)
+  
+  services    Service[]
+  
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("service_categories")
+}
+
+model Service {
+  id          String          @id @default(auto()) @map("_id") @db.ObjectId
+  providerId  String          @db.ObjectId
+  provider    ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  categoryId  String          @db.ObjectId
+  category    ServiceCategory @relation(fields: [categoryId], references: [id])
+  
+  name        String
+  slug        String
+  description String
+  price       Float
+  duration    Int             // Duration in minutes
+  status      ServiceStatus   @default(DRAFT)
+  
+  images      String[]
+  
+  bookings    Booking[]
+  
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@unique([providerId, slug])
+  @@map("services")
+}
+
+model Booking {
+  id            String          @id @default(auto()) @map("_id") @db.ObjectId
+  userId        String          @db.ObjectId
+  user          User            @relation("UserBookings", fields: [userId], references: [id])
+  providerId    String          @db.ObjectId
+  provider      ServiceProvider @relation("ProviderBookings", fields: [providerId], references: [id])
+  serviceId     String          @db.ObjectId
+  service       Service         @relation(fields: [serviceId], references: [id])
+  
+  status        BookingStatus   @default(PENDING)
+  scheduledDate DateTime
+  scheduledTime String
+  
+  // Address for service
+  address       String
+  city          String
+  state         String
+  notes         String?
+  
+  // Pricing
+  servicePrice  Float
+  commission    Float
+  totalAmount   Float
+  
+  // Payment
+  payment       Payment?
+  
+  // Review
+  review        Review?
+  
+  completedAt   DateTime?
+  cancelledAt   DateTime?
+  cancellationReason String?
+  
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  @@map("bookings")
+}
+
+model Payment {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId       String        @unique @db.ObjectId
+  booking         Booking       @relation(fields: [bookingId], references: [id])
+  
+  amount          Float
+  commission      Float
+  providerPayout  Float
+  
+  status          PaymentStatus @default(PENDING)
+  paymentMethod   String?
+  transactionRef  String?       @unique
+  
+  paidAt          DateTime?
+  refundedAt      DateTime?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@map("payments")
+}
+
+model Review {
+  id          String          @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId   String          @unique @db.ObjectId
+  booking     Booking         @relation(fields: [bookingId], references: [id])
+  userId      String          @db.ObjectId
+  user        User            @relation("UserReviews", fields: [userId], references: [id])
+  providerId  String          @db.ObjectId
+  provider    ServiceProvider @relation("ProviderReviews", fields: [providerId], references: [id])
+  
+  rating      Int             // 1-5
+  comment     String?
+  
+  // Provider response
+  response    String?
+  respondedAt DateTime?
+  
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@map("reviews")
+}
+
+

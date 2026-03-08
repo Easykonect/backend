@@ -1,0 +1,640 @@
+# ===========================================
+# EasyKonnect GraphQL Schema
+# Generated for Documentation
+# ===========================================
+
+# ==================
+# Enums
+# ==================
+
+"""
+User roles in the platform. Determines access level and permissions.
+"""
+enum UserRole {
+  """Regular user who can browse and book services"""
+  SERVICE_USER
+  """User who offers services on the platform"""
+  SERVICE_PROVIDER
+  """Platform administrator with elevated privileges"""
+  ADMIN
+  """Super administrator with full system access"""
+  SUPER_ADMIN
+}
+
+"""
+Current status of a user's account.
+"""
+enum AccountStatus {
+  """Account created but email not yet verified"""
+  PENDING
+  """Account is active and can access all features"""
+  ACTIVE
+  """Account temporarily suspended by admin"""
+  SUSPENDED
+  """Account has been deactivated"""
+  DEACTIVATED
+}
+
+"""
+Verification status for service providers.
+"""
+enum VerificationStatus {
+  """Provider has not submitted verification documents"""
+  UNVERIFIED
+  """Verification documents submitted and under review"""
+  PENDING
+  """Provider identity and credentials verified"""
+  VERIFIED
+  """Verification rejected - provider needs to resubmit"""
+  REJECTED
+}
+
+"""
+Current status of a service booking.
+"""
+enum BookingStatus {
+  """Booking request submitted, awaiting provider response"""
+  PENDING
+  """Provider accepted the booking"""
+  ACCEPTED
+  """Provider rejected the booking"""
+  REJECTED
+  """Service is currently being performed"""
+  IN_PROGRESS
+  """Service has been completed"""
+  COMPLETED
+  """Booking was cancelled by user or provider"""
+  CANCELLED
+  """There is a dispute regarding this booking"""
+  DISPUTED
+}
+
+"""
+Current status of a payment transaction.
+"""
+enum PaymentStatus {
+  """Payment initiated but not yet processed"""
+  PENDING
+  """Payment is being processed"""
+  PROCESSING
+  """Payment successful"""
+  COMPLETED
+  """Payment failed"""
+  FAILED
+  """Payment has been refunded"""
+  REFUNDED
+}
+
+# ==================
+# Types
+# ==================
+
+"""
+Represents a user in the EasyKonnect platform. Users can be service users (customers) or service providers.
+"""
+type User {
+  """Unique identifier for the user (MongoDB ObjectId)"""
+  id: ID!
+  """User's email address. Used for authentication and notifications."""
+  email: String!
+  """User's first name"""
+  firstName: String!
+  """User's last name"""
+  lastName: String!
+  """User's phone number (optional). Format: +234XXXXXXXXXX"""
+  phone: String
+  """User's role in the platform. Determines access permissions."""
+  role: UserRole!
+  """Current account status. PENDING accounts require email verification."""
+  status: AccountStatus!
+  """Whether the user has verified their email address"""
+  isEmailVerified: Boolean!
+  """Timestamp when the account was created (ISO 8601 format)"""
+  createdAt: String!
+  """Timestamp when the account was last updated (ISO 8601 format)"""
+  updatedAt: String!
+}
+
+"""
+Response returned after successful login. Contains user data and authentication tokens.
+"""
+type AuthResponse {
+  """The authenticated user's profile information"""
+  user: User!
+  """JWT access token for API authentication. Include in Authorization header as 'Bearer <token>'. Expires in 7 days."""
+  accessToken: String!
+  """JWT refresh token for obtaining new access tokens. Expires in 30 days."""
+  refreshToken: String!
+}
+
+"""
+Response returned after user registration. Indicates email verification is required.
+"""
+type RegistrationResponse {
+  """Whether the registration was successful"""
+  success: Boolean!
+  """Human-readable message about the registration status"""
+  message: String!
+  """Always true - indicates user must verify their email before logging in"""
+  requiresVerification: Boolean!
+}
+
+"""
+Response returned after email verification. On success, includes authentication tokens.
+"""
+type VerifyEmailResponse {
+  """Whether the verification was successful"""
+  success: Boolean!
+  """Human-readable status message"""
+  message: String!
+  """User profile (only present on successful verification)"""
+  user: User
+  """JWT access token (only present on successful verification)"""
+  accessToken: String
+  """JWT refresh token (only present on successful verification)"""
+  refreshToken: String
+}
+
+"""
+Generic response for operations that don't return specific data.
+"""
+type MessageResponse {
+  """Whether the operation was successful"""
+  success: Boolean!
+  """Human-readable status message"""
+  message: String!
+}
+
+"""
+Response returned when refreshing an access token.
+"""
+type RefreshTokenResponse {
+  """New JWT access token"""
+  accessToken: String!
+  """Current user profile information"""
+  user: User!
+}
+
+"""
+Paginated list of users. Used for admin user management.
+"""
+type PaginatedUsers {
+  """Array of users for the current page"""
+  items: [User!]!
+  """Total number of users matching the query"""
+  total: Int!
+  """Current page number (1-indexed)"""
+  page: Int!
+  """Number of items per page"""
+  limit: Int!
+  """Total number of pages available"""
+  totalPages: Int!
+  """Whether there are more pages after this one"""
+  hasNextPage: Boolean!
+  """Whether there are pages before this one"""
+  hasPreviousPage: Boolean!
+}
+
+# ==================
+# Inputs
+# ==================
+
+"""
+Input for user authentication.
+"""
+input LoginInput {
+  """Registered email address. Example: john.doe@example.com"""
+  email: String!
+  """Account password. Example: SecurePass123"""
+  password: String!
+}
+
+"""
+Input for creating a new user account.
+"""
+input RegisterUserInput {
+  """Valid email address. Will receive verification OTP. Example: john.doe@example.com"""
+  email: String!
+  """Password (minimum 8 characters, must include uppercase, lowercase, and number). Example: SecurePass123"""
+  password: String!
+  """User's first name (2-50 characters). Example: John"""
+  firstName: String!
+  """User's last name (2-50 characters). Example: Doe"""
+  lastName: String!
+  """Phone number (optional, Nigerian format recommended). Example: +2348012345678"""
+  phone: String
+}
+
+"""
+Input for verifying email with OTP code.
+"""
+input VerifyEmailInput {
+  """Email address that received the OTP. Example: john.doe@example.com"""
+  email: String!
+  """6-digit verification code sent to email. Example: 123456"""
+  otp: String!
+}
+
+"""
+Input for requesting a new verification OTP.
+"""
+input ResendOtpInput {
+  """Email address to send the new OTP to. Example: john.doe@example.com"""
+  email: String!
+}
+
+"""
+Input for requesting a password reset.
+"""
+input ForgotPasswordInput {
+  """Email address of the account to reset. Example: john.doe@example.com"""
+  email: String!
+}
+
+"""
+Input for resetting password with OTP verification.
+"""
+input ResetPasswordInput {
+  """Email address of the account. Example: john.doe@example.com"""
+  email: String!
+  """6-digit reset code sent to email. Example: 654321"""
+  otp: String!
+  """New password (minimum 8 characters, must include uppercase, lowercase, and number). Example: NewSecurePass456"""
+  newPassword: String!
+}
+
+"""
+Input for updating user profile. All fields are optional.
+"""
+input UpdateProfileInput {
+  """New first name. Example: Jonathan"""
+  firstName: String
+  """New last name. Example: Smith"""
+  lastName: String
+  """New phone number. Example: +2348098765432"""
+  phone: String
+}
+
+"""
+Input for paginated queries.
+"""
+input PaginationInput {
+  """Page number to retrieve (default: 1). Example: 1"""
+  page: Int
+  """Number of items per page (default: 10, max: 100). Example: 10"""
+  limit: Int
+}
+
+# ==================
+# Queries
+# ==================
+
+type Query {
+  """
+  Get the currently authenticated user's profile.
+  
+  **Authentication Required:** Yes
+  
+  **Example:**
+  ```graphql
+  query {
+    me {
+      id
+      email
+      firstName
+      lastName
+      role
+      status
+    }
+  }
+  ```
+  """
+  me: User
+
+  """
+  Get a specific user by their ID.
+  
+  **Authentication Required:** Yes
+  
+  **Arguments:**
+  - `id`: The unique ID of the user to retrieve
+  
+  **Example:**
+  ```graphql
+  query {
+    user(id: "507f1f77bcf86cd799439011") {
+      id
+      email
+      firstName
+      lastName
+    }
+  }
+  ```
+  """
+  user(id: ID!): User
+
+  """
+  Get a paginated list of all users.
+  
+  **Authentication Required:** Yes (ADMIN role required)
+  
+  **Arguments:**
+  - `pagination`: Optional pagination parameters
+  
+  **Example:**
+  ```graphql
+  query {
+    users(pagination: { page: 1, limit: 10 }) {
+      items {
+        id
+        email
+        firstName
+        role
+      }
+      total
+      totalPages
+      hasNextPage
+    }
+  }
+  ```
+  """
+  users(pagination: PaginationInput): PaginatedUsers!
+}
+
+# ==================
+# Mutations
+# ==================
+
+type Mutation {
+  # ==================
+  # Auth - Registration & Verification
+  # ==================
+
+  """
+  Register a new user account.
+  
+  A 6-digit verification code will be sent to the provided email address.
+  The user must verify their email before they can log in.
+  
+  **Authentication Required:** No
+  
+  **Example:**
+  ```graphql
+  mutation {
+    register(input: {
+      email: "john.doe@example.com"
+      password: "SecurePass123"
+      firstName: "John"
+      lastName: "Doe"
+      phone: "+2348012345678"
+    }) {
+      success
+      message
+      requiresVerification
+    }
+  }
+  ```
+  
+  **Possible Errors:**
+  - `USER_ALREADY_EXISTS`: Email is already registered
+  """
+  register(input: RegisterUserInput!): RegistrationResponse!
+
+  """
+  Verify email address using the 6-digit OTP code sent during registration.
+  
+  On success, returns authentication tokens so the user is automatically logged in.
+  
+  **Authentication Required:** No
+  
+  **Example:**
+  ```graphql
+  mutation {
+    verifyEmail(input: {
+      email: "john.doe@example.com"
+      otp: "123456"
+    }) {
+      success
+      message
+      user {
+        id
+        email
+      }
+      accessToken
+      refreshToken
+    }
+  }
+  ```
+  
+  **Possible Errors:**
+  - `USER_NOT_FOUND`: No account with this email
+  - `ALREADY_VERIFIED`: Email already verified
+  - `OTP_NOT_FOUND`: No verification code found
+  - `OTP_EXPIRED`: Code has expired (10 minutes)
+  - `INVALID_OTP`: Incorrect verification code
+  """
+  verifyEmail(input: VerifyEmailInput!): VerifyEmailResponse!
+
+  """
+  Request a new verification OTP code.
+  
+  Use this if the original code expired (codes expire after 10 minutes) or was not received.
+  
+  **Authentication Required:** No
+  
+  **Example:**
+  ```graphql
+  mutation {
+    resendVerificationOtp(input: {
+      email: "john.doe@example.com"
+    }) {
+      success
+      message
+    }
+  }
+  ```
+  
+  **Possible Errors:**
+  - `ALREADY_VERIFIED`: Email already verified
+  """
+  resendVerificationOtp(input: ResendOtpInput!): MessageResponse!
+
+  # ==================
+  # Auth - Login & Sessions
+  # ==================
+
+  """
+  Authenticate a user and receive access tokens.
+  
+  The user's email must be verified before login is allowed.
+  Failed login attempts are tracked - after 5 failed attempts, the account is locked for 30 minutes.
+  
+  **Authentication Required:** No
+  
+  **Example:**
+  ```graphql
+  mutation {
+    login(input: {
+      email: "john.doe@example.com"
+      password: "SecurePass123"
+    }) {
+      user {
+        id
+        email
+        firstName
+        role
+      }
+      accessToken
+      refreshToken
+    }
+  }
+  ```
+  
+  **Possible Errors:**
+  - `INVALID_CREDENTIALS`: Wrong email or password
+  - `EMAIL_NOT_VERIFIED`: Email verification required
+  - `ACCOUNT_LOCKED`: Too many failed attempts
+  - `USER_SUSPENDED`: Account suspended
+  - `ACCOUNT_DEACTIVATED`: Account deactivated
+  """
+  login(input: LoginInput!): AuthResponse!
+
+  """
+  Get a new access token using a valid refresh token.
+  
+  Use this when the access token has expired but you still have a valid refresh token.
+  
+  **Authentication Required:** No
+  
+  **Arguments:**
+  - `refreshToken`: The refresh token received during login or email verification
+  
+  **Example:**
+  ```graphql
+  mutation {
+    refreshToken(refreshToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...") {
+      accessToken
+      user {
+        id
+        email
+      }
+    }
+  }
+  ```
+  
+  **Possible Errors:**
+  - `INVALID_REFRESH_TOKEN`: Token is invalid or expired
+  """
+  refreshToken(refreshToken: String!): RefreshTokenResponse!
+
+  # ==================
+  # Auth - Password Management
+  # ==================
+
+  """
+  Request a password reset.
+  
+  A 6-digit reset code will be sent to the email if an account exists.
+  For security, this always returns success even if the email is not registered.
+  
+  **Authentication Required:** No
+  
+  **Example:**
+  ```graphql
+  mutation {
+    forgotPassword(input: {
+      email: "john.doe@example.com"
+    }) {
+      success
+      message
+    }
+  }
+  ```
+  """
+  forgotPassword(input: ForgotPasswordInput!): MessageResponse!
+
+  """
+  Reset password using the 6-digit code sent via forgotPassword.
+  
+  The code expires after 10 minutes.
+  
+  **Authentication Required:** No
+  
+  **Example:**
+  ```graphql
+  mutation {
+    resetPassword(input: {
+      email: "john.doe@example.com"
+      otp: "654321"
+      newPassword: "NewSecurePass456"
+    }) {
+      success
+      message
+    }
+  }
+  ```
+  
+  **Possible Errors:**
+  - `USER_NOT_FOUND`: No account with this email
+  - `RESET_NOT_FOUND`: No reset request found
+  - `RESET_EXPIRED`: Reset code has expired
+  - `INVALID_RESET_CODE`: Incorrect reset code
+  """
+  resetPassword(input: ResetPasswordInput!): MessageResponse!
+
+  # ==================
+  # Users
+  # ==================
+
+  """
+  Update the authenticated user's profile information.
+  
+  Only provided fields will be updated.
+  
+  **Authentication Required:** Yes
+  
+  **Example:**
+  ```graphql
+  mutation {
+    updateProfile(input: {
+      firstName: "Jonathan"
+      lastName: "Smith"
+      phone: "+2348098765432"
+    }) {
+      id
+      firstName
+      lastName
+      phone
+      updatedAt
+    }
+  }
+  ```
+  """
+  updateProfile(input: UpdateProfileInput!): User!
+
+  """
+  Delete a user account.
+  
+  **Authentication Required:** Yes (ADMIN role required)
+  
+  **Warning:** This action cannot be undone.
+  
+  **Arguments:**
+  - `id`: ID of the user to delete
+  
+  **Example:**
+  ```graphql
+  mutation {
+    deleteUser(id: "507f1f77bcf86cd799439011") {
+      success
+      message
+    }
+  }
+  ```
+  
+  **Possible Errors:**
+  - `UNAUTHORIZED`: Not an admin
+  - `USER_NOT_FOUND`: User does not exist
+  """
+  deleteUser(id: ID!): MessageResponse!
+}

@@ -1,0 +1,455 @@
+{
+  "OBJECT": {
+    "User": {
+      "description": "Represents a user in the EasyKonnect platform. Users can be service users (customers) or service providers.",
+      "fields": {
+        "id": {
+          "description": "Unique identifier for the user (MongoDB ObjectId)"
+        },
+        "email": {
+          "description": "User's email address. Used for authentication and notifications."
+        },
+        "firstName": {
+          "description": "User's first name"
+        },
+        "lastName": {
+          "description": "User's last name"
+        },
+        "phone": {
+          "description": "User's phone number (optional). Format: +234XXXXXXXXXX"
+        },
+        "role": {
+          "description": "User's role in the platform. Determines access permissions."
+        },
+        "status": {
+          "description": "Current account status. PENDING accounts require email verification."
+        },
+        "isEmailVerified": {
+          "description": "Whether the user has verified their email address"
+        },
+        "createdAt": {
+          "description": "Timestamp when the account was created (ISO 8601 format)"
+        },
+        "updatedAt": {
+          "description": "Timestamp when the account was last updated (ISO 8601 format)"
+        }
+      }
+    },
+    "AuthResponse": {
+      "description": "Response returned after successful login. Contains user data and authentication tokens.",
+      "fields": {
+        "user": {
+          "description": "The authenticated user's profile information"
+        },
+        "accessToken": {
+          "description": "JWT access token for API authentication. Include in Authorization header as 'Bearer <token>'. Expires in 7 days."
+        },
+        "refreshToken": {
+          "description": "JWT refresh token for obtaining new access tokens. Expires in 30 days."
+        }
+      }
+    },
+    "RegistrationResponse": {
+      "description": "Response returned after user registration. Indicates email verification is required.",
+      "fields": {
+        "success": {
+          "description": "Whether the registration was successful"
+        },
+        "message": {
+          "description": "Human-readable message about the registration status"
+        },
+        "requiresVerification": {
+          "description": "Always true - indicates user must verify their email before logging in"
+        }
+      }
+    },
+    "VerifyEmailResponse": {
+      "description": "Response returned after email verification. On success, includes authentication tokens.",
+      "fields": {
+        "success": {
+          "description": "Whether the verification was successful"
+        },
+        "message": {
+          "description": "Human-readable status message"
+        },
+        "user": {
+          "description": "User profile (only present on successful verification)"
+        },
+        "accessToken": {
+          "description": "JWT access token (only present on successful verification)"
+        },
+        "refreshToken": {
+          "description": "JWT refresh token (only present on successful verification)"
+        }
+      }
+    },
+    "MessageResponse": {
+      "description": "Generic response for operations that don't return specific data.",
+      "fields": {
+        "success": {
+          "description": "Whether the operation was successful"
+        },
+        "message": {
+          "description": "Human-readable status message"
+        }
+      }
+    },
+    "RefreshTokenResponse": {
+      "description": "Response returned when refreshing an access token.",
+      "fields": {
+        "accessToken": {
+          "description": "New JWT access token"
+        },
+        "user": {
+          "description": "Current user profile information"
+        }
+      }
+    },
+    "PaginatedUsers": {
+      "description": "Paginated list of users. Used for admin user management.",
+      "fields": {
+        "items": {
+          "description": "Array of users for the current page"
+        },
+        "total": {
+          "description": "Total number of users matching the query"
+        },
+        "page": {
+          "description": "Current page number (1-indexed)"
+        },
+        "limit": {
+          "description": "Number of items per page"
+        },
+        "totalPages": {
+          "description": "Total number of pages available"
+        },
+        "hasNextPage": {
+          "description": "Whether there are more pages after this one"
+        },
+        "hasPreviousPage": {
+          "description": "Whether there are pages before this one"
+        }
+      }
+    }
+  },
+  "INPUT_OBJECT": {
+    "RegisterUserInput": {
+      "description": "Input for creating a new user account",
+      "fields": {
+        "email": {
+          "description": "Valid email address. Will receive verification OTP.",
+          "example": "john.doe@example.com"
+        },
+        "password": {
+          "description": "Password (minimum 8 characters, must include uppercase, lowercase, and number)",
+          "example": "SecurePass123"
+        },
+        "firstName": {
+          "description": "User's first name (2-50 characters)",
+          "example": "John"
+        },
+        "lastName": {
+          "description": "User's last name (2-50 characters)",
+          "example": "Doe"
+        },
+        "phone": {
+          "description": "Phone number (optional, Nigerian format recommended)",
+          "example": "+2348012345678"
+        }
+      }
+    },
+    "LoginInput": {
+      "description": "Input for user authentication",
+      "fields": {
+        "email": {
+          "description": "Registered email address",
+          "example": "john.doe@example.com"
+        },
+        "password": {
+          "description": "Account password",
+          "example": "SecurePass123"
+        }
+      }
+    },
+    "VerifyEmailInput": {
+      "description": "Input for verifying email with OTP code",
+      "fields": {
+        "email": {
+          "description": "Email address that received the OTP",
+          "example": "john.doe@example.com"
+        },
+        "otp": {
+          "description": "6-digit verification code sent to email",
+          "example": "123456"
+        }
+      }
+    },
+    "ResendOtpInput": {
+      "description": "Input for requesting a new verification OTP",
+      "fields": {
+        "email": {
+          "description": "Email address to send the new OTP to",
+          "example": "john.doe@example.com"
+        }
+      }
+    },
+    "ForgotPasswordInput": {
+      "description": "Input for requesting a password reset",
+      "fields": {
+        "email": {
+          "description": "Email address of the account to reset",
+          "example": "john.doe@example.com"
+        }
+      }
+    },
+    "ResetPasswordInput": {
+      "description": "Input for resetting password with OTP verification",
+      "fields": {
+        "email": {
+          "description": "Email address of the account",
+          "example": "john.doe@example.com"
+        },
+        "otp": {
+          "description": "6-digit reset code sent to email",
+          "example": "654321"
+        },
+        "newPassword": {
+          "description": "New password (minimum 8 characters, must include uppercase, lowercase, and number)",
+          "example": "NewSecurePass456"
+        }
+      }
+    },
+    "UpdateProfileInput": {
+      "description": "Input for updating user profile. All fields are optional.",
+      "fields": {
+        "firstName": {
+          "description": "New first name",
+          "example": "Jonathan"
+        },
+        "lastName": {
+          "description": "New last name",
+          "example": "Smith"
+        },
+        "phone": {
+          "description": "New phone number",
+          "example": "+2348098765432"
+        }
+      }
+    },
+    "PaginationInput": {
+      "description": "Input for paginated queries",
+      "fields": {
+        "page": {
+          "description": "Page number to retrieve (default: 1)",
+          "example": "1"
+        },
+        "limit": {
+          "description": "Number of items per page (default: 10, max: 100)",
+          "example": "10"
+        }
+      }
+    }
+  },
+  "ENUM": {
+    "UserRole": {
+      "description": "Defines the user's role and access level in the platform",
+      "values": {
+        "SERVICE_USER": {
+          "description": "Regular user who can browse and book services"
+        },
+        "SERVICE_PROVIDER": {
+          "description": "User who offers services on the platform"
+        },
+        "ADMIN": {
+          "description": "Platform administrator with elevated privileges"
+        },
+        "SUPER_ADMIN": {
+          "description": "Super administrator with full system access"
+        }
+      }
+    },
+    "AccountStatus": {
+      "description": "Current status of the user's account",
+      "values": {
+        "PENDING": {
+          "description": "Account created but email not yet verified"
+        },
+        "ACTIVE": {
+          "description": "Account is active and can access all features"
+        },
+        "SUSPENDED": {
+          "description": "Account temporarily suspended by admin"
+        },
+        "DEACTIVATED": {
+          "description": "Account has been deactivated"
+        }
+      }
+    },
+    "VerificationStatus": {
+      "description": "Verification status for service providers",
+      "values": {
+        "UNVERIFIED": {
+          "description": "Provider has not submitted verification documents"
+        },
+        "PENDING": {
+          "description": "Verification documents submitted and under review"
+        },
+        "VERIFIED": {
+          "description": "Provider identity and credentials verified"
+        },
+        "REJECTED": {
+          "description": "Verification rejected - provider needs to resubmit"
+        }
+      }
+    },
+    "BookingStatus": {
+      "description": "Current status of a service booking",
+      "values": {
+        "PENDING": {
+          "description": "Booking request submitted, awaiting provider response"
+        },
+        "ACCEPTED": {
+          "description": "Provider accepted the booking"
+        },
+        "REJECTED": {
+          "description": "Provider rejected the booking"
+        },
+        "IN_PROGRESS": {
+          "description": "Service is currently being performed"
+        },
+        "COMPLETED": {
+          "description": "Service has been completed"
+        },
+        "CANCELLED": {
+          "description": "Booking was cancelled by user or provider"
+        },
+        "DISPUTED": {
+          "description": "There is a dispute regarding this booking"
+        }
+      }
+    },
+    "PaymentStatus": {
+      "description": "Current status of a payment transaction",
+      "values": {
+        "PENDING": {
+          "description": "Payment initiated but not yet processed"
+        },
+        "PROCESSING": {
+          "description": "Payment is being processed"
+        },
+        "COMPLETED": {
+          "description": "Payment successful"
+        },
+        "FAILED": {
+          "description": "Payment failed"
+        },
+        "REFUNDED": {
+          "description": "Payment has been refunded"
+        }
+      }
+    }
+  },
+  "Query": {
+    "me": {
+      "description": "Get the currently authenticated user's profile. Requires authentication.",
+      "example": {
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        }
+      }
+    },
+    "user": {
+      "description": "Get a specific user by their ID. Requires authentication.",
+      "args": {
+        "id": {
+          "description": "The unique ID of the user to retrieve",
+          "example": "507f1f77bcf86cd799439011"
+        }
+      }
+    },
+    "users": {
+      "description": "Get a paginated list of all users. Requires ADMIN role.",
+      "args": {
+        "pagination": {
+          "description": "Pagination options"
+        }
+      }
+    }
+  },
+  "Mutation": {
+    "register": {
+      "description": "Register a new user account. A 6-digit verification code will be sent to the provided email address. The user must verify their email before they can log in.",
+      "args": {
+        "input": {
+          "description": "Registration details"
+        }
+      }
+    },
+    "verifyEmail": {
+      "description": "Verify email address using the 6-digit OTP code sent during registration. On success, returns authentication tokens so the user is automatically logged in.",
+      "args": {
+        "input": {
+          "description": "Email and OTP code"
+        }
+      }
+    },
+    "resendVerificationOtp": {
+      "description": "Request a new verification OTP code. Use this if the original code expired (codes expire after 10 minutes) or was not received.",
+      "args": {
+        "input": {
+          "description": "Email address to resend OTP to"
+        }
+      }
+    },
+    "login": {
+      "description": "Authenticate a user and receive access tokens. The user's email must be verified before login is allowed. Failed login attempts are tracked - after 5 failed attempts, the account is locked for 30 minutes.",
+      "args": {
+        "input": {
+          "description": "Login credentials"
+        }
+      }
+    },
+    "refreshToken": {
+      "description": "Get a new access token using a valid refresh token. Use this when the access token has expired but you still have a valid refresh token.",
+      "args": {
+        "refreshToken": {
+          "description": "The refresh token received during login or email verification",
+          "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        }
+      }
+    },
+    "forgotPassword": {
+      "description": "Request a password reset. A 6-digit reset code will be sent to the email if an account exists. For security, this always returns success even if the email is not registered.",
+      "args": {
+        "input": {
+          "description": "Email address of the account"
+        }
+      }
+    },
+    "resetPassword": {
+      "description": "Reset password using the 6-digit code sent via forgotPassword. The code expires after 10 minutes.",
+      "args": {
+        "input": {
+          "description": "Email, reset code, and new password"
+        }
+      }
+    },
+    "updateProfile": {
+      "description": "Update the authenticated user's profile information. Only provided fields will be updated. Requires authentication.",
+      "args": {
+        "input": {
+          "description": "Profile fields to update"
+        }
+      }
+    },
+    "deleteUser": {
+      "description": "Delete a user account. Requires ADMIN role. This action cannot be undone.",
+      "args": {
+        "id": {
+          "description": "ID of the user to delete",
+          "example": "507f1f77bcf86cd799439011"
+        }
+      }
+    }
+  }
+}
