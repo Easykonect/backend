@@ -8,26 +8,19 @@ import { startServerAndCreateNextHandler } from '@as-integrations/next';
 import { NextRequest, NextResponse } from 'next/server';
 import { typeDefs, resolvers } from '@/graphql';
 import { getAuthContext, GraphQLContext } from '@/middleware';
-import { 
-  ApolloServerPluginLandingPageLocalDefault,
-  ApolloServerPluginLandingPageProductionDefault 
-} from '@apollo/server/plugin/landingPage/default';
+import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin/landingPage/default';
 
 // Create Apollo Server instance
 const server = new ApolloServer<GraphQLContext>({
   typeDefs,
   resolvers,
-  introspection: true, // Enable introspection in production
+  introspection: true, // Enable introspection in all environments
   plugins: [
-    // Configure landing page based on environment
-    process.env.NODE_ENV === 'production'
-      ? ApolloServerPluginLandingPageProductionDefault({
-          footer: false,
-        })
-      : ApolloServerPluginLandingPageLocalDefault({ 
-          embed: true,
-          includeCookies: true 
-        }),
+    // Always show embedded Apollo Sandbox for easy testing
+    ApolloServerPluginLandingPageLocalDefault({ 
+      embed: true,
+      includeCookies: true 
+    }),
   ],
 });
 
