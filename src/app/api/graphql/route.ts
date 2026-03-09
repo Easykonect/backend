@@ -8,18 +8,18 @@ import { startServerAndCreateNextHandler } from '@as-integrations/next';
 import { NextRequest, NextResponse } from 'next/server';
 import { typeDefs, resolvers } from '@/graphql';
 import { getAuthContext, GraphQLContext } from '@/middleware';
-import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin/landingPage/default';
 
 // Create Apollo Server instance
 const server = new ApolloServer<GraphQLContext>({
   typeDefs,
   resolvers,
+  introspection: true, // Enable introspection in production
   plugins: [
-    // Enable Apollo Sandbox in production
-    ApolloServerPluginLandingPageLocalDefault({ 
-      embed: true,
-      includeCookies: true 
-    }),
+    {
+      async serverWillStart() {
+        console.log('🚀 Apollo Server starting...');
+      },
+    },
   ],
 });
 
