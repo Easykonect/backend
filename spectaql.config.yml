@@ -15,8 +15,8 @@ spectaql:
   displayAllServers: true
 
 introspection:
-  # Use schema file directly (more reliable than URL introspection)
-  schemaFile: ./schema.graphql
+  # Use introspection from running server
+  url: http://localhost:3000/api/graphql
 
   # Metadata file for additional documentation
   metadataFile: ./docs/api-metadata.json

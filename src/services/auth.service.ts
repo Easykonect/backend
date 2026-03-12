@@ -680,6 +680,68 @@ export const getCurrentUser = async (userId: string) => {
   return user;
 };
 
+/**
+ * Change password (authenticated user)
+ */
+export const changePassword = async (
+  userId: string,
+  input: { currentPassword: string; newPassword: string }
+) => {
+  const { currentPassword, newPassword } = input;
+
+  // Validate new password
+  const passwordValidation = passwordSchema.safeParse(newPassword);
+  if (!passwordValidation.success) {
+    throw new GraphQLError(passwordValidation.error.issues[0]?.message || 'Invalid password', {
+      extensions: { code: 'VALIDATION_ERROR' },
+    });
+  }
+
+  // Find user
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+  });
+
+  if (!user) {
+    throw new GraphQLError(ErrorMessage[ErrorCode.USER_NOT_FOUND], {
+      extensions: { code: ErrorCode.USER_NOT_FOUND },
+    });
+  }
+
+  // Verify current password
+  const isValidPassword = await comparePassword(currentPassword, user.password);
+
+  if (!isValidPassword) {
+    throw new GraphQLError('Current password is incorrect', {
+      extensions: { code: 'INVALID_PASSWORD' },
+    });
+  }
+
+  // Check if new password is same as current
+  const isSamePassword = await comparePassword(newPassword, user.password);
+  if (isSamePassword) {
+    throw new GraphQLError('New password must be different from current password', {
+      extensions: { code: 'SAME_PASSWORD' },
+    });
+  }
+
+  // Hash new password
+  const hashedPassword = await hashPassword(newPassword);
+
+  // Update password
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      password: hashedPassword,
+    },
+  });
+
+  return {
+    success: true,
+    message: 'Password changed successfully.',
+  };
+};
+
 export default {
   registerUser,
   verifyEmail,
@@ -689,5 +751,6 @@ export default {
   resetPassword,
   refreshAccessToken,
   getCurrentUser,
+  changePassword,
   getClientIp,
 };

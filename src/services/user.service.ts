@@ -103,9 +103,95 @@ export const updateUserProfile = async (
  * Delete user (Admin only)
  */
 export const deleteUser = async (id: string) => {
-  await prisma.user.delete({
+  const user = await prisma.user.findUnique({
     where: { id },
   });
 
+  if (!user) {
+    throw new GraphQLError(ErrorMessage[ErrorCode.USER_NOT_FOUND], {
+      extensions: { code: ErrorCode.USER_NOT_FOUND },
+    });
+  }
+
+  // Check if user has provider profile
+  const provider = await prisma.serviceProvider.findUnique({
+    where: { userId: id },
+  });
+
+  // Delete in transaction
+  await prisma.$transaction(async (tx) => {
+    if (provider) {
+      // Delete provider's services first
+      await tx.service.deleteMany({
+        where: { providerId: provider.id },
+      });
+      // Delete provider profile
+      await tx.serviceProvider.delete({
+        where: { id: provider.id },
+      });
+    }
+    // Delete user
+    await tx.user.delete({
+      where: { id },
+    });
+  });
+
   return { success: true, message: 'User deleted successfully' };
+};
+
+/**
+ * Delete own account
+ */
+export const deleteOwnAccount = async (userId: string) => {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: {
+      provider: {
+        include: {
+          _count: {
+            select: {
+              bookings: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (!user) {
+    throw new GraphQLError(ErrorMessage[ErrorCode.USER_NOT_FOUND], {
+      extensions: { code: ErrorCode.USER_NOT_FOUND },
+    });
+  }
+
+  // Check for active bookings if provider
+  if (user.provider && user.provider._count.bookings > 0) {
+    throw new GraphQLError(
+      'Cannot delete account with active bookings. Please complete or cancel pending bookings first.',
+      { extensions: { code: 'HAS_ACTIVE_BOOKINGS' } }
+    );
+  }
+
+  // Delete in transaction
+  await prisma.$transaction(async (tx) => {
+    if (user.provider) {
+      // Delete provider's services
+      await tx.service.deleteMany({
+        where: { providerId: user.provider.id },
+      });
+      // Delete provider profile
+      await tx.serviceProvider.delete({
+        where: { id: user.provider.id },
+      });
+    }
+    // Delete user
+    await tx.user.delete({
+      where: { id: userId },
+    });
+  });
+
+  return {
+    success: true,
+    message: 'Your account has been deleted successfully.',
+  };
 };

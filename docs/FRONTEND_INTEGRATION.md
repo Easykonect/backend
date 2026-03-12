@@ -47,9 +47,15 @@ const data = await response.json();
 
 # Authentication APIs
 
+These APIs handle user registration, login, password management, and session management. No authentication token is required for these endpoints (except logout and changePassword).
+
+---
+
 ## 1. Register User
 
-Creates a new user account and sends a verification OTP to email.
+**What this API does:** This API is used for creating a new SERVICE_USER account on the EasyKonnect platform. When called, it validates the user's information, creates the account with PENDING status, and sends a 6-digit OTP to the user's email address for verification. The user cannot log in until they verify their email using the verifyEmail API.
+
+**What it returns:** Returns a `RegistrationResponse` containing a success boolean, a message confirming the account was created, and a `requiresVerification` flag set to true indicating the user must verify their email before logging in.
 
 ### Request
 
@@ -151,7 +157,9 @@ mutation Register($input: RegisterUserInput!) {
 
 ## 2. Verify Email
 
-Verifies user's email with the 6-digit OTP sent during registration.
+**What this API does:** This API is used for verifying a user's email address after registration. It validates the 6-digit OTP that was sent to the user's email during registration. Upon successful verification, it changes the user's status from PENDING to ACTIVE, sets `isEmailVerified` to true, and automatically logs the user in by generating JWT tokens.
+
+**What it returns:** Returns a `VerifyEmailResponse` containing a success boolean, a confirmation message, the complete user object (id, email, firstName, lastName, role, status, isEmailVerified), and both `accessToken` and `refreshToken` for automatic login - no separate login call is needed after verification.
 
 ### Request
 
@@ -276,7 +284,9 @@ mutation VerifyEmail($input: VerifyEmailInput!) {
 
 ## 3. Resend Verification OTP
 
-Sends a new verification OTP to the user's email.
+**What this API does:** This API is used for requesting a new verification OTP when the original one has expired (after 10 minutes) or wasn't received. It invalidates any existing OTP for the email address, generates a new 6-digit OTP, and sends it to the user's email. This endpoint is rate-limited to prevent abuse.
+
+**What it returns:** Returns a `MessageResponse` containing a success boolean and a message confirming that a new verification code has been sent to the email address.
 
 ### Request
 
@@ -333,7 +343,9 @@ mutation ResendOtp($input: ResendOtpInput!) {
 
 ## 4. Login
 
-Authenticates user and returns access tokens.
+**What this API does:** This API is used for authenticating a user with their email and password credentials. It validates the credentials, checks that the account is ACTIVE and email is verified, updates the `lastLoginAt` timestamp, and generates JWT tokens. Works for both SERVICE_USER and SERVICE_PROVIDER accounts. The account will be locked after 5 failed login attempts.
+
+**What it returns:** Returns an `AuthResponse` containing the complete user object (id, email, firstName, lastName, phone, role, status), an `accessToken` (expires in 15 minutes) for API authorization, and a `refreshToken` (expires in 30 days) for obtaining new access tokens.
 
 ### Request
 
@@ -456,7 +468,9 @@ mutation Login($input: LoginInput!) {
 
 ## 5. Refresh Token
 
-Gets a new access token using refresh token.
+**What this API does:** This API is used for obtaining a new access token when the current one has expired. It validates the refresh token, verifies the user account is still active, and generates a new access token. This enables seamless user experience without requiring re-login every 15 minutes.
+
+**What it returns:** Returns a `RefreshTokenResponse` containing a new `accessToken` and the current user object (id, email, firstName, lastName, role, status). The original refresh token remains valid until its 30-day expiration.
 
 ### Request
 
@@ -525,7 +539,9 @@ mutation RefreshToken($refreshToken: String!) {
 
 ## 6. Forgot Password
 
-Requests a password reset OTP.
+**What this API does:** This API is used for initiating the password reset flow when a user forgets their password. It generates a 6-digit OTP and sends it to the provided email address. For security reasons, this endpoint always returns success even if the email doesn't exist in the system (prevents email enumeration attacks).
+
+**What it returns:** Returns a `MessageResponse` containing a success boolean (always true) and a generic message stating "If an account exists with this email, a password reset code has been sent." The OTP is valid for 10 minutes.
 
 ### Request
 
@@ -567,7 +583,9 @@ mutation ForgotPassword($input: ForgotPasswordInput!) {
 
 ## 7. Reset Password
 
-Resets password using the OTP from email.
+**What this API does:** This API is used for completing the password reset flow by setting a new password. It validates the email and OTP combination, ensures the new password meets security requirements, hashes and stores the new password, and invalidates the OTP. The user must then log in with their new password - this does NOT auto-login.
+
+**What it returns:** Returns a `MessageResponse` containing a success boolean and a confirmation message stating "Password has been reset successfully. You can now login with your new password."
 
 ### Request
 
@@ -641,6 +659,8 @@ mutation ResetPassword($input: ResetPasswordInput!) {
 
 # User APIs (Authenticated)
 
+These APIs require a valid access token in the Authorization header. They allow authenticated users to view and manage their own profiles.
+
 **Required Header for all authenticated requests:**
 ```
 Authorization: Bearer YOUR_ACCESS_TOKEN
@@ -648,7 +668,9 @@ Authorization: Bearer YOUR_ACCESS_TOKEN
 
 ## 8. Get Current User (Me)
 
-Returns the authenticated user's profile.
+**What this API does:** This API is used for retrieving the authenticated user's complete profile information. Call this after login to get the current user data, check session validity, or refresh user information displayed in the UI. It uses the access token to identify the user.
+
+**What it returns:** Returns a `User` object containing all profile fields: id, email, firstName, lastName, phone, role (SERVICE_USER or SERVICE_PROVIDER), status (ACTIVE, SUSPENDED, etc.), isEmailVerified boolean, and timestamps (createdAt, updatedAt).
 
 ### Request
 
@@ -711,7 +733,9 @@ query Me {
 
 ## 9. Update Profile
 
-Updates the authenticated user's profile.
+**What this API does:** This API is used for updating the authenticated user's profile information (firstName, lastName, phone). It performs a partial update - only the fields you include will be changed. Email cannot be changed through this endpoint. The `updatedAt` timestamp is automatically updated.
+
+**What it returns:** Returns the updated `User` object containing the modified fields (id, email, firstName, lastName, phone, updatedAt) reflecting the new values.
 
 ### Request
 
@@ -761,9 +785,15 @@ mutation UpdateProfile($input: UpdateProfileInput!) {
 
 # Admin APIs (Admin Role Required)
 
+These APIs require an admin access token (ADMIN or SUPER_ADMIN role). They provide platform management capabilities for administrators.
+
+---
+
 ## 10. Get All Users
 
-Returns paginated list of all users.
+**What this API does:** This API is used for retrieving a paginated list of all users on the platform. Admins use this to view, search, and manage user accounts. Supports pagination to handle large user bases efficiently.
+
+**What it returns:** Returns a `PaginatedUsers` object containing an `items` array of User objects (each with id, email, firstName, lastName, role, status, isEmailVerified, createdAt), plus pagination metadata (total count, current page, limit, totalPages, hasNextPage, hasPreviousPage).
 
 ### Request
 
@@ -851,7 +881,9 @@ query GetUsers($pagination: PaginationInput) {
 
 ## 11. Delete User
 
-Deletes a user account (Admin only).
+**What this API does:** This API is used for permanently deleting a user account from the platform. It removes the user and all associated data including their provider profile and services (if they were a SERVICE_PROVIDER). This action is irreversible and should only be used for removing spam/fake accounts or GDPR compliance requests.
+
+**What it returns:** Returns a `MessageResponse` containing a success boolean and a message "User deleted successfully".
 
 ### Request
 
