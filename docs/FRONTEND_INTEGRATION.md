@@ -919,6 +919,700 @@ mutation DeleteUser($id: ID!) {
 
 ---
 
+# Booking APIs (User)
+
+These APIs allow users to create, view, update, and cancel bookings for services.
+
+---
+
+## 12. Create Booking
+
+**What this API does:** This API is used for creating a new booking for a service. The user specifies the service they want to book, the scheduled date and time, and the service location. The booking is created with PENDING status and the service provider must accept it before the service can proceed. Bookings must be scheduled at least 2 hours in advance and no more than 30 days out.
+
+**What it returns:** Returns a `Booking` object containing the booking ID, status (PENDING), scheduled date/time, service details, provider information, pricing breakdown (servicePrice, commission, totalAmount), and timestamps.
+
+### Request
+
+```graphql
+mutation CreateBooking($input: CreateBookingInput!) {
+  createBooking(input: $input) {
+    id
+    status
+    scheduledDate
+    scheduledTime
+    address
+    city
+    state
+    notes
+    servicePrice
+    commission
+    totalAmount
+    service {
+      id
+      name
+      price
+      duration
+    }
+    provider {
+      id
+      businessName
+    }
+    user {
+      id
+      firstName
+      lastName
+    }
+    createdAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "serviceId": "507f1f77bcf86cd799439011",
+    "scheduledDate": "2026-03-20",
+    "scheduledTime": "14:00",
+    "address": "123 Main Street, Lekki",
+    "city": "Lagos",
+    "state": "Lagos",
+    "notes": "Please bring your own equipment"
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "createBooking": {
+      "id": "507f1f77bcf86cd799439012",
+      "status": "PENDING",
+      "scheduledDate": "2026-03-20T00:00:00.000Z",
+      "scheduledTime": "14:00",
+      "address": "123 Main Street, Lekki",
+      "city": "Lagos",
+      "state": "Lagos",
+      "notes": "Please bring your own equipment",
+      "servicePrice": 15000,
+      "commission": 1500,
+      "totalAmount": 15000,
+      "service": {
+        "id": "507f1f77bcf86cd799439011",
+        "name": "Pipe Repair",
+        "price": 15000,
+        "duration": 60
+      },
+      "provider": {
+        "id": "507f1f77bcf86cd799439010",
+        "businessName": "John's Plumbing Services"
+      },
+      "user": {
+        "id": "507f1f77bcf86cd799439013",
+        "firstName": "Jane",
+        "lastName": "Customer"
+      },
+      "createdAt": "2026-03-13T10:30:00.000Z"
+    }
+  }
+}
+```
+
+### Error Responses
+
+**Service Not Found**
+```json
+{
+  "errors": [{ "message": "Service not found", "extensions": { "code": "SERVICE_NOT_FOUND" } }],
+  "data": null
+}
+```
+
+**Service Not Available**
+```json
+{
+  "errors": [{ "message": "This service is not currently available for booking", "extensions": { "code": "SERVICE_NOT_AVAILABLE" } }],
+  "data": null
+}
+```
+
+**Invalid Booking Time**
+```json
+{
+  "errors": [{ "message": "Booking must be scheduled at least 2 hours in advance", "extensions": { "code": "INVALID_BOOKING_TIME" } }],
+  "data": null
+}
+```
+
+---
+
+## 13. Get My Bookings
+
+**What this API does:** This API is used for retrieving all bookings made by the currently authenticated user. It supports filtering by status (PENDING, ACCEPTED, IN_PROGRESS, COMPLETED, CANCELLED) and date range. Results are paginated and sorted by creation date (newest first).
+
+**What it returns:** Returns a `PaginatedBookings` object containing an array of bookings with full details, plus pagination metadata (total, page, limit, totalPages, hasNextPage, hasPreviousPage).
+
+### Request
+
+```graphql
+query MyBookings($filters: BookingFiltersInput, $pagination: PaginationInput) {
+  myBookings(filters: $filters, pagination: $pagination) {
+    items {
+      id
+      status
+      scheduledDate
+      scheduledTime
+      address
+      city
+      servicePrice
+      totalAmount
+      service {
+        id
+        name
+        price
+      }
+      provider {
+        businessName
+        city
+      }
+      completedAt
+      cancelledAt
+      createdAt
+    }
+    total
+    page
+    limit
+    totalPages
+    hasNextPage
+    hasPreviousPage
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "filters": {
+    "status": "PENDING"
+  },
+  "pagination": {
+    "page": 1,
+    "limit": 10
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "myBookings": {
+      "items": [
+        {
+          "id": "507f1f77bcf86cd799439012",
+          "status": "PENDING",
+          "scheduledDate": "2026-03-20T00:00:00.000Z",
+          "scheduledTime": "14:00",
+          "address": "123 Main Street",
+          "city": "Lagos",
+          "servicePrice": 15000,
+          "totalAmount": 15000,
+          "service": {
+            "id": "507f1f77bcf86cd799439011",
+            "name": "Pipe Repair",
+            "price": 15000
+          },
+          "provider": {
+            "businessName": "John's Plumbing",
+            "city": "Lagos"
+          },
+          "completedAt": null,
+          "cancelledAt": null,
+          "createdAt": "2026-03-13T10:30:00.000Z"
+        }
+      ],
+      "total": 1,
+      "page": 1,
+      "limit": 10,
+      "totalPages": 1,
+      "hasNextPage": false,
+      "hasPreviousPage": false
+    }
+  }
+}
+```
+
+---
+
+## 14. Get Booking by ID
+
+**What this API does:** This API is used for retrieving detailed information about a specific booking. Only the booking owner (user who made the booking), the service provider, or an admin can view a booking.
+
+**What it returns:** Returns a complete `Booking` object with all details including service, provider, user, payment status, review (if exists), and all timestamps.
+
+### Request
+
+```graphql
+query GetBooking($id: ID!) {
+  booking(id: $id) {
+    id
+    status
+    scheduledDate
+    scheduledTime
+    address
+    city
+    state
+    notes
+    servicePrice
+    commission
+    totalAmount
+    service {
+      id
+      name
+      description
+      price
+      duration
+      category {
+        name
+      }
+    }
+    provider {
+      id
+      businessName
+      address
+      city
+    }
+    user {
+      id
+      firstName
+      lastName
+      email
+      phone
+    }
+    payment {
+      id
+      status
+      amount
+      paidAt
+    }
+    review {
+      id
+      rating
+      comment
+    }
+    completedAt
+    cancelledAt
+    cancellationReason
+    createdAt
+    updatedAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "id": "507f1f77bcf86cd799439012"
+}
+```
+
+---
+
+## 15. Update Booking
+
+**What this API does:** This API is used for updating a booking that is still in PENDING status. Users can change the scheduled date/time, address, or notes before the provider accepts the booking. Once a booking is accepted, it cannot be modified.
+
+**What it returns:** Returns the updated `Booking` object with the new values.
+
+### Request
+
+```graphql
+mutation UpdateBooking($id: ID!, $input: UpdateBookingInput!) {
+  updateBooking(id: $id, input: $input) {
+    id
+    status
+    scheduledDate
+    scheduledTime
+    address
+    city
+    state
+    notes
+    updatedAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "id": "507f1f77bcf86cd799439012",
+  "input": {
+    "scheduledDate": "2026-03-21",
+    "scheduledTime": "10:00",
+    "notes": "Changed to morning appointment"
+  }
+}
+```
+
+### Error Responses
+
+**Invalid Booking Status**
+```json
+{
+  "errors": [{ "message": "Can only update pending bookings", "extensions": { "code": "INVALID_BOOKING_STATUS" } }],
+  "data": null
+}
+```
+
+---
+
+## 16. Cancel Booking
+
+**What this API does:** This API is used for canceling a booking. Users can cancel PENDING bookings anytime. For ACCEPTED bookings, cancellation must be done at least 24 hours before the scheduled time. A reason for cancellation is required.
+
+**What it returns:** Returns the cancelled `Booking` object with status set to CANCELLED, cancelledAt timestamp, and the cancellationReason.
+
+### Request
+
+```graphql
+mutation CancelBooking($id: ID!, $reason: String!) {
+  cancelBooking(id: $id, reason: $reason) {
+    id
+    status
+    cancelledAt
+    cancellationReason
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "id": "507f1f77bcf86cd799439012",
+  "reason": "Schedule conflict - need to reschedule"
+}
+```
+
+### Error Responses
+
+**Cancellation Window Passed**
+```json
+{
+  "errors": [{ "message": "Cannot cancel booking within 24 hours of scheduled time. Please contact the provider.", "extensions": { "code": "CANCELLATION_WINDOW_PASSED" } }],
+  "data": null
+}
+```
+
+---
+
+## 17. Get My Booking Stats
+
+**What this API does:** This API is used for retrieving booking statistics for the current user's dashboard. It provides a summary of all bookings, categorized by status, and the total amount spent on completed bookings.
+
+**What it returns:** Returns a `BookingStats` object with totalBookings, pendingBookings, completedBookings, cancelledBookings, and totalSpent.
+
+### Request
+
+```graphql
+query MyBookingStats {
+  myBookingStats {
+    totalBookings
+    pendingBookings
+    completedBookings
+    cancelledBookings
+    totalSpent
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "myBookingStats": {
+      "totalBookings": 15,
+      "pendingBookings": 2,
+      "completedBookings": 10,
+      "cancelledBookings": 3,
+      "totalSpent": 125000
+    }
+  }
+}
+```
+
+---
+
+# Booking APIs (Provider)
+
+These APIs allow service providers to manage incoming bookings for their services.
+
+---
+
+## 18. Get Provider Bookings
+
+**What this API does:** This API is used for retrieving all bookings for the current provider's services. Providers use this to see incoming booking requests and manage their schedule. Supports filtering by status and date range.
+
+**What it returns:** Returns a `PaginatedBookings` object with bookings for the provider's services.
+
+### Request
+
+```graphql
+query ProviderBookings($filters: BookingFiltersInput, $pagination: PaginationInput) {
+  providerBookings(filters: $filters, pagination: $pagination) {
+    items {
+      id
+      status
+      scheduledDate
+      scheduledTime
+      address
+      city
+      servicePrice
+      commission
+      totalAmount
+      service {
+        id
+        name
+      }
+      user {
+        firstName
+        lastName
+        phone
+        email
+      }
+      notes
+      createdAt
+    }
+    total
+    page
+    totalPages
+    hasNextPage
+  }
+}
+```
+
+---
+
+## 19. Accept Booking
+
+**What this API does:** This API is used for accepting a PENDING booking request. When a provider accepts a booking, the status changes to ACCEPTED and the customer is notified. The provider commits to providing the service at the scheduled time.
+
+**What it returns:** Returns the updated `Booking` object with status set to ACCEPTED.
+
+### Request
+
+```graphql
+mutation AcceptBooking($id: ID!) {
+  acceptBooking(id: $id) {
+    id
+    status
+    scheduledDate
+    scheduledTime
+    user {
+      firstName
+      lastName
+      phone
+    }
+    service {
+      name
+    }
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "id": "507f1f77bcf86cd799439012"
+}
+```
+
+### Error Responses
+
+**Invalid Status**
+```json
+{
+  "errors": [{ "message": "Cannot accept a booking with status: CANCELLED", "extensions": { "code": "INVALID_BOOKING_STATUS" } }],
+  "data": null
+}
+```
+
+---
+
+## 20. Reject Booking
+
+**What this API does:** This API is used for rejecting a PENDING booking request. Providers should provide a reason so the customer understands why their booking was declined. The customer can then book with another provider.
+
+**What it returns:** Returns the updated `Booking` object with status set to REJECTED and the rejection reason.
+
+### Request
+
+```graphql
+mutation RejectBooking($id: ID!, $reason: String!) {
+  rejectBooking(id: $id, reason: $reason) {
+    id
+    status
+    cancellationReason
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "id": "507f1f77bcf86cd799439012",
+  "reason": "Fully booked on this date. Please try another time."
+}
+```
+
+---
+
+## 21. Start Service
+
+**What this API does:** This API is used when the provider begins providing the service. It changes the booking status from ACCEPTED to IN_PROGRESS. This should be called when the provider arrives at the location or begins the work.
+
+**What it returns:** Returns the updated `Booking` object with status set to IN_PROGRESS.
+
+### Request
+
+```graphql
+mutation StartService($id: ID!) {
+  startService(id: $id) {
+    id
+    status
+    scheduledDate
+    scheduledTime
+  }
+}
+```
+
+### Error Responses
+
+**Invalid Status**
+```json
+{
+  "errors": [{ "message": "Cannot start a booking with status: PENDING. Booking must be ACCEPTED first.", "extensions": { "code": "INVALID_BOOKING_STATUS" } }],
+  "data": null
+}
+```
+
+---
+
+## 22. Complete Service
+
+**What this API does:** This API is used when the provider finishes providing the service. It changes the booking status from IN_PROGRESS to COMPLETED and records the completion timestamp. After completion, the customer can leave a review.
+
+**What it returns:** Returns the updated `Booking` object with status set to COMPLETED and completedAt timestamp.
+
+### Request
+
+```graphql
+mutation CompleteService($id: ID!) {
+  completeService(id: $id) {
+    id
+    status
+    completedAt
+    servicePrice
+    totalAmount
+  }
+}
+```
+
+---
+
+## 23. Get Provider Booking Stats
+
+**What this API does:** This API is used for retrieving booking statistics for the provider's dashboard. Shows booking counts by status, total revenue from completed bookings, and completion rate percentage.
+
+**What it returns:** Returns a `BookingStats` object with totalBookings, pendingBookings, completedBookings, cancelledBookings, totalRevenue, and completionRate.
+
+### Request
+
+```graphql
+query ProviderBookingStats {
+  providerBookingStats {
+    totalBookings
+    pendingBookings
+    completedBookings
+    cancelledBookings
+    totalRevenue
+    completionRate
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "providerBookingStats": {
+      "totalBookings": 50,
+      "pendingBookings": 5,
+      "completedBookings": 40,
+      "cancelledBookings": 5,
+      "totalRevenue": 600000,
+      "completionRate": 80
+    }
+  }
+}
+```
+
+---
+
+# Booking Status Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        BOOKING STATUS FLOW                          │
+└─────────────────────────────────────────────────────────────────────┘
+
+  User creates booking
+         │
+         ▼
+    ┌─────────┐
+    │ PENDING │◄─────────────────────────────┐
+    └────┬────┘                              │
+         │                                   │
+    Provider action                    User can cancel
+         │                             (before accept)
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+┌────────┐ ┌──────────┐
+│ACCEPTED│ │ REJECTED │ (end state)
+└───┬────┘ └──────────┘
+    │
+    │ Provider starts
+    ▼
+┌───────────┐
+│IN_PROGRESS│
+└─────┬─────┘
+      │
+      │ Provider completes
+      ▼
+┌───────────┐
+│ COMPLETED │ (end state - customer can review)
+└───────────┘
+
+At any point before COMPLETED:
+┌───────────┐
+│ CANCELLED │ (by user within policy or admin)
+└───────────┘
+```
+
+---
+
 # Error Codes Reference
 
 | Code | HTTP Equivalent | Description | Action |
@@ -937,6 +1631,14 @@ mutation DeleteUser($id: ID!) {
 | `INVALID_OTP` | 400 | Wrong OTP code | Check code |
 | `OTP_EXPIRED` | 400 | OTP expired (10 min) | Request new OTP |
 | `ALREADY_VERIFIED` | 400 | Email already verified | Proceed to login |
+| `SERVICE_NOT_FOUND` | 404 | Service doesn't exist | Check service ID |
+| `SERVICE_NOT_AVAILABLE` | 400 | Service not active | Choose another service |
+| `PROVIDER_NOT_VERIFIED` | 403 | Provider not verified | Choose verified provider |
+| `BOOKING_NOT_FOUND` | 404 | Booking doesn't exist | Check booking ID |
+| `INVALID_BOOKING_TIME` | 400 | Invalid schedule time | Schedule 2h-30d ahead |
+| `INVALID_BOOKING_STATUS` | 400 | Wrong booking status | Check current status |
+| `CANCELLATION_WINDOW_PASSED` | 400 | Too late to cancel | Contact provider |
+| `PROVIDER_NOT_FOUND` | 404 | Provider profile missing | Complete provider setup |
 
 ---
 

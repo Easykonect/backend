@@ -15,6 +15,21 @@
     "Service": {
       "description": "A service offering by a provider."
     },
+    "Booking": {
+      "description": "A service booking made by a user. Contains service details, scheduling info, pricing, and status tracking through the booking lifecycle (PENDING → ACCEPTED → IN_PROGRESS → COMPLETED)."
+    },
+    "Payment": {
+      "description": "Payment record for a booking. Tracks payment status, amount, commission, provider payout, and transaction details."
+    },
+    "Review": {
+      "description": "Customer review for a completed booking. Contains rating (1-5) and optional comment."
+    },
+    "BookingStats": {
+      "description": "Booking statistics summary. For users: totalBookings, pendingBookings, completedBookings, cancelledBookings, totalSpent. For providers: same plus totalRevenue and completionRate."
+    },
+    "PaginatedBookings": {
+      "description": "Paginated booking list with items array and pagination metadata."
+    },
     "AuthResponse": {
       "description": "Response after successful user/provider login with JWT tokens."
     },
@@ -47,8 +62,26 @@
     "me": {
       "description": "══════════════════════════════════════════════════════\n👤 NORMAL USER APIs\n══════════════════════════════════════════════════════\n\n📋 Get Current User Profile\n\n🎯 USE CASE: Call after login to get user data, check session.\n\n🔐 AUTH: Required | 👥 ROLES: SERVICE_USER, SERVICE_PROVIDER"
     },
+    "booking": {
+      "description": "📋 Get Booking by ID\n\n🎯 USE CASE: View booking details, track status.\n\n🔐 AUTH: Required | 👥 ROLES: Booking owner, provider, or admin"
+    },
+    "myBookings": {
+      "description": "📋 Get My Bookings (as customer)\n\n🎯 USE CASE: User booking history, upcoming appointments.\n\n🔐 AUTH: Required | 👥 ROLES: SERVICE_USER, SERVICE_PROVIDER"
+    },
+    "myBookingStats": {
+      "description": "📋 Get My Booking Statistics\n\n🎯 USE CASE: User dashboard stats.\n\n🔐 AUTH: Required | 👥 ROLES: SERVICE_USER, SERVICE_PROVIDER"
+    },
+    "providerBookings": {
+      "description": "══════════════════════════════════════════════════════\n🏪 SERVICE PROVIDER APIs\n══════════════════════════════════════════════════════\n\n📋 Get Provider Bookings\n\n🎯 USE CASE: Provider dashboard, manage incoming bookings.\n\n🔐 AUTH: Required | 👥 ROLES: SERVICE_PROVIDER"
+    },
+    "providerBookingStats": {
+      "description": "📋 Get Provider Booking Statistics\n\n🎯 USE CASE: Provider dashboard stats, revenue tracking.\n\n🔐 AUTH: Required | � ROLES: SERVICE_PROVIDER"
+    },
+    "myServices": {
+      "description": "📋 Get My Services\n\n🎯 USE CASE: Provider service management.\n\n🔐 AUTH: Required | 👥 ROLES: SERVICE_PROVIDER"
+    },
     "categories": {
-      "description": "══════════════════════════════════════════════════════\n📁 PUBLIC APIs\n══════════════════════════════════════════════════════\n\n📋 Get All Categories\n\n🎯 USE CASE: Display categories, populate dropdowns.\n\n🔐 AUTH: Not required | 👥 ROLES: Anyone"
+      "description": "══════════════════════════════════════════════════════\n�📁 PUBLIC APIs\n══════════════════════════════════════════════════════\n\n📋 Get All Categories\n\n🎯 USE CASE: Display categories, populate dropdowns.\n\n🔐 AUTH: Not required | 👥 ROLES: Anyone"
     },
     "category": {
       "description": "📋 Get Category by ID\n\n🔐 AUTH: Not required | 👥 ROLES: Anyone"
@@ -59,14 +92,14 @@
     "service": {
       "description": "📋 Get Service by ID\n\n🔐 AUTH: Not required | 👥 ROLES: Anyone"
     },
-    "myServices": {
-      "description": "══════════════════════════════════════════════════════\n🏪 SERVICE PROVIDER APIs\n══════════════════════════════════════════════════════\n\n📋 Get My Services\n\n🎯 USE CASE: Provider dashboard.\n\n🔐 AUTH: Required | 👥 ROLES: SERVICE_PROVIDER"
-    },
     "user": {
       "description": "══════════════════════════════════════════════════════\n🔐 ADMIN APIs\n══════════════════════════════════════════════════════\n\n📋 Get User by ID\n\n🔐 AUTH: Admin token | 👥 ROLES: ADMIN, SUPER_ADMIN"
     },
     "users": {
       "description": "📋 Get Users List\n\n🔐 AUTH: Admin token | 👥 ROLES: ADMIN, SUPER_ADMIN"
+    },
+    "allBookings": {
+      "description": "📋 Get All Bookings (Admin)\n\n🎯 USE CASE: Admin booking oversight, dispute resolution.\n\n🔐 AUTH: Admin token | 👥 ROLES: ADMIN, SUPER_ADMIN"
     },
     "pendingProviders": {
       "description": "📋 Get Providers Awaiting Verification\n\n🔐 AUTH: Admin token | 👥 ROLES: ADMIN, SUPER_ADMIN"
@@ -75,7 +108,7 @@
       "description": "📋 Get Services Awaiting Approval\n\n🔐 AUTH: Admin token | 👥 ROLES: ADMIN, SUPER_ADMIN"
     },
     "adminMe": {
-      "description": "══════════════════════════════════════════════════════\n👑 SUPER ADMIN APIs\n══════════════════════════════════════════════════════\n\n📋 Get Current Admin Profile\n\n�� AUTH: Admin token | 👥 ROLES: ADMIN, SUPER_ADMIN"
+      "description": "══════════════════════════════════════════════════════\n👑 SUPER ADMIN APIs\n══════════════════════════════════════════════════════\n\n📋 Get Current Admin Profile\n\n🔐 AUTH: Admin token | 👥 ROLES: ADMIN, SUPER_ADMIN"
     },
     "admins": {
       "description": "📋 List All Admins\n\n🔐 AUTH: Super Admin token | 👥 ROLES: SUPER_ADMIN only"
@@ -362,6 +395,58 @@
       "args": {
         "adminId": {"description": "Admin ID to delete", "example": "507f1f77bcf86cd799439011"}
       }
+    },
+    "createBooking": {
+      "description": "📋 CREATE BOOKING\n\n📝 DESCRIPTION:\nCreates a new service booking request. User selects a service, chooses date/time, provides address and notes.\n\n🎯 WHEN TO USE:\n• User wants to book a service\n• After browsing service details\n• Schedule appointment with provider\n\n⚙️ WHAT IT DOES:\n1. Validates service exists and is active\n2. Checks scheduling constraints (min 2 hrs, max 30 days)\n3. Creates booking with PENDING status\n4. Calculates platform commission (10%)\n5. Sends notification to provider\n\n📤 RETURNS:\n• Complete booking object with service and provider details\n• Includes calculated pricing and commission\n\n🔐 AUTHENTICATION: Required (User token)\n👥 ALLOWED ROLES: SERVICE_USER only\n\n💡 FRONTEND IMPLEMENTATION:\n• Date/time picker (min 2 hours from now)\n• Address autocomplete\n• Optional notes textarea\n• Show price breakdown before confirming",
+      "args": {
+        "input": {"description": "CreateBookingInput object", "example": "{ serviceId, scheduledDate, scheduledTime, address, notes }"}
+      }
+    },
+    "updateBooking": {
+      "description": "📋 UPDATE BOOKING\n\n📝 DESCRIPTION:\nUpdates booking details. Only PENDING bookings can be fully modified by users.\n\n🎯 WHEN TO USE:\n• User wants to change booking date/time\n• Update address or notes\n• Modify before provider accepts\n\n⚙️ WHAT IT DOES:\n1. Validates booking exists and belongs to user\n2. Checks booking is in PENDING status\n3. Updates allowed fields\n4. Returns updated booking\n\n📤 RETURNS:\n• Updated booking object\n\n🔐 AUTHENTICATION: Required (User token)\n👥 ALLOWED ROLES: SERVICE_USER (own bookings only)\n\n⚠️ IMPORTANT NOTES:\n• Can only update PENDING bookings\n• Cannot change service after creation\n\n💡 FRONTEND IMPLEMENTATION:\n• Edit button only for PENDING bookings\n• Pre-fill form with current values\n• Show warning about modification limits",
+      "args": {
+        "bookingId": {"description": "Booking ID to update", "example": "507f1f77bcf86cd799439011"},
+        "input": {"description": "UpdateBookingInput object", "example": "{ scheduledDate, scheduledTime, address, notes }"}
+      }
+    },
+    "cancelBooking": {
+      "description": "📋 CANCEL BOOKING (USER)\n\n📝 DESCRIPTION:\nAllows user to cancel their own booking. Free cancellation if within 24 hours of acceptance.\n\n🎯 WHEN TO USE:\n• User changed their mind\n• Can no longer make the appointment\n• Need to reschedule (cancel and rebook)\n\n⚙️ WHAT IT DOES:\n1. Validates booking exists and belongs to user\n2. Checks cancellation eligibility\n3. Changes status to CANCELLED\n4. Records cancellation reason\n5. Notifies provider\n\n📤 RETURNS:\n• Cancelled booking object\n\n🔐 AUTHENTICATION: Required (User token)\n👥 ALLOWED ROLES: SERVICE_USER (own bookings only)\n\n⚠️ IMPORTANT NOTES:\n• Free cancellation within 24 hours of provider acceptance\n• Cannot cancel COMPLETED or already CANCELLED bookings\n\n💡 FRONTEND IMPLEMENTATION:\n• Cancel button with confirmation dialog\n• Reason input field\n• Show cancellation policy",
+      "args": {
+        "bookingId": {"description": "Booking ID to cancel", "example": "507f1f77bcf86cd799439011"},
+        "reason": {"description": "Reason for cancellation", "example": "Schedule conflict"}
+      }
+    },
+    "acceptBooking": {
+      "description": "📋 ACCEPT BOOKING (PROVIDER)\n\n📝 DESCRIPTION:\nProvider accepts a pending booking request, confirming they will perform the service.\n\n🎯 WHEN TO USE:\n• Provider reviews booking and agrees to do it\n• Provider confirms availability for the slot\n\n⚙️ WHAT IT DOES:\n1. Validates booking exists and belongs to provider\n2. Checks booking is in PENDING status\n3. Changes status to ACCEPTED\n4. Records acceptance timestamp\n5. Notifies user of confirmation\n\n📤 RETURNS:\n• Accepted booking object\n\n🔐 AUTHENTICATION: Required (Provider token)\n👥 ALLOWED ROLES: SERVICE_PROVIDER (own service bookings only)\n\n💡 FRONTEND IMPLEMENTATION:\n• Accept button on booking card\n• Show booking details before accepting\n• Update booking list after acceptance",
+      "args": {
+        "bookingId": {"description": "Booking ID to accept", "example": "507f1f77bcf86cd799439011"}
+      }
+    },
+    "rejectBooking": {
+      "description": "📋 REJECT BOOKING (PROVIDER)\n\n📝 DESCRIPTION:\nProvider rejects a pending booking request with a reason.\n\n🎯 WHEN TO USE:\n• Provider is unavailable for the slot\n• Service cannot be provided at the location\n• Other scheduling conflicts\n\n⚙️ WHAT IT DOES:\n1. Validates booking exists and belongs to provider\n2. Checks booking is in PENDING status\n3. Changes status to REJECTED\n4. Records rejection reason\n5. Notifies user with reason\n\n📤 RETURNS:\n• Rejected booking object\n\n🔐 AUTHENTICATION: Required (Provider token)\n👥 ALLOWED ROLES: SERVICE_PROVIDER (own service bookings only)\n\n⚠️ IMPORTANT NOTES:\n• Reason is required for user transparency\n• Excessive rejections may affect provider rating\n\n💡 FRONTEND IMPLEMENTATION:\n• Reject button with reason modal\n• Predefined reason options + custom text\n• Show rejection impact warning",
+      "args": {
+        "bookingId": {"description": "Booking ID to reject", "example": "507f1f77bcf86cd799439011"},
+        "reason": {"description": "Reason for rejection", "example": "Fully booked on this date"}
+      }
+    },
+    "startService": {
+      "description": "📋 START SERVICE (PROVIDER)\n\n📝 DESCRIPTION:\nProvider marks that they have started working on an accepted booking.\n\n🎯 WHEN TO USE:\n• Provider arrives at location\n• Provider begins the service work\n• Mark job as in progress\n\n⚙️ WHAT IT DOES:\n1. Validates booking exists and belongs to provider\n2. Checks booking is in ACCEPTED status\n3. Changes status to IN_PROGRESS\n4. Records start timestamp\n5. Notifies user that work has begun\n\n📤 RETURNS:\n• Updated booking object with IN_PROGRESS status\n\n🔐 AUTHENTICATION: Required (Provider token)\n👥 ALLOWED ROLES: SERVICE_PROVIDER (own service bookings only)\n\n💡 FRONTEND IMPLEMENTATION:\n• 'Start Service' button on accepted bookings\n• Available on scheduled date\n• Show timer after starting",
+      "args": {
+        "bookingId": {"description": "Booking ID to start", "example": "507f1f77bcf86cd799439011"}
+      }
+    },
+    "completeService": {
+      "description": "📋 COMPLETE SERVICE (PROVIDER)\n\n📝 DESCRIPTION:\nProvider marks the service as completed after finishing the work.\n\n🎯 WHEN TO USE:\n• Provider finishes the job\n• Work is completed successfully\n• Ready for user review and payment\n\n⚙️ WHAT IT DOES:\n1. Validates booking exists and belongs to provider\n2. Checks booking is in IN_PROGRESS status\n3. Changes status to COMPLETED\n4. Records completion timestamp\n5. Triggers payment processing\n6. Notifies user to leave review\n\n📤 RETURNS:\n• Completed booking object with final details\n\n🔐 AUTHENTICATION: Required (Provider token)\n👥 ALLOWED ROLES: SERVICE_PROVIDER (own service bookings only)\n\n💡 FRONTEND IMPLEMENTATION:\n• 'Mark Complete' button on in-progress bookings\n• Confirmation dialog\n• Show earnings summary after completion",
+      "args": {
+        "bookingId": {"description": "Booking ID to complete", "example": "507f1f77bcf86cd799439011"}
+      }
+    },
+    "adminCancelBooking": {
+      "description": "📋 CANCEL BOOKING (ADMIN)\n\n📝 DESCRIPTION:\nAdmin forcefully cancels any booking for dispute resolution or policy violations.\n\n🎯 WHEN TO USE:\n• Resolve user/provider disputes\n• Policy violation detected\n• Emergency cancellation needed\n• Fraudulent booking detected\n\n⚙️ WHAT IT DOES:\n1. Validates booking exists\n2. Changes status to CANCELLED\n3. Records admin cancellation reason\n4. Notifies both user and provider\n5. May trigger refund process\n\n📤 RETURNS:\n• Cancelled booking object\n\n🔐 AUTHENTICATION: Required (Admin token)\n👥 ALLOWED ROLES: ADMIN, SUPER_ADMIN\n\n⚠️ IMPORTANT NOTES:\n• Can cancel bookings in any status\n• Action is logged for audit trail\n• Both parties are notified\n\n💡 FRONTEND IMPLEMENTATION:\n• Admin cancel button on any booking\n• Reason is required\n• Audit log display",
+      "args": {
+        "bookingId": {"description": "Booking ID to cancel", "example": "507f1f77bcf86cd799439011"},
+        "reason": {"description": "Admin reason for cancellation", "example": "Policy violation - duplicate booking"}
+      }
     }
   },
   "INPUT_OBJECT": {
@@ -382,7 +467,10 @@
     "CreateAdminInput": {"description": "New admin details"},
     "CreateCategoryInput": {"description": "New category details"},
     "UpdateCategoryInput": {"description": "Category update fields"},
-    "PaginationInput": {"description": "Pagination options (page, limit)"}
+    "PaginationInput": {"description": "Pagination options (page, limit)"},
+    "CreateBookingInput": {"description": "New booking request - serviceId (required), scheduledDate (required), scheduledTime (required), address (required), notes (optional)"},
+    "UpdateBookingInput": {"description": "Booking update fields - scheduledDate, scheduledTime, address, notes (all optional)"},
+    "BookingFiltersInput": {"description": "Booking search filters - status, startDate, endDate, serviceId, providerId, userId"}
   },
   "ENUM": {
     "UserRole": {
@@ -420,6 +508,27 @@
         "ACTIVE": {"description": "Visible"},
         "INACTIVE": {"description": "Provider hidden"},
         "SUSPENDED": {"description": "Admin blocked"}
+      }
+    },
+    "BookingStatus": {
+      "description": "Booking lifecycle states",
+      "values": {
+        "PENDING": {"description": "Awaiting provider response"},
+        "ACCEPTED": {"description": "Provider confirmed, scheduled"},
+        "REJECTED": {"description": "Provider declined"},
+        "IN_PROGRESS": {"description": "Service being performed"},
+        "COMPLETED": {"description": "Service finished"},
+        "CANCELLED": {"description": "User or admin cancelled"},
+        "DISPUTED": {"description": "Issue raised, under review"}
+      }
+    },
+    "PaymentStatus": {
+      "description": "Payment processing states",
+      "values": {
+        "PENDING": {"description": "Awaiting payment"},
+        "COMPLETED": {"description": "Payment successful"},
+        "FAILED": {"description": "Payment failed"},
+        "REFUNDED": {"description": "Payment refunded"}
       }
     }
   }

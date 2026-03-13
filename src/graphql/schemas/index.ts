@@ -115,6 +115,70 @@ export const typeDefs = gql`
     updatedAt: String!
   }
 
+  # Booking
+  type Booking {
+    id: ID!
+    user: User!
+    provider: ServiceProviderProfile!
+    service: Service!
+    status: BookingStatus!
+    scheduledDate: String!
+    scheduledTime: String!
+    address: String!
+    city: String!
+    state: String!
+    notes: String
+    servicePrice: Float!
+    commission: Float!
+    totalAmount: Float!
+    payment: Payment
+    review: Review
+    completedAt: String
+    cancelledAt: String
+    cancellationReason: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Payment
+  type Payment {
+    id: ID!
+    bookingId: ID!
+    amount: Float!
+    commission: Float!
+    providerPayout: Float!
+    status: PaymentStatus!
+    paymentMethod: String
+    transactionRef: String
+    paidAt: String
+    refundedAt: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Review
+  type Review {
+    id: ID!
+    bookingId: ID!
+    user: User!
+    provider: ServiceProviderProfile!
+    rating: Int!
+    comment: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Booking Statistics
+  type BookingStats {
+    totalBookings: Int!
+    pendingBookings: Int!
+    completedBookings: Int!
+    cancelledBookings: Int!
+    totalRevenue: Float
+    totalSpent: Float
+    completionRate: Float
+  }
+
   # User - unified for SERVICE_USER and SERVICE_PROVIDER
   type User {
     id: ID!
@@ -221,6 +285,16 @@ export const typeDefs = gql`
 
   type PaginatedCategories {
     items: [ServiceCategory!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  type PaginatedBookings {
+    items: [Booking!]!
     total: Int!
     page: Int!
     limit: Int!
@@ -338,6 +412,35 @@ export const typeDefs = gql`
   }
 
   # ==================
+  # Input Types - Booking Management
+  # ==================
+
+  input CreateBookingInput {
+    serviceId: ID!
+    scheduledDate: String!
+    scheduledTime: String!
+    address: String!
+    city: String!
+    state: String!
+    notes: String
+  }
+
+  input UpdateBookingInput {
+    scheduledDate: String
+    scheduledTime: String
+    address: String
+    city: String
+    state: String
+    notes: String
+  }
+
+  input BookingFiltersInput {
+    status: BookingStatus
+    startDate: String
+    endDate: String
+  }
+
+  # ==================
   # Input Types - Admin (Separate)
   # ==================
 
@@ -445,6 +548,28 @@ export const typeDefs = gql`
     
     # Get services pending approval (Admin)
     pendingServices(pagination: PaginationInput): PaginatedServices!
+
+    # ==================
+    # Booking Queries
+    # ==================
+    
+    # Get booking by ID
+    booking(id: ID!): Booking
+    
+    # Get user's bookings (as customer)
+    myBookings(filters: BookingFiltersInput, pagination: PaginationInput): PaginatedBookings!
+    
+    # Get provider's bookings
+    providerBookings(filters: BookingFiltersInput, pagination: PaginationInput): PaginatedBookings!
+    
+    # Get user's booking statistics
+    myBookingStats: BookingStats!
+    
+    # Get provider's booking statistics
+    providerBookingStats: BookingStats!
+    
+    # Get all bookings (Admin only)
+    allBookings(filters: BookingFiltersInput, pagination: PaginationInput): PaginatedBookings!
   }
 
   # ==================
@@ -517,6 +642,42 @@ export const typeDefs = gql`
     
     # Submit service for approval
     submitServiceForApproval(id: ID!): Service!
+
+    # ==================
+    # Booking Management (User)
+    # ==================
+    
+    # Create a new booking (USER only)
+    createBooking(input: CreateBookingInput!): Booking!
+    
+    # Update a pending booking (USER only)
+    updateBooking(id: ID!, input: UpdateBookingInput!): Booking!
+    
+    # Cancel a booking (USER only)
+    cancelBooking(id: ID!, reason: String!): Booking!
+
+    # ==================
+    # Booking Management (Provider)
+    # ==================
+    
+    # Accept a booking (PROVIDER only)
+    acceptBooking(id: ID!): Booking!
+    
+    # Reject a booking (PROVIDER only)
+    rejectBooking(id: ID!, reason: String!): Booking!
+    
+    # Start service - marks booking as IN_PROGRESS (PROVIDER only)
+    startService(id: ID!): Booking!
+    
+    # Complete service - marks booking as COMPLETED (PROVIDER only)
+    completeService(id: ID!): Booking!
+
+    # ==================
+    # Booking Management (Admin)
+    # ==================
+    
+    # Admin cancel any booking
+    adminCancelBooking(id: ID!, reason: String!): Booking!
 
     # ==================
     # Admin Auth (Separate - Different Endpoints)

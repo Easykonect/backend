@@ -14,3 +14,6 @@ export * from './admin.service';
 // Service & Category Management
 export * from './service.service';
 export * from './category.service';
+
+// Booking System
+export * from './booking.service';
