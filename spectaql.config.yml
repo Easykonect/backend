@@ -33,29 +33,89 @@ info:
     # Welcome to EasyKonnect API
     
     EasyKonnect is a professional service marketplace platform connecting service users 
-    with verified service providers.
+    with verified service providers in Nigeria.
     
     ## Overview
     
-    This API provides endpoints for:
-    - **Authentication**: User registration, login, email verification, password reset
-    - **User Management**: Profile management, user administration
-    - **Services**: Service listing, search, and management (coming soon)
-    - **Bookings**: Service booking and scheduling (coming soon)
-    - **Payments**: Secure payment processing (coming soon)
-    - **Reviews**: Rating and review system (coming soon)
+    This API provides comprehensive endpoints for:
+    
+    ### 🔐 Authentication & Authorization
+    - User registration with email verification (6-digit OTP)
+    - JWT-based authentication with access/refresh tokens
+    - Role-based access control (SERVICE_USER, SERVICE_PROVIDER, ADMIN, SUPER_ADMIN)
+    - Password reset with secure OTP flow
+    - Account lockout protection (5 failed attempts = 30-minute lockout)
+    
+    ### 👤 User Management
+    - Profile management and updates
+    - Profile photo uploads via Cloudinary
+    - Become a service provider (role upgrade)
+    
+    ### 🏪 Service Provider Features
+    - Provider verification workflow (submit documents → admin review)
+    - Business profile management
+    - Service creation and management
+    - Booking management (accept/reject/complete)
+    - Revenue tracking and payouts
+    
+    ### 📋 Services & Categories
+    - Service listing with pagination and filtering
+    - Category-based organization
+    - Service search by location, category, price
+    - Service status management (DRAFT, ACTIVE, INACTIVE)
+    
+    ### 📅 Bookings
+    - Create bookings with scheduled date/time
+    - Booking status workflow (PENDING → ACCEPTED → IN_PROGRESS → COMPLETED)
+    - Booking cancellation with reasons
+    - Provider/User booking history
+    
+    ### ⭐ Reviews & Ratings
+    - Post-completion reviews (1-5 stars)
+    - Provider response to reviews
+    - Rating statistics and averages
+    
+    ### ❤️ Favourites
+    - Save favourite services
+    - Favourite management
+    
+    ### ⚖️ Disputes
+    - Raise disputes on completed bookings
+    - Evidence upload support
+    - Admin resolution workflow
+    
+    ### 💬 Real-time Messaging
+    - WebSocket-based messaging (Socket.io)
+    - Conversation management
+    - Message read receipts
+    - Typing indicators
+    
+    ### 🔔 Notifications
+    - In-app notifications
+    - Real-time push via WebSocket
+    - Notification preferences
+    
+    ### 👨‍💼 Admin Features
+    - User management (suspend/activate)
+    - Provider verification approval
+    - Service moderation
+    - Dispute resolution
+    - Platform analytics
     
     ## Authentication
     
-    Most API operations require authentication. The API uses **JWT (JSON Web Tokens)** 
-    for authentication.
+    The API uses **JWT (JSON Web Tokens)** for authentication with a dual-token system:
+    
+    | Token | Expiry | Purpose |
+    |-------|--------|---------|
+    | Access Token | 7 days | API authentication |
+    | Refresh Token | 30 days | Token renewal |
     
     ### Getting Started
     
-    1. **Register** a new account using the `register` mutation
-    2. **Verify** your email with the 6-digit OTP sent to your email
-    3. **Login** to receive your access and refresh tokens
-    4. Include the access token in the `Authorization` header:
+    1. **Register** using the `register` mutation
+    2. **Verify Email** with 6-digit OTP sent to your email
+    3. **Use Tokens** - Include access token in Authorization header:
     
     ```
     Authorization: Bearer <your_access_token>
@@ -63,13 +123,34 @@ info:
     
     ### Token Refresh
     
-    Access tokens expire after 7 days. Use the `refreshToken` mutation to get a new 
-    access token without re-authenticating.
+    Use `refreshToken` mutation when access token expires to get new tokens.
+    
+    ## Security Features
+    
+    - 🔒 Password hashing with bcrypt (12 rounds)
+    - 🔒 OTP hashing with SHA-256 (timing-safe comparison)
+    - 🔒 Rate limiting per user/IP
+    - 🔒 Query depth limiting (max 10 levels)
+    - 🔒 Request body size limit (1MB)
+    - 🔒 Refresh token invalidation on logout
+    - 🔒 Account lockout after failed attempts
+    
+    ## Rate Limits
+    
+    | Operation | Limit |
+    |-----------|-------|
+    | General API | 100 requests / 15 minutes |
+    | Login | 10 attempts / 15 minutes |
+    | Authentication | 5 attempts / minute |
+    | OTP Verification | 5 attempts / 5 minutes |
+    | Password Reset | 3 attempts / hour |
+    | File Uploads | 20 / minute |
+    | Messaging | 60 messages / minute |
     
     ## Error Handling
     
-    The API uses GraphQL errors with custom error codes. All errors include:
-    - `message`: Human-readable error description
+    All errors include:
+    - `message`: Human-readable description
     - `extensions.code`: Machine-readable error code
     
     ### Common Error Codes
@@ -77,26 +158,35 @@ info:
     | Code | Description |
     |------|-------------|
     | `UNAUTHENTICATED` | Missing or invalid authentication token |
-    | `UNAUTHORIZED` | Insufficient permissions for this operation |
-    | `USER_NOT_FOUND` | The specified user does not exist |
-    | `USER_ALREADY_EXISTS` | Email is already registered |
+    | `UNAUTHORIZED` | Insufficient permissions |
+    | `USER_NOT_FOUND` | User does not exist |
+    | `USER_ALREADY_EXISTS` | Email already registered |
     | `INVALID_CREDENTIALS` | Wrong email or password |
-    | `EMAIL_NOT_VERIFIED` | Email verification required before login |
-    | `ACCOUNT_LOCKED` | Too many failed login attempts |
-    | `OTP_EXPIRED` | Verification code has expired |
-    | `INVALID_OTP` | Verification code is incorrect |
+    | `EMAIL_NOT_VERIFIED` | Verification required |
+    | `ACCOUNT_LOCKED` | Too many failed attempts |
+    | `OTP_EXPIRED` | Verification code expired |
+    | `INVALID_OTP` | Incorrect verification code |
+    | `RATE_LIMITED` | Too many requests |
+    | `VALIDATION_ERROR` | Invalid input data |
     
-    ## Rate Limiting
+    ## WebSocket Events
     
-    To protect against abuse, the API implements rate limiting:
-    - **Login attempts**: 5 failed attempts result in 30-minute lockout
-    - **OTP requests**: Maximum 3 attempts before requesting new code
+    Connect to WebSocket at the same base URL for real-time features:
+    
+    | Event | Description |
+    |-------|-------------|
+    | `newMessage` | New message received |
+    | `messageRead` | Message marked as read |
+    | `typing` | User is typing |
+    | `notification` | New notification |
+    | `userOnline` | User came online |
+    | `userOffline` | User went offline |
     
     ## Contact & Support
     
-    For API support, please contact: api-support@easykonect.com
+    For API support: api-support@easykonect.com
     
-  version: 1.0.0
+  version: 2.0.0
   contact:
     name: EasyKonnect API Support
     email: api-support@easykonect.com
@@ -109,10 +199,9 @@ servers:
   - url: http://localhost:3000/api/graphql
     description: Local Development Server
     production: false
-  # Uncomment when deployed
-  # - url: https://api.easykonect.com/graphql
-  #   description: Production Server
-  #   production: true
+  - url: https://backend-ehtm.onrender.com/api/graphql
+    description: Production Server
+    production: true
 
 # Extensions for additional documentation features
 extensions:

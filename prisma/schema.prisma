@@ -61,6 +61,22 @@ enum ServiceStatus {
   SUSPENDED
 }
 
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  CLOSED
+}
+
+enum DisputeResolution {
+  REFUND_FULL
+  REFUND_PARTIAL
+  NO_REFUND
+  REDO_SERVICE
+  MUTUAL_AGREEMENT
+  DISMISSED
+}
+
 // ==================
 // Models
 // ==================
@@ -72,7 +88,9 @@ model User {
   firstName String
   lastName  String
   phone     String?
+  profilePhoto String?    // Cloudinary URL for profile photo
   role      UserRole      @default(SERVICE_USER)
+  activeRole UserRole?    // Current active mode (null = same as role, allows toggling for providers)
   status    AccountStatus @default(PENDING)
 
   // Email verification
@@ -96,6 +114,7 @@ model User {
   // Relations
   bookingsAsUser Booking[] @relation("UserBookings")
   reviews        Review[]  @relation("UserReviews")
+  favourites     Favourite[] @relation("UserFavourites")
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -167,11 +186,16 @@ model Service {
   images      String[]
   
   bookings    Booking[]
+  favourites  Favourite[] @relation("ServiceFavourites")
   
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
 
+  // Indexes for common queries
   @@unique([providerId, slug])
+  @@index([status])
+  @@index([categoryId, status])
+  @@index([providerId, status])
   @@map("services")
 }
 
@@ -205,6 +229,9 @@ model Booking {
   // Review
   review        Review?
   
+  // Dispute
+  dispute       Dispute?
+  
   completedAt   DateTime?
   cancelledAt   DateTime?
   cancellationReason String?
@@ -212,6 +239,11 @@ model Booking {
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
 
+  // Indexes for common queries
+  @@index([userId, status])
+  @@index([providerId, status])
+  @@index([status, scheduledDate])
+  @@index([scheduledDate])
   @@map("bookings")
 }
 
@@ -257,6 +289,204 @@ model Review {
   updatedAt   DateTime        @updatedAt
 
   @@map("reviews")
+}
+
+model Favourite {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  user      User     @relation("UserFavourites", fields: [userId], references: [id], onDelete: Cascade)
+  serviceId String   @db.ObjectId
+  service   Service  @relation("ServiceFavourites", fields: [serviceId], references: [id], onDelete: Cascade)
+  
+  createdAt DateTime @default(now())
+
+  // Ensure a user can only favourite a service once
+  @@unique([userId, serviceId])
+  @@map("favourites")
+}
+
+model Dispute {
+  id            String           @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId     String           @unique @db.ObjectId
+  booking       Booking          @relation(fields: [bookingId], references: [id])
+  
+  // Who raised the dispute
+  raisedById    String           @db.ObjectId
+  raisedByRole  UserRole         // SERVICE_USER or SERVICE_PROVIDER
+  
+  // Dispute details
+  reason        String
+  description   String
+  evidence      String[]         // URLs to uploaded evidence (images, documents)
+  
+  status        DisputeStatus    @default(OPEN)
+  
+  // Resolution (filled when resolved)
+  resolution      DisputeResolution?
+  resolutionNotes String?
+  resolvedById    String?          @db.ObjectId
+  resolvedAt      DateTime?
+  
+  // Refund amount if applicable
+  refundAmount    Float?
+  
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@map("disputes")
+}
+
+// ==================
+// Messaging & Notifications
+// ==================
+
+enum ConversationType {
+  USER_PROVIDER       // User chatting with Service Provider (about bookings)
+  USER_ADMIN          // User/Provider support chat with Admin
+  ADMIN_SUPERADMIN    // Admin chatting with Super Admin
+  BOOKING_RELATED     // Chat tied to a specific booking
+}
+
+enum MessageStatus {
+  SENT
+  DELIVERED
+  READ
+}
+
+enum NotificationType {
+  // Booking notifications
+  BOOKING_CREATED
+  BOOKING_ACCEPTED
+  BOOKING_REJECTED
+  BOOKING_CANCELLED
+  BOOKING_STARTED
+  BOOKING_COMPLETED
+  
+  // Payment notifications
+  PAYMENT_RECEIVED
+  PAYMENT_FAILED
+  REFUND_PROCESSED
+  
+  // Review notifications
+  REVIEW_RECEIVED
+  REVIEW_RESPONSE
+  
+  // Provider notifications
+  VERIFICATION_APPROVED
+  VERIFICATION_REJECTED
+  SERVICE_APPROVED
+  SERVICE_REJECTED
+  SERVICE_SUSPENDED
+  
+  // Dispute notifications
+  DISPUTE_OPENED
+  DISPUTE_UPDATED
+  DISPUTE_RESOLVED
+  
+  // Message notifications
+  NEW_MESSAGE
+  
+  // System notifications
+  ACCOUNT_SUSPENDED
+  ACCOUNT_ACTIVATED
+  SYSTEM_ANNOUNCEMENT
+}
+
+model Conversation {
+  id              String           @id @default(auto()) @map("_id") @db.ObjectId
+  type            ConversationType
+  
+  // Participants (store user IDs)
+  participantIds  String[]         @db.ObjectId
+  
+  // Optional: Link to booking for booking-related chats
+  bookingId       String?          @db.ObjectId
+  
+  // For support chats - subject/topic
+  subject         String?
+  
+  // Track if conversation is active or archived
+  isActive        Boolean          @default(true)
+  
+  // Last message info for quick display
+  lastMessageAt   DateTime?
+  lastMessageText String?
+  
+  // Messages in this conversation
+  messages        Message[]
+  
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@map("conversations")
+}
+
+model Message {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  conversationId  String        @db.ObjectId
+  conversation    Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  
+  // Sender info
+  senderId        String        @db.ObjectId
+  senderRole      UserRole      // To identify if sender is user, provider, admin, etc.
+  
+  // Message content
+  content         String
+  
+  // Attachments (images, files)
+  attachments     String[]
+  
+  // Message status
+  status          MessageStatus @default(SENT)
+  
+  // Read receipts - store IDs of users who have read
+  readBy          String[]      @db.ObjectId
+  readAt          DateTime?
+  
+  // For replies/threading
+  replyToId       String?       @db.ObjectId
+  
+  // Soft delete
+  isDeleted       Boolean       @default(false)
+  deletedAt       DateTime?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@map("messages")
+}
+
+model Notification {
+  id          String           @id @default(auto()) @map("_id") @db.ObjectId
+  
+  // Recipient
+  userId      String           @db.ObjectId
+  
+  // Notification details
+  type        NotificationType
+  title       String
+  message     String
+  
+  // Related entity (booking, review, dispute, etc.)
+  entityType  String?          // "booking", "review", "dispute", "message", etc.
+  entityId    String?          @db.ObjectId
+  
+  // Additional data as JSON string
+  metadata    String?
+  
+  // Status
+  isRead      Boolean          @default(false)
+  readAt      DateTime?
+  
+  // For push notifications
+  isPushed    Boolean          @default(false)
+  pushedAt    DateTime?
+  
+  createdAt   DateTime         @default(now())
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@map("notifications")
 }
 
 

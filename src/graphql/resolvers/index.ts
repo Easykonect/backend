@@ -7,6 +7,8 @@
  * - SEPARATE: Admin and Super Admin have their own auth APIs
  */
 
+import prisma from '@/lib/prisma';
+
 import {
   registerUser,
   loginUser,
@@ -18,6 +20,7 @@ import {
   refreshAccessToken,
   getClientIp,
   changePassword,
+  logout,
 } from '@/services/auth.service';
 
 import {
@@ -35,6 +38,10 @@ import {
   getPendingProviders,
   approveProvider,
   rejectProvider,
+  submitForVerification,
+  getVerificationStatus,
+  switchActiveRole,
+  getActiveRole,
 } from '@/services/provider.service';
 
 import {
@@ -54,6 +61,7 @@ import {
   deleteAdmin,
   suspendUser,
   activateUser,
+  adminLogout,
 } from '@/services/admin.service';
 
 import {
@@ -94,6 +102,80 @@ import {
   getProviderBookingStats,
   getUserBookingStats,
 } from '@/services/booking.service';
+
+import {
+  createReview,
+  respondToReview,
+  getReviewById,
+  getProviderReviews,
+  getUserReviews,
+  getProviderRatingStats,
+  getServiceReviews,
+  deleteReview,
+  updateReview,
+  canReviewBooking,
+} from '@/services/review.service';
+
+import {
+  addFavourite,
+  removeFavourite,
+  getUserFavourites,
+  isFavourited,
+  getFavouriteById,
+  toggleFavourite,
+  getServiceFavouriteCount,
+} from '@/services/favourite.service';
+
+import {
+  createDispute,
+  getDisputeById,
+  getBookingDispute,
+  getMyDisputes,
+  getAllDisputes,
+  getOpenDisputesCount,
+  takeDisputeUnderReview,
+  resolveDispute,
+  addDisputeEvidence,
+  closeDispute,
+  getDisputeStats,
+} from '@/services/dispute.service';
+
+import {
+  uploadProfilePhoto,
+  removeProfilePhoto,
+  uploadServiceImages,
+  removeServiceImage,
+  uploadProviderDocuments,
+  removeProviderDocument,
+  generateSignedUploadParams,
+  getUploadStats,
+} from '@/services/upload.service';
+
+import {
+  createOrGetConversation,
+  getConversationById,
+  getMyConversations,
+  archiveConversation,
+  sendMessage,
+  getConversationMessages,
+  markMessagesAsRead,
+  deleteMessage,
+  getUnreadMessageCount,
+  startSupportConversation,
+  getBookingConversation,
+} from '@/services/messaging.service';
+
+import {
+  getNotificationById,
+  getMyNotifications,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+  deleteNotification,
+  deleteReadNotifications,
+  getUnreadNotificationCount,
+  getNotificationStats,
+  sendSystemAnnouncement,
+} from '@/services/notification.service';
 
 import { requireAuth, requireRole, requireAnyRole, type GraphQLContext } from '@/middleware';
 import { UserRole, ServiceStatus, type ServiceStatusType } from '@/constants';
@@ -207,6 +289,113 @@ export const resolvers = {
       requireRole(context, UserRole.SERVICE_PROVIDER);
       const { page = 1, limit = 20 } = args.pagination || {};
       return getMyServices(user.userId, { page, limit });
+    },
+
+    /**
+     * Get provider verification status
+     */
+    myVerificationStatus: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      requireRole(context, UserRole.SERVICE_PROVIDER);
+      return getVerificationStatus(user.userId);
+    },
+
+    /**
+     * Get current active role status (for role switching)
+     */
+    myActiveRole: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getActiveRole(user.userId);
+    },
+
+    // ==================
+    // Review Queries
+    // ==================
+
+    /**
+     * Get review by ID
+     */
+    review: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      return getReviewById(args.id);
+    },
+
+    /**
+     * Get reviews for a provider
+     */
+    providerReviews: async (
+      _: unknown,
+      args: {
+        providerId: string;
+        filters?: { rating?: number; hasResponse?: boolean };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      const { page = 1, limit = 10 } = args.pagination || {};
+      return getProviderReviews(args.providerId, args.filters || {}, { page, limit });
+    },
+
+    /**
+     * Get reviews for a service
+     */
+    serviceReviews: async (
+      _: unknown,
+      args: {
+        serviceId: string;
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      const { page = 1, limit = 10 } = args.pagination || {};
+      return getServiceReviews(args.serviceId, { page, limit });
+    },
+
+    /**
+     * Get my reviews (reviews I've written)
+     */
+    myReviews: async (
+      _: unknown,
+      args: { pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      const { page = 1, limit = 10 } = args.pagination || {};
+      return getUserReviews(user.userId, { page, limit });
+    },
+
+    /**
+     * Get provider's rating statistics
+     */
+    providerRating: async (
+      _: unknown,
+      args: { providerId: string },
+      context: GraphQLContext
+    ) => {
+      return getProviderRatingStats(args.providerId);
+    },
+
+    /**
+     * Check if user can review a booking
+     */
+    canReviewBooking: async (
+      _: unknown,
+      args: { bookingId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return canReviewBooking(user.userId, args.bookingId);
     },
 
     // ==================
@@ -357,6 +546,326 @@ export const resolvers = {
       const { page = 1, limit = 10 } = args.pagination || {};
       return getAllBookings(args.filters || {}, { page, limit });
     },
+
+    // ==================
+    // Favourite Queries
+    // ==================
+
+    /**
+     * Get user's favourite services
+     */
+    myFavourites: async (
+      _: unknown,
+      args: { pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      const { page = 1, limit = 10 } = args.pagination || {};
+      return getUserFavourites(user.userId, { page, limit });
+    },
+
+    /**
+     * Get a specific favourite by ID
+     */
+    favourite: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getFavouriteById(user.userId, args.id);
+    },
+
+    /**
+     * Check if a service is favourited by the user
+     */
+    isFavourited: async (
+      _: unknown,
+      args: { serviceId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return isFavourited(user.userId, args.serviceId);
+    },
+
+    /**
+     * Get favourite count for a service (public)
+     */
+    serviceFavouriteCount: async (
+      _: unknown,
+      args: { serviceId: string }
+    ) => {
+      return getServiceFavouriteCount(args.serviceId);
+    },
+
+    // ==================
+    // Dispute Queries
+    // ==================
+
+    /**
+     * Get dispute by ID
+     */
+    dispute: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      const isAdmin = user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN;
+      return getDisputeById(args.id, user.userId, isAdmin);
+    },
+
+    /**
+     * Get dispute for a booking
+     */
+    bookingDispute: async (
+      _: unknown,
+      args: { bookingId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      const isAdmin = user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN;
+      return getBookingDispute(args.bookingId, user.userId, isAdmin);
+    },
+
+    /**
+     * Get user's disputes
+     */
+    myDisputes: async (
+      _: unknown,
+      args: {
+        filters?: { status?: string; raisedByRole?: string };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      const { page = 1, limit = 10 } = args.pagination || {};
+      return getMyDisputes(user.userId, args.filters || {}, { page, limit });
+    },
+
+    /**
+     * Get all disputes (Admin only)
+     */
+    allDisputes: async (
+      _: unknown,
+      args: {
+        filters?: { status?: string; raisedByRole?: string };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      const { page = 1, limit = 10 } = args.pagination || {};
+      return getAllDisputes(args.filters || {}, { page, limit });
+    },
+
+    /**
+     * Get open disputes count (Admin dashboard)
+     */
+    openDisputesCount: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getOpenDisputesCount();
+    },
+
+    /**
+     * Get dispute statistics (Admin dashboard)
+     */
+    disputeStats: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getDisputeStats();
+    },
+
+    // ==================
+    // Upload Queries
+    // ==================
+
+    /**
+     * Get signed upload parameters for profile photo
+     */
+    getProfileUploadParams: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return generateSignedUploadParams('profile', user.userId);
+    },
+
+    /**
+     * Get signed upload parameters for service images
+     */
+    getServiceUploadParams: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      return generateSignedUploadParams('service', user.userId);
+    },
+
+    /**
+     * Get signed upload parameters for documents
+     */
+    getDocumentUploadParams: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      return generateSignedUploadParams('document', user.userId);
+    },
+
+    /**
+     * Get signed upload parameters for dispute evidence
+     */
+    getEvidenceUploadParams: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return generateSignedUploadParams('evidence', user.userId);
+    },
+
+    /**
+     * Get upload statistics (Admin)
+     */
+    uploadStats: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getUploadStats();
+    },
+
+    // ==================
+    // Messaging Queries
+    // ==================
+
+    /**
+     * Get user's conversations
+     */
+    myConversations: async (
+      _: unknown,
+      args: { pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getMyConversations(user.userId, args.pagination);
+    },
+
+    /**
+     * Get conversation by ID
+     */
+    conversation: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getConversationById(user.userId, args.id);
+    },
+
+    /**
+     * Get messages in a conversation
+     */
+    conversationMessages: async (
+      _: unknown,
+      args: { conversationId: string; pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getConversationMessages(user.userId, args.conversationId, args.pagination);
+    },
+
+    /**
+     * Get unread message count
+     */
+    unreadMessageCount: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getUnreadMessageCount(user.userId);
+    },
+
+    /**
+     * Get booking conversation
+     */
+    bookingConversation: async (
+      _: unknown,
+      args: { bookingId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getBookingConversation(user.userId, user.role, args.bookingId);
+    },
+
+    // ==================
+    // Notification Queries
+    // ==================
+
+    /**
+     * Get user's notifications
+     */
+    myNotifications: async (
+      _: unknown,
+      args: {
+        filters?: { type?: string; isRead?: boolean };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getMyNotifications(user.userId, args.filters, args.pagination);
+    },
+
+    /**
+     * Get notification by ID
+     */
+    notification: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getNotificationById(user.userId, args.id);
+    },
+
+    /**
+     * Get unread notification count
+     */
+    unreadNotificationCount: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getUnreadNotificationCount(user.userId);
+    },
+
+    /**
+     * Get notification statistics
+     */
+    notificationStats: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getNotificationStats(user.userId);
+    },
   },
 
   Mutation: {
@@ -457,13 +966,13 @@ export const resolvers = {
     /**
      * Logout
      */
-    logout: async (_: unknown, __: unknown, context: GraphQLContext) => {
+    logout: async (
+      _: unknown, 
+      args: { refreshToken?: string }, 
+      context: GraphQLContext
+    ) => {
       requireAuth(context);
-      // TODO: Invalidate refresh token in database/cache
-      return {
-        success: true,
-        message: 'Logged out successfully',
-      };
+      return logout(args.refreshToken);
     },
 
     // ==================
@@ -545,6 +1054,32 @@ export const resolvers = {
       const user = requireAuth(context);
       requireRole(context, UserRole.SERVICE_PROVIDER);
       return updateProviderProfile(user.userId, args.input);
+    },
+
+    /**
+     * Submit provider profile for verification
+     */
+    submitProviderForVerification: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      requireRole(context, UserRole.SERVICE_PROVIDER);
+      return submitForVerification(user.userId);
+    },
+
+    /**
+     * Switch between SERVICE_USER and SERVICE_PROVIDER mode
+     * Only available for users who have a provider profile
+     */
+    switchActiveRole: async (
+      _: unknown,
+      args: { targetRole: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return switchActiveRole(user.userId, args.targetRole);
     },
 
     // ==================
@@ -760,6 +1295,473 @@ export const resolvers = {
     },
 
     // ==================
+    // Review Management
+    // ==================
+
+    /**
+     * Create a review for a completed booking
+     */
+    createReview: async (
+      _: unknown,
+      args: { input: { bookingId: string; rating: number; comment?: string } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return createReview(user.userId, args.input);
+    },
+
+    /**
+     * Update own review within 24 hours
+     */
+    updateReview: async (
+      _: unknown,
+      args: { id: string; input: { rating?: number; comment?: string } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return updateReview(user.userId, args.id, args.input);
+    },
+
+    /**
+     * Provider responds to a review
+     */
+    respondToReview: async (
+      _: unknown,
+      args: { reviewId: string; response: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      requireRole(context, UserRole.SERVICE_PROVIDER);
+      
+      // Get provider ID
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      
+      return respondToReview(provider.id, args.reviewId, args.response);
+    },
+
+    /**
+     * Delete a review (Admin only)
+     */
+    deleteReview: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return deleteReview(args.id);
+    },
+
+    // ==================
+    // Favourite Management
+    // ==================
+
+    /**
+     * Add a service to favourites
+     */
+    addFavourite: async (
+      _: unknown,
+      args: { serviceId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return addFavourite(user.userId, args.serviceId);
+    },
+
+    /**
+     * Remove a service from favourites
+     */
+    removeFavourite: async (
+      _: unknown,
+      args: { serviceId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return removeFavourite(user.userId, args.serviceId);
+    },
+
+    /**
+     * Toggle favourite status
+     */
+    toggleFavourite: async (
+      _: unknown,
+      args: { serviceId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return toggleFavourite(user.userId, args.serviceId);
+    },
+
+    // ==================
+    // Dispute Management
+    // ==================
+
+    /**
+     * Create a dispute for a booking
+     */
+    createDispute: async (
+      _: unknown,
+      args: {
+        input: {
+          bookingId: string;
+          reason: string;
+          description: string;
+          evidence?: string[];
+        };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return createDispute(user.userId, user.role, args.input);
+    },
+
+    /**
+     * Add evidence to a dispute
+     */
+    addDisputeEvidence: async (
+      _: unknown,
+      args: { disputeId: string; evidence: string[] },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return addDisputeEvidence(args.disputeId, user.userId, args.evidence);
+    },
+
+    /**
+     * Take dispute under review (Admin only)
+     */
+    takeDisputeUnderReview: async (
+      _: unknown,
+      args: { disputeId: string },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return takeDisputeUnderReview(args.disputeId, admin.userId);
+    },
+
+    /**
+     * Resolve a dispute (Admin only)
+     */
+    resolveDispute: async (
+      _: unknown,
+      args: {
+        disputeId: string;
+        input: {
+          resolution: string;
+          resolutionNotes: string;
+          refundAmount?: number;
+        };
+      },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return resolveDispute(args.disputeId, admin.userId, args.input);
+    },
+
+    /**
+     * Close a dispute without resolution (Admin only)
+     */
+    closeDispute: async (
+      _: unknown,
+      args: { disputeId: string; reason: string },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return closeDispute(args.disputeId, admin.userId, args.reason);
+    },
+
+    // ==================
+    // File Upload Management (User)
+    // ==================
+
+    /**
+     * Upload profile photo
+     */
+    uploadProfilePhoto: async (
+      _: unknown,
+      args: { file: { base64Data: string; filename: string } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      const result = await uploadProfilePhoto(
+        user.userId,
+        args.file.base64Data,
+        args.file.filename
+      );
+      return {
+        success: true,
+        url: result.url,
+        publicId: result.publicId,
+        message: 'Profile photo uploaded successfully',
+      };
+    },
+
+    /**
+     * Remove profile photo
+     */
+    removeProfilePhoto: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      await removeProfilePhoto(user.userId);
+      return {
+        success: true,
+        message: 'Profile photo removed successfully',
+      };
+    },
+
+    // ==================
+    // File Upload Management (Provider)
+    // ==================
+
+    /**
+     * Upload service images
+     */
+    uploadServiceImages: async (
+      _: unknown,
+      args: {
+        serviceId: string;
+        files: Array<{ base64Data: string; filename: string }>;
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const urls = await uploadServiceImages(
+        user.userId,
+        args.serviceId,
+        args.files
+      );
+      return {
+        success: true,
+        urls,
+        message: `${urls.length} image(s) uploaded successfully`,
+      };
+    },
+
+    /**
+     * Remove service image
+     */
+    removeServiceImage: async (
+      _: unknown,
+      args: { serviceId: string; imageUrl: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      await removeServiceImage(user.userId, args.serviceId, args.imageUrl);
+      return {
+        success: true,
+        message: 'Service image removed successfully',
+      };
+    },
+
+    /**
+     * Upload provider documents
+     */
+    uploadProviderDocuments: async (
+      _: unknown,
+      args: { files: Array<{ base64Data: string; filename: string }> },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const urls = await uploadProviderDocuments(user.userId, args.files);
+      return {
+        success: true,
+        urls,
+        message: `${urls.length} document(s) uploaded successfully`,
+      };
+    },
+
+    /**
+     * Remove provider document
+     */
+    removeProviderDocument: async (
+      _: unknown,
+      args: { documentUrl: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      await removeProviderDocument(user.userId, args.documentUrl);
+      return {
+        success: true,
+        message: 'Document removed successfully',
+      };
+    },
+
+    // ==================
+    // Messaging Mutations
+    // ==================
+
+    /**
+     * Start a new conversation or get existing
+     */
+    startConversation: async (
+      _: unknown,
+      args: {
+        input: {
+          participantId: string;
+          subject?: string;
+          bookingId?: string;
+          initialMessage?: string;
+        };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return createOrGetConversation(user.userId, user.role, args.input);
+    },
+
+    /**
+     * Send a message
+     */
+    sendMessage: async (
+      _: unknown,
+      args: {
+        input: {
+          conversationId: string;
+          content: string;
+          attachments?: string[];
+          replyToId?: string;
+        };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return sendMessage(user.userId, user.role, args.input);
+    },
+
+    /**
+     * Mark messages as read
+     */
+    markMessagesAsRead: async (
+      _: unknown,
+      args: { conversationId: string; messageIds?: string[] },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return markMessagesAsRead(user.userId, args.conversationId, args.messageIds);
+    },
+
+    /**
+     * Archive a conversation
+     */
+    archiveConversation: async (
+      _: unknown,
+      args: { conversationId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return archiveConversation(user.userId, args.conversationId);
+    },
+
+    /**
+     * Delete a message
+     */
+    deleteMessage: async (
+      _: unknown,
+      args: { messageId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return deleteMessage(user.userId, args.messageId);
+    },
+
+    /**
+     * Start support chat with admin
+     */
+    startSupportChat: async (
+      _: unknown,
+      args: { input: { subject: string; initialMessage: string } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return startSupportConversation(
+        user.userId,
+        user.role,
+        args.input.subject,
+        args.input.initialMessage
+      );
+    },
+
+    // ==================
+    // Notification Mutations
+    // ==================
+
+    /**
+     * Mark notification as read
+     */
+    markNotificationAsRead: async (
+      _: unknown,
+      args: { notificationId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return markNotificationAsRead(user.userId, args.notificationId);
+    },
+
+    /**
+     * Mark all notifications as read
+     */
+    markAllNotificationsAsRead: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return markAllNotificationsAsRead(user.userId);
+    },
+
+    /**
+     * Delete a notification
+     */
+    deleteNotification: async (
+      _: unknown,
+      args: { notificationId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return deleteNotification(user.userId, args.notificationId);
+    },
+
+    /**
+     * Delete all read notifications
+     */
+    deleteReadNotifications: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return deleteReadNotifications(user.userId);
+    },
+
+    /**
+     * Send system announcement (Admin only)
+     */
+    sendSystemAnnouncement: async (
+      _: unknown,
+      args: { input: { title: string; message: string; targetRoles?: string[] } },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      await sendSystemAnnouncement(
+        args.input.title,
+        args.input.message,
+        args.input.targetRoles
+      );
+      return {
+        success: true,
+        message: 'Announcement sent successfully',
+      };
+    },
+
+    // ==================
     // Admin Auth (Separate)
     // ==================
 
@@ -817,9 +1819,15 @@ export const resolvers = {
     /**
      * Admin logout
      */
-    adminLogout: async (_: unknown, __: unknown, context: GraphQLContext) => {
+    adminLogout: async (
+      _: unknown, 
+      args: { refreshToken?: string }, 
+      context: GraphQLContext
+    ) => {
       requireAdminAuth(context);
-      // TODO: Invalidate refresh token
+      if (args.refreshToken) {
+        await adminLogout(args.refreshToken);
+      }
       return {
         success: true,
         message: 'Admin logged out successfully',
@@ -1174,6 +2182,44 @@ export const resolvers = {
         return parent.updatedAt.toISOString();
       }
       return parent.updatedAt;
+    },
+  },
+
+  /**
+   * Favourite field resolvers
+   */
+  Favourite: {
+    service: (parent: any) => parent.service,
+    createdAt: (parent: any) => {
+      if (parent.createdAt instanceof Date) {
+        return parent.createdAt.toISOString();
+      }
+      return parent.createdAt;
+    },
+  },
+
+  /**
+   * Dispute field resolvers
+   */
+  Dispute: {
+    booking: (parent: any) => parent.booking,
+    createdAt: (parent: any) => {
+      if (parent.createdAt instanceof Date) {
+        return parent.createdAt.toISOString();
+      }
+      return parent.createdAt;
+    },
+    updatedAt: (parent: any) => {
+      if (parent.updatedAt instanceof Date) {
+        return parent.updatedAt.toISOString();
+      }
+      return parent.updatedAt;
+    },
+    resolvedAt: (parent: any) => {
+      if (parent.resolvedAt instanceof Date) {
+        return parent.resolvedAt.toISOString();
+      }
+      return parent.resolvedAt || null;
     },
   },
 };

@@ -1,7 +1,23 @@
 /**
  * Application Configuration
  * Centralizes all environment variables and app settings
+ * 
+ * IMPORTANT: All sensitive values MUST come from environment variables
+ * See .env.example for all required variables
  */
+
+// Helper to ensure Upstash URLs use TLS
+const getRedisUrl = (): string => {
+  const url = process.env.REDIS_URL || 'redis://localhost:6379';
+  
+  // Auto-fix Upstash URLs to use TLS (rediss://)
+  if (url.includes('upstash.io') && url.startsWith('redis://')) {
+    console.warn('⚠️ Upstash Redis URL detected without TLS. Auto-converting to rediss://');
+    return url.replace('redis://', 'rediss://');
+  }
+  
+  return url;
+};
 
 export const config = {
   // Environment
@@ -11,9 +27,13 @@ export const config = {
 
   // Server
   port: parseInt(process.env.PORT || '3000', 10),
+  hostname: process.env.HOSTNAME || 'localhost',
 
   // Database
   databaseUrl: process.env.DATABASE_URL || '',
+
+  // Redis (auto-fixes Upstash URLs to use TLS)
+  redisUrl: getRedisUrl(),
 
   // JWT Authentication
   jwt: {
@@ -24,7 +44,7 @@ export const config = {
 
   // Password Hashing
   bcrypt: {
-    saltRounds: 12,
+    saltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS || '12', 10),
   },
 
   // Email Configuration
@@ -38,26 +58,63 @@ export const config = {
     fromAddress: process.env.EMAIL_FROM_ADDRESS || 'noreply@easykonnect.com',
   },
 
+  // Cloudinary
+  cloudinary: {
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
+    apiKey: process.env.CLOUDINARY_API_KEY || '',
+    apiSecret: process.env.CLOUDINARY_API_SECRET || '',
+  },
+
   // OTP Settings
   otp: {
-    expiryMinutes: 10,
-    maxAttempts: 3,
-    length: 6,
+    expiryMinutes: parseInt(process.env.OTP_EXPIRY_MINUTES || '10', 10),
+    maxAttempts: parseInt(process.env.OTP_MAX_ATTEMPTS || '3', 10),
+    length: parseInt(process.env.OTP_LENGTH || '6', 10),
   },
 
   // Security Settings
   security: {
-    maxLoginAttempts: 5,
-    lockoutDurationMinutes: 30,
-    rateLimitWindowMs: 15 * 60 * 1000, // 15 minutes
-    rateLimitMaxRequests: 100,
+    maxLoginAttempts: parseInt(process.env.MAX_LOGIN_ATTEMPTS || '5', 10),
+    lockoutDurationMinutes: parseInt(process.env.LOCKOUT_DURATION_MINUTES || '30', 10),
+    rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10), // 15 minutes
+    rateLimitMaxRequests: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100', 10),
+  },
+
+  // CORS Settings
+  cors: {
+    allowedOrigins: (process.env.CORS_ALLOWED_ORIGINS || '')
+      .split(',')
+      .map(origin => origin.trim())
+      .filter(Boolean),
+    allowCredentials: true,
+  },
+
+  // WebSocket Settings
+  websocket: {
+    corsOrigins: (process.env.WEBSOCKET_CORS_ORIGINS || '')
+      .split(',')
+      .map(origin => origin.trim())
+      .filter(Boolean),
+  },
+
+  // Payment Settings
+  payment: {
+    paystack: {
+      secretKey: process.env.PAYSTACK_SECRET_KEY || '',
+      publicKey: process.env.PAYSTACK_PUBLIC_KEY || '',
+    },
+    stripe: {
+      secretKey: process.env.STRIPE_SECRET_KEY || '',
+      publicKey: process.env.STRIPE_PUBLIC_KEY || '',
+      webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
+    },
   },
 
   // Platform Settings
   platform: {
-    name: 'EasyKonnect',
-    commissionRate: 0.10, // 10% commission
-    currency: 'NGN',
+    name: process.env.PLATFORM_NAME || 'EasyKonnect',
+    commissionRate: parseFloat(process.env.COMMISSION_RATE || '0.10'), // 10% commission
+    currency: process.env.CURRENCY || 'NGN',
   },
 
   // Pagination Defaults
@@ -65,6 +122,34 @@ export const config = {
     defaultLimit: 10,
     maxLimit: 100,
   },
+
+  // Logging
+  logging: {
+    level: process.env.LOG_LEVEL || 'info',
+    sentryDsn: process.env.SENTRY_DSN || '',
+  },
 } as const;
 
 export type Config = typeof config;
+
+/**
+ * Validate required environment variables
+ * Call this on app startup
+ */
+export const validateEnv = (): void => {
+  const required = [
+    'DATABASE_URL',
+    'JWT_SECRET',
+  ];
+
+  const missing = required.filter(key => !process.env[key]);
+
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+
+  // Warn about default JWT secret in production
+  if (config.isProduction && config.jwt.secret === 'default-secret-change-in-production') {
+    throw new Error('JWT_SECRET must be set in production!');
+  }
+};

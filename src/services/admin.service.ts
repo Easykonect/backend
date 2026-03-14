@@ -804,3 +804,8 @@ export const activateUser = async (userId: string) => {
     message: `User ${user.email} has been activated.`,
   };
 };
+
+/**
+ * Admin logout - invalidate refresh token
+ */
+export { invalidateRefreshToken as adminLogout } from './token.service';

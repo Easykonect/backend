@@ -41,3 +41,15 @@ yarn-error.log*
 next-env.d.ts
 
 /src/generated/prisma
+
+# ===========================================
+# Sensitive Documentation (DO NOT COMMIT)
+# ===========================================
+# These files contain internal information that should not be public
+docs/SECURITY_AUDIT.md
+docs/APOLLO_SANDBOX_TESTS.md
+docs/BOOKING_API_TESTS.md
+docs/PROVIDER_VERIFICATION_TESTS.md
+docs/HOSTING_DOCS.md
+docs/DEPLOYMENT.md
+docs/api-metadata.json

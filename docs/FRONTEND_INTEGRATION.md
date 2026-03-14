@@ -6,6 +6,7 @@ This API uses **GraphQL** over HTTP POST requests. All requests go to a single e
 
 - **Development**: `http://localhost:3000/api/graphql`
 - **Production**: `https://backend-ehtm.onrender.com/api/graphql`
+- **API Documentation**: `https://backend-ehtm.onrender.com/docs`
 
 ## Platform Support
 
@@ -17,6 +18,62 @@ This API uses **GraphQL** over HTTP POST requests. All requests go to a single e
 | **iOS (Swift)** | Apollo iOS |
 | **Android (Kotlin)** | Apollo Kotlin |
 | **Vue.js** | Vue Apollo |
+
+---
+
+## API Features (v2.0.0)
+
+### ✅ Implemented Features
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Authentication** | ✅ Complete | Register, Login, Email Verification, Password Reset |
+| **User Management** | ✅ Complete | Profile CRUD, Photo Upload, Role Management |
+| **Provider System** | ✅ Complete | Become Provider, Verification Workflow |
+| **Services** | ✅ Complete | CRUD, Categories, Search, Filtering |
+| **Bookings** | ✅ Complete | Create, Accept/Reject, Complete, Cancel |
+| **Reviews** | ✅ Complete | Create, Respond, Rating Stats |
+| **Favourites** | ✅ Complete | Add/Remove, List |
+| **Disputes** | ✅ Complete | Raise, Evidence Upload, Resolution |
+| **Messaging** | ✅ Complete | Real-time via WebSocket |
+| **Notifications** | ✅ Complete | In-app + Real-time Push |
+| **Admin Panel** | ✅ Complete | User/Provider/Service Management |
+| **Rate Limiting** | ✅ Complete | Per-user/IP limits |
+| **Security** | ✅ Complete | JWT, OTP hashing, Account Lockout |
+
+### 🔜 Coming Soon
+
+| Feature | Status |
+|---------|--------|
+| Payment Integration (Paystack) | 🔜 In Progress |
+| Push Notifications (FCM) | 🔜 Planned |
+| Geolocation Search | 🔜 Planned |
+
+---
+
+## Security & Rate Limits
+
+### Rate Limits
+
+| Operation | Limit | Window |
+|-----------|-------|--------|
+| General API | 100 requests | 15 minutes |
+| Login | 10 attempts | 15 minutes |
+| Authentication | 5 attempts | 1 minute |
+| OTP Verification | 5 attempts | 5 minutes |
+| Password Reset | 3 attempts | 1 hour |
+| File Uploads | 20 uploads | 1 minute |
+| Messaging | 60 messages | 1 minute |
+
+### Security Features
+
+- 🔒 **Password Hashing**: bcrypt with 12 salt rounds
+- 🔒 **OTP Security**: SHA-256 hashing with timing-safe comparison
+- 🔒 **JWT Tokens**: Access (7d) + Refresh (30d) with blacklisting
+- 🔒 **Account Lockout**: 5 failed attempts = 30-minute lockout
+- 🔒 **Query Depth Limit**: Maximum 10 levels (prevents DoS)
+- 🔒 **Request Size Limit**: 1MB maximum body size
+- 🔒 **Introspection**: Disabled in production
 
 ---
 
@@ -1785,6 +1842,780 @@ const login = async (email, password) => {
 
 ---
 
+# Messaging APIs
+
+These APIs handle real-time messaging between users, providers, and admins. Authentication is required for all endpoints.
+
+---
+
+## Chat System Overview
+
+The messaging system supports multiple conversation types:
+
+| Conversation Type | Participants | Use Case |
+|-------------------|--------------|----------|
+| `USER_PROVIDER` | User ↔ Provider | Service inquiries, booking discussions |
+| `USER_ADMIN` | User/Provider ↔ Admin | Support requests, help |
+| `ADMIN_SUPERADMIN` | Admin ↔ Super Admin | Internal admin communication |
+| `BOOKING_RELATED` | User ↔ Provider | Chat tied to a specific booking |
+
+---
+
+## 1. Start a Conversation
+
+**What this API does:** Creates a new conversation with another user or returns an existing one. The system automatically determines the conversation type based on participant roles.
+
+### Request
+
+```graphql
+mutation StartConversation($input: StartConversationInput!) {
+  startConversation(input: $input) {
+    id
+    type
+    participantIds
+    subject
+    isActive
+    lastMessageAt
+    lastMessageText
+    createdAt
+    otherParticipant {
+      id
+      firstName
+      lastName
+      profilePhoto
+      role
+      businessName
+    }
+    unreadCount
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "participantId": "provider_user_id_here",
+    "subject": "Question about your service",
+    "initialMessage": "Hi, I have a question about your cleaning service..."
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "startConversation": {
+      "id": "conv_123",
+      "type": "USER_PROVIDER",
+      "participantIds": ["user_123", "provider_456"],
+      "subject": "Question about your service",
+      "isActive": true,
+      "lastMessageAt": "2026-03-14T10:30:00Z",
+      "lastMessageText": "Hi, I have a question about your cleaning service...",
+      "createdAt": "2026-03-14T10:30:00Z",
+      "otherParticipant": {
+        "id": "provider_456",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "profilePhoto": "https://res.cloudinary.com/...",
+        "role": "SERVICE_PROVIDER",
+        "businessName": "CleanPro Services"
+      },
+      "unreadCount": 0
+    }
+  }
+}
+```
+
+---
+
+## 2. Start Support Chat (with Admin)
+
+**What this API does:** Creates a support conversation with an available admin. Used when users or providers need help from support staff.
+
+### Request
+
+```graphql
+mutation StartSupportChat($input: StartSupportChatInput!) {
+  startSupportChat(input: $input) {
+    id
+    type
+    subject
+    isActive
+    createdAt
+    otherParticipant {
+      id
+      firstName
+      lastName
+      role
+    }
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "subject": "Payment Issue",
+    "initialMessage": "I'm having trouble with my payment. It shows failed but money was deducted."
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "startSupportChat": {
+      "id": "conv_support_123",
+      "type": "USER_ADMIN",
+      "subject": "Payment Issue",
+      "isActive": true,
+      "createdAt": "2026-03-14T10:30:00Z",
+      "otherParticipant": {
+        "id": "admin_789",
+        "firstName": "Support",
+        "lastName": "Admin",
+        "role": "ADMIN"
+      }
+    }
+  }
+}
+```
+
+---
+
+## 3. Get Booking Conversation
+
+**What this API does:** Gets or creates a conversation tied to a specific booking. Only the user and provider involved in the booking can access this.
+
+### Request
+
+```graphql
+query BookingConversation($bookingId: ID!) {
+  bookingConversation(bookingId: $bookingId) {
+    id
+    type
+    bookingId
+    isActive
+    lastMessageAt
+    lastMessageText
+    otherParticipant {
+      id
+      firstName
+      lastName
+      profilePhoto
+      businessName
+    }
+    unreadCount
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "bookingId": "booking_123"
+}
+```
+
+---
+
+## 4. Send a Message
+
+**What this API does:** Sends a message in an existing conversation. Supports text content and optional attachments.
+
+### Request
+
+```graphql
+mutation SendMessage($input: SendMessageInput!) {
+  sendMessage(input: $input) {
+    id
+    conversationId
+    senderId
+    senderRole
+    content
+    attachments
+    status
+    createdAt
+    sender {
+      id
+      firstName
+      lastName
+      profilePhoto
+    }
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "conversationId": "conv_123",
+    "content": "Yes, I can do the service tomorrow at 2 PM. Does that work for you?",
+    "attachments": ["https://res.cloudinary.com/...image1.jpg"]
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "sendMessage": {
+      "id": "msg_456",
+      "conversationId": "conv_123",
+      "senderId": "provider_456",
+      "senderRole": "SERVICE_PROVIDER",
+      "content": "Yes, I can do the service tomorrow at 2 PM. Does that work for you?",
+      "attachments": ["https://res.cloudinary.com/...image1.jpg"],
+      "status": "SENT",
+      "createdAt": "2026-03-14T10:35:00Z",
+      "sender": {
+        "id": "provider_456",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "profilePhoto": "https://res.cloudinary.com/..."
+      }
+    }
+  }
+}
+```
+
+---
+
+## 5. Get My Conversations
+
+**What this API does:** Returns a paginated list of all the user's conversations, sorted by most recent activity.
+
+### Request
+
+```graphql
+query MyConversations($pagination: PaginationInput) {
+  myConversations(pagination: $pagination) {
+    conversations {
+      id
+      type
+      subject
+      bookingId
+      isActive
+      lastMessageAt
+      lastMessageText
+      otherParticipant {
+        id
+        firstName
+        lastName
+        profilePhoto
+        role
+        businessName
+      }
+      unreadCount
+    }
+    total
+    page
+    limit
+    totalPages
+    hasNextPage
+    hasPreviousPage
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "pagination": {
+    "page": 1,
+    "limit": 20
+  }
+}
+```
+
+---
+
+## 6. Get Conversation Messages
+
+**What this API does:** Returns paginated messages for a specific conversation, ordered chronologically.
+
+### Request
+
+```graphql
+query ConversationMessages($conversationId: ID!, $pagination: PaginationInput) {
+  conversationMessages(conversationId: $conversationId, pagination: $pagination) {
+    messages {
+      id
+      conversationId
+      senderId
+      senderRole
+      content
+      attachments
+      status
+      readBy
+      readAt
+      replyToId
+      isDeleted
+      createdAt
+      sender {
+        id
+        firstName
+        lastName
+        profilePhoto
+      }
+    }
+    total
+    page
+    limit
+    totalPages
+    hasNextPage
+    hasPreviousPage
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "conversationId": "conv_123",
+  "pagination": {
+    "page": 1,
+    "limit": 50
+  }
+}
+```
+
+---
+
+## 7. Mark Messages as Read
+
+**What this API does:** Marks messages in a conversation as read by the current user.
+
+### Request
+
+```graphql
+mutation MarkMessagesAsRead($conversationId: ID!, $messageIds: [ID!]) {
+  markMessagesAsRead(conversationId: $conversationId, messageIds: $messageIds) {
+    success
+    message
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "conversationId": "conv_123",
+  "messageIds": ["msg_1", "msg_2", "msg_3"]
+}
+```
+
+**Note:** If `messageIds` is omitted, all unread messages in the conversation will be marked as read.
+
+---
+
+## 8. Get Unread Message Count
+
+**What this API does:** Returns the total count of unread messages across all conversations.
+
+### Request
+
+```graphql
+query UnreadMessageCount {
+  unreadMessageCount {
+    count
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "unreadMessageCount": {
+      "count": 5
+    }
+  }
+}
+```
+
+---
+
+## 9. Archive a Conversation
+
+**What this API does:** Archives a conversation, hiding it from the active conversation list.
+
+### Request
+
+```graphql
+mutation ArchiveConversation($conversationId: ID!) {
+  archiveConversation(conversationId: $conversationId) {
+    success
+    message
+  }
+}
+```
+
+---
+
+## 10. Delete a Message
+
+**What this API does:** Soft-deletes a message (only the sender can delete their own messages).
+
+### Request
+
+```graphql
+mutation DeleteMessage($messageId: ID!) {
+  deleteMessage(messageId: $messageId) {
+    success
+    message
+  }
+}
+```
+
+---
+
+# Notification APIs
+
+These APIs handle system notifications for booking updates, reviews, payment status, and more.
+
+---
+
+## Notification Types
+
+| Type | Description |
+|------|-------------|
+| `BOOKING_CREATED` | New booking request received |
+| `BOOKING_ACCEPTED` | Booking was accepted by provider |
+| `BOOKING_REJECTED` | Booking was rejected by provider |
+| `BOOKING_CANCELLED` | Booking was cancelled |
+| `BOOKING_STARTED` | Service has started |
+| `BOOKING_COMPLETED` | Service completed |
+| `PAYMENT_RECEIVED` | Payment received successfully |
+| `PAYMENT_FAILED` | Payment failed |
+| `REFUND_PROCESSED` | Refund has been processed |
+| `REVIEW_RECEIVED` | New review received |
+| `REVIEW_RESPONSE` | Provider responded to review |
+| `VERIFICATION_APPROVED` | Provider verification approved |
+| `VERIFICATION_REJECTED` | Provider verification rejected |
+| `SERVICE_APPROVED` | Service listing approved |
+| `SERVICE_REJECTED` | Service listing rejected |
+| `SERVICE_SUSPENDED` | Service listing suspended |
+| `DISPUTE_OPENED` | New dispute opened |
+| `DISPUTE_UPDATED` | Dispute status updated |
+| `DISPUTE_RESOLVED` | Dispute resolved |
+| `NEW_MESSAGE` | New chat message received |
+| `ACCOUNT_SUSPENDED` | Account suspended |
+| `ACCOUNT_ACTIVATED` | Account activated |
+| `SYSTEM_ANNOUNCEMENT` | System-wide announcement |
+
+---
+
+## 1. Get My Notifications
+
+**What this API does:** Returns a paginated list of the user's notifications with optional filtering.
+
+### Request
+
+```graphql
+query MyNotifications($filters: NotificationFiltersInput, $pagination: PaginationInput) {
+  myNotifications(filters: $filters, pagination: $pagination) {
+    notifications {
+      id
+      userId
+      type
+      title
+      message
+      entityType
+      entityId
+      metadata
+      isRead
+      readAt
+      createdAt
+    }
+    total
+    page
+    limit
+    totalPages
+    hasNextPage
+    hasPreviousPage
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "filters": {
+    "type": "BOOKING_CREATED",
+    "isRead": false
+  },
+  "pagination": {
+    "page": 1,
+    "limit": 20
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "myNotifications": {
+      "notifications": [
+        {
+          "id": "notif_123",
+          "userId": "user_456",
+          "type": "BOOKING_ACCEPTED",
+          "title": "Booking Accepted",
+          "message": "CleanPro Services has accepted your booking for Deep Cleaning",
+          "entityType": "booking",
+          "entityId": "booking_789",
+          "metadata": null,
+          "isRead": false,
+          "readAt": null,
+          "createdAt": "2026-03-14T10:30:00Z"
+        }
+      ],
+      "total": 15,
+      "page": 1,
+      "limit": 20,
+      "totalPages": 1,
+      "hasNextPage": false,
+      "hasPreviousPage": false
+    }
+  }
+}
+```
+
+---
+
+## 2. Get Unread Notification Count
+
+**What this API does:** Returns the count of unread notifications for badge display.
+
+### Request
+
+```graphql
+query UnreadNotificationCount {
+  unreadNotificationCount {
+    count
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "unreadNotificationCount": {
+      "count": 8
+    }
+  }
+}
+```
+
+---
+
+## 3. Get Notification Statistics
+
+**What this API does:** Returns detailed statistics about the user's notifications.
+
+### Request
+
+```graphql
+query NotificationStats {
+  notificationStats {
+    total
+    unread
+    read
+    byType
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "notificationStats": {
+      "total": 50,
+      "unread": 8,
+      "read": 42,
+      "byType": "{\"BOOKING_ACCEPTED\": 10, \"NEW_MESSAGE\": 25, \"REVIEW_RECEIVED\": 15}"
+    }
+  }
+}
+```
+
+---
+
+## 4. Mark Notification as Read
+
+**What this API does:** Marks a single notification as read.
+
+### Request
+
+```graphql
+mutation MarkNotificationAsRead($notificationId: ID!) {
+  markNotificationAsRead(notificationId: $notificationId) {
+    id
+    isRead
+    readAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "notificationId": "notif_123"
+}
+```
+
+---
+
+## 5. Mark All Notifications as Read
+
+**What this API does:** Marks all unread notifications as read.
+
+### Request
+
+```graphql
+mutation MarkAllNotificationsAsRead {
+  markAllNotificationsAsRead {
+    success
+    message
+  }
+}
+```
+
+---
+
+## 6. Delete Notification
+
+**What this API does:** Deletes a single notification.
+
+### Request
+
+```graphql
+mutation DeleteNotification($notificationId: ID!) {
+  deleteNotification(notificationId: $notificationId) {
+    success
+    message
+  }
+}
+```
+
+---
+
+## 7. Delete All Read Notifications
+
+**What this API does:** Deletes all notifications that have been read.
+
+### Request
+
+```graphql
+mutation DeleteReadNotifications {
+  deleteReadNotifications {
+    success
+    message
+  }
+}
+```
+
+---
+
+## 8. Send System Announcement (Admin Only)
+
+**What this API does:** Sends a system-wide announcement to all users or specific roles.
+
+### Request
+
+```graphql
+mutation SendSystemAnnouncement($input: SendAnnouncementInput!) {
+  sendSystemAnnouncement(input: $input) {
+    success
+    message
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "title": "Platform Maintenance",
+    "message": "The platform will be under maintenance on March 15th from 2-4 AM.",
+    "targetRoles": ["SERVICE_USER", "SERVICE_PROVIDER"]
+  }
+}
+```
+
+**Note:** If `targetRoles` is omitted, the announcement is sent to all active users.
+
+---
+
+# Real-Time Messaging Integration
+
+For real-time updates, implement polling or use WebSocket subscriptions (if added later).
+
+## Polling Strategy
+
+```javascript
+// Poll for new messages every 5 seconds when conversation is open
+const pollMessages = (conversationId) => {
+  return setInterval(async () => {
+    const { data } = await client.query({
+      query: CONVERSATION_MESSAGES,
+      variables: { conversationId, pagination: { page: 1, limit: 10 } },
+      fetchPolicy: 'network-only'
+    });
+    // Update UI with new messages
+  }, 5000);
+};
+
+// Poll for unread counts every 30 seconds
+const pollUnreadCounts = () => {
+  return setInterval(async () => {
+    const [messages, notifications] = await Promise.all([
+      client.query({ query: UNREAD_MESSAGE_COUNT, fetchPolicy: 'network-only' }),
+      client.query({ query: UNREAD_NOTIFICATION_COUNT, fetchPolicy: 'network-only' })
+    ]);
+    // Update badge counts
+  }, 30000);
+};
+```
+
+## React Native / Mobile Push Notifications
+
+Notifications are stored in the database. For push notifications, integrate with:
+- **Firebase Cloud Messaging (FCM)** for Android
+- **Apple Push Notification Service (APNS)** for iOS
+
+The `isPushed` and `pushedAt` fields track push notification delivery status.
+
+---
+
 # Token Management
 
 ## Access Token
@@ -1831,3 +2662,574 @@ async function makeAuthenticatedRequest(query, variables) {
 4. **Handle token expiry gracefully** with refresh flow
 5. **Clear tokens on logout**
 6. **Implement rate limiting on frontend** to prevent abuse
+
+---
+
+# Real-time WebSocket Integration
+
+EasyKonnect provides real-time functionality through Socket.io WebSockets. This enables instant messaging, typing indicators, presence detection, and real-time notifications.
+
+## Server Endpoints
+
+- **Development**: `ws://localhost:3000`
+- **Production**: `wss://your-production-server.com`
+
+## Installation
+
+```bash
+# React / React Native
+npm install socket.io-client
+
+# Flutter
+flutter pub add socket_io_client
+
+# iOS
+pod 'Socket.IO-Client-Swift'
+
+# Android (Gradle)
+implementation 'io.socket:socket.io-client:2.0.0'
+```
+
+---
+
+## Connection Setup
+
+### JavaScript / TypeScript
+
+```typescript
+import { io, Socket } from 'socket.io-client';
+
+const SOCKET_URL = 'wss://your-server.com';
+
+// Create socket connection with authentication
+const socket: Socket = io(SOCKET_URL, {
+  auth: {
+    token: 'YOUR_ACCESS_TOKEN' // Same JWT used for GraphQL
+  },
+  transports: ['websocket', 'polling'],
+  reconnection: true,
+  reconnectionAttempts: 5,
+  reconnectionDelay: 1000,
+});
+
+// Connection event handlers
+socket.on('connect', () => {
+  console.log('Connected to WebSocket server');
+});
+
+socket.on('disconnect', (reason) => {
+  console.log('Disconnected:', reason);
+});
+
+socket.on('connect_error', (error) => {
+  console.error('Connection error:', error.message);
+  // Handle authentication errors
+  if (error.message === 'Authentication required') {
+    // Redirect to login
+  }
+});
+```
+
+### React Native
+
+```typescript
+import { io } from 'socket.io-client';
+
+const socket = io('wss://your-server.com', {
+  auth: { token: accessToken },
+  transports: ['websocket'], // Use WebSocket only for React Native
+});
+```
+
+### Flutter
+
+```dart
+import 'package:socket_io_client/socket_io_client.dart' as IO;
+
+IO.Socket socket = IO.io('wss://your-server.com', 
+  IO.OptionBuilder()
+    .setTransports(['websocket'])
+    .setAuth({'token': accessToken})
+    .enableAutoConnect()
+    .build()
+);
+
+socket.onConnect((_) => print('Connected'));
+socket.onDisconnect((_) => print('Disconnected'));
+```
+
+---
+
+## Socket Events Reference
+
+### Emitting Events (Client → Server)
+
+| Event | Payload | Description |
+|-------|---------|-------------|
+| `conversation:join` | `{ conversationId: string }` | Join a conversation room |
+| `conversation:leave` | `{ conversationId: string }` | Leave a conversation room |
+| `message:send` | `{ conversationId, content, attachments? }` | Send a message |
+| `typing:start` | `{ conversationId }` | Start typing indicator |
+| `typing:stop` | `{ conversationId }` | Stop typing indicator |
+| `messages:read` | `{ conversationId, messageIds }` | Mark messages as read |
+| `heartbeat` | - | Keep connection alive |
+| `presence:check` | `{ userIds: string[] }` | Check online status |
+
+### Listening Events (Server → Client)
+
+| Event | Payload | Description |
+|-------|---------|-------------|
+| `message:new` | `MessagePayload` | New message received |
+| `message:sent` | `{ tempId, messageId }` | Message sent confirmation |
+| `typing:update` | `{ userId, userName, conversationId, isTyping }` | Typing indicator update |
+| `messages:read` | `{ conversationId, messageIds, readBy, readAt }` | Read receipt |
+| `notification:new` | `NotificationPayload` | New notification |
+| `user:online` | `{ userId, userName }` | User came online |
+| `user:offline` | `{ userId, userName, lastSeen }` | User went offline |
+| `user:joined` | `{ userId, userName, conversationId }` | User joined conversation |
+| `user:left` | `{ userId, userName, conversationId }` | User left conversation |
+| `presence:status` | `Record<string, boolean>` | Online status response |
+| `error` | `{ message: string }` | Error message |
+
+---
+
+## Real-time Messaging Implementation
+
+### Joining a Conversation
+
+```typescript
+// When user opens a chat screen
+function openChat(conversationId: string) {
+  socket.emit('conversation:join', { conversationId });
+}
+
+// When user leaves chat screen
+function closeChat(conversationId: string) {
+  socket.emit('conversation:leave', { conversationId });
+}
+```
+
+### Sending Messages
+
+```typescript
+// Generate temporary ID for optimistic updates
+const tempId = `temp_${Date.now()}`;
+
+// Send message
+socket.emit('message:send', {
+  conversationId: 'conv123',
+  content: 'Hello!',
+  attachments: ['https://cloudinary.com/image.jpg'], // Optional
+});
+
+// Listen for sent confirmation
+socket.on('message:sent', ({ tempId, messageId }) => {
+  // Replace temporary message with confirmed one
+  updateMessageId(tempId, messageId);
+});
+```
+
+### Receiving Messages
+
+```typescript
+socket.on('message:new', (message) => {
+  // message = {
+  //   id: 'msg123',
+  //   conversationId: 'conv456',
+  //   senderId: 'user789',
+  //   senderRole: 'SERVICE_USER',
+  //   senderName: 'John',
+  //   content: 'Hello!',
+  //   attachments: [],
+  //   status: 'SENT',
+  //   createdAt: '2024-01-15T10:30:00Z'
+  // }
+  
+  // Add to message list
+  addMessage(message);
+  
+  // Play notification sound if not current conversation
+  if (message.conversationId !== currentConversationId) {
+    playNotificationSound();
+  }
+});
+```
+
+### Typing Indicators
+
+```typescript
+// When user starts typing
+let typingTimeout: NodeJS.Timeout;
+
+function onInputChange(text: string) {
+  // Send typing start
+  socket.emit('typing:start', { conversationId: currentConversationId });
+  
+  // Clear previous timeout
+  clearTimeout(typingTimeout);
+  
+  // Stop typing after 2 seconds of inactivity
+  typingTimeout = setTimeout(() => {
+    socket.emit('typing:stop', { conversationId: currentConversationId });
+  }, 2000);
+}
+
+// Listen for others typing
+socket.on('typing:update', ({ userId, userName, conversationId, isTyping }) => {
+  if (conversationId === currentConversationId && userId !== currentUserId) {
+    if (isTyping) {
+      showTypingIndicator(userName);
+    } else {
+      hideTypingIndicator(userName);
+    }
+  }
+});
+```
+
+### Read Receipts
+
+```typescript
+// When user views messages
+function markMessagesAsRead(conversationId: string, messageIds: string[]) {
+  socket.emit('messages:read', { conversationId, messageIds });
+}
+
+// Listen for read receipts
+socket.on('messages:read', ({ conversationId, messageIds, readBy, readAt }) => {
+  // Update message status to 'READ'
+  updateMessagesStatus(messageIds, 'READ', readAt);
+});
+```
+
+---
+
+## Presence System
+
+### Heartbeat (Keep Connection Alive)
+
+```typescript
+// Send heartbeat every 60 seconds
+setInterval(() => {
+  if (socket.connected) {
+    socket.emit('heartbeat');
+  }
+}, 60000);
+```
+
+### Check Online Status
+
+```typescript
+// Check if specific users are online
+socket.emit('presence:check', { 
+  userIds: ['user1', 'user2', 'user3'] 
+});
+
+socket.on('presence:status', (statuses) => {
+  // statuses = { user1: true, user2: false, user3: true }
+  updateOnlineStatuses(statuses);
+});
+```
+
+### Listen for Online/Offline Events
+
+```typescript
+socket.on('user:online', ({ userId, userName }) => {
+  updateUserStatus(userId, 'online');
+});
+
+socket.on('user:offline', ({ userId, userName, lastSeen }) => {
+  updateUserStatus(userId, 'offline', lastSeen);
+});
+```
+
+---
+
+## Real-time Notifications
+
+```typescript
+// Listen for new notifications
+socket.on('notification:new', (notification) => {
+  // notification = {
+  //   id: 'notif123',
+  //   type: 'NEW_MESSAGE',
+  //   title: 'New message from John',
+  //   message: 'Hello! How are you?',
+  //   entityType: 'Conversation',
+  //   entityId: 'conv456',
+  //   isRead: false,
+  //   createdAt: '2024-01-15T10:30:00Z'
+  // }
+  
+  // Show in-app notification
+  showNotificationToast(notification);
+  
+  // Update notification badge count
+  incrementNotificationCount();
+});
+```
+
+---
+
+## React Context Example
+
+```typescript
+// SocketContext.tsx
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import { io, Socket } from 'socket.io-client';
+import { useAuth } from './AuthContext';
+
+interface SocketContextType {
+  socket: Socket | null;
+  isConnected: boolean;
+  onlineUsers: Set<string>;
+}
+
+const SocketContext = createContext<SocketContextType>({
+  socket: null,
+  isConnected: false,
+  onlineUsers: new Set(),
+});
+
+export function SocketProvider({ children }: { children: React.ReactNode }) {
+  const { accessToken, isAuthenticated } = useAuth();
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!isAuthenticated || !accessToken) {
+      return;
+    }
+
+    const newSocket = io(process.env.NEXT_PUBLIC_WS_URL!, {
+      auth: { token: accessToken },
+      transports: ['websocket', 'polling'],
+    });
+
+    newSocket.on('connect', () => {
+      setIsConnected(true);
+    });
+
+    newSocket.on('disconnect', () => {
+      setIsConnected(false);
+    });
+
+    newSocket.on('user:online', ({ userId }) => {
+      setOnlineUsers(prev => new Set([...prev, userId]));
+    });
+
+    newSocket.on('user:offline', ({ userId }) => {
+      setOnlineUsers(prev => {
+        const next = new Set(prev);
+        next.delete(userId);
+        return next;
+      });
+    });
+
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.disconnect();
+    };
+  }, [isAuthenticated, accessToken]);
+
+  return (
+    <SocketContext.Provider value={{ socket, isConnected, onlineUsers }}>
+      {children}
+    </SocketContext.Provider>
+  );
+}
+
+export const useSocket = () => useContext(SocketContext);
+```
+
+---
+
+## Error Handling
+
+```typescript
+socket.on('error', ({ message }) => {
+  console.error('Socket error:', message);
+  
+  // Handle specific errors
+  switch (message) {
+    case 'Conversation not found or access denied':
+      showErrorToast('Unable to access this conversation');
+      break;
+    case 'Failed to send message':
+      showErrorToast('Message failed to send. Please try again.');
+      break;
+    default:
+      showErrorToast('Something went wrong');
+  }
+});
+
+socket.on('connect_error', (error) => {
+  if (error.message === 'Authentication required' || 
+      error.message === 'Invalid token') {
+    // Token expired, redirect to login
+    logout();
+  }
+});
+```
+
+---
+
+## Reconnection Handling
+
+```typescript
+socket.on('reconnect', (attemptNumber) => {
+  console.log('Reconnected after', attemptNumber, 'attempts');
+  
+  // Re-join active conversation
+  if (currentConversationId) {
+    socket.emit('conversation:join', { 
+      conversationId: currentConversationId 
+    });
+  }
+});
+
+socket.on('reconnect_error', (error) => {
+  console.error('Reconnection error:', error);
+});
+
+socket.on('reconnect_failed', () => {
+  console.error('Failed to reconnect');
+  showReconnectPrompt();
+});
+```
+
+---
+
+## Hybrid Approach: WebSocket + GraphQL
+
+For best results, use WebSocket for real-time updates and GraphQL for data fetching:
+
+```typescript
+// Initial load: Use GraphQL
+const { data } = await graphql.query({
+  query: GET_CONVERSATIONS,
+});
+
+// Real-time updates: Use WebSocket
+socket.on('message:new', (message) => {
+  // Update local state or Apollo cache
+  cache.modify({
+    fields: {
+      getConversations(existing) {
+        // Update conversation with new message
+      }
+    }
+  });
+});
+
+// Sending messages: Can use either
+// Option 1: GraphQL (with response validation)
+await graphql.mutate({
+  mutation: SEND_MESSAGE,
+  variables: { conversationId, content }
+});
+
+// Option 2: WebSocket (faster, real-time)
+socket.emit('message:send', { conversationId, content });
+```
+
+---
+
+## Production Deployment Notes
+
+### Using Custom Server (Recommended)
+
+```bash
+# Build the custom server
+npm run build:server
+
+# Start with WebSocket support
+npm run start:ws
+```
+
+### Environment Variables
+
+```env
+# Required for WebSocket
+REDIS_URL=redis://your-redis-server:6379
+SOCKET_CORS_ORIGIN=https://your-frontend.com,https://admin.your-frontend.com
+```
+
+### Scaling with Redis
+
+The WebSocket server uses Redis Pub/Sub for horizontal scaling. This means you can run multiple server instances behind a load balancer, and all clients will receive real-time updates regardless of which server they're connected to.
+
+```
+[Client A] ──► [Server 1] ──┐
+                            ├──► [Redis Pub/Sub] ──► All servers sync
+[Client B] ──► [Server 2] ──┘
+```
+
+---
+
+## Mobile Push Notifications
+
+While WebSocket handles in-app real-time updates, for offline users you'll want push notifications:
+
+1. **Store device tokens** in your database (via a separate API)
+2. **Background workers** check for offline users when sending notifications
+3. **Send push via** Firebase Cloud Messaging (FCM) or Apple Push Notification Service (APNS)
+
+The notification system automatically:
+- Sends WebSocket notification if user is online
+- Creates database notification if user is offline
+- Future: Triggers push notification for offline users
+
+---
+
+## Testing WebSocket Connection
+
+You can test the WebSocket connection using a tool like [Socket.io Client Tool](https://amritb.github.io/socketio-client-tool/) or programmatically:
+
+```typescript
+// Quick test
+const socket = io('wss://your-server.com', {
+  auth: { token: 'YOUR_TOKEN' }
+});
+
+socket.on('connect', () => {
+  console.log('✅ Connected');
+  
+  // Test joining a conversation
+  socket.emit('conversation:join', { conversationId: 'test123' });
+});
+
+socket.on('error', (err) => {
+  console.log('❌ Error:', err);
+});
+```
+
+---
+
+## Changelog
+
+### v2.0.0 (March 2026)
+- ✅ Added comprehensive rate limiting (per-user/IP)
+- ✅ Enhanced security (token invalidation, query depth limiting)
+- ✅ Real-time messaging with Socket.io
+- ✅ Background job processing with BullMQ
+- ✅ Redis integration for caching and pub/sub
+- ✅ Dispute resolution system
+- ✅ Favourites system
+- ✅ Provider verification workflow
+- ✅ Admin management APIs
+
+### v1.0.0 (Initial Release)
+- Authentication system
+- User management
+- Basic provider system
+- Service CRUD
+- Booking system
+- Review system
+
+---
+
+**API Version**: 2.0.0  
+**Last Updated**: March 14, 2026  
+**Documentation**: https://backend-ehtm.onrender.com/docs

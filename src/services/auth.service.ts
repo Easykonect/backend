@@ -10,6 +10,7 @@
  * - JWT with refresh tokens
  * - Login activity tracking
  * - Input validation with Zod
+ * - Refresh token storage and invalidation
  */
 
 import { GraphQLError } from 'graphql';
@@ -41,6 +42,7 @@ import {
   emailSchema,
   passwordSchema,
 } from '@/utils/validation';
+import { storeRefreshToken, validateRefreshToken, invalidateRefreshToken } from './token.service';
 
 // ==================
 // Types
@@ -474,6 +476,12 @@ export const loginUser = async (input: LoginInput, clientIp?: string) => {
   const accessToken = generateToken(tokenPayload);
   const refreshToken = generateRefreshToken(tokenPayload);
 
+  // Store refresh token in Redis for validation and invalidation
+  await storeRefreshToken(user.id, refreshToken, {
+    deviceInfo: 'web',
+    ipAddress: clientIp,
+  });
+
   return {
     user: {
       id: user.id,
@@ -482,6 +490,7 @@ export const loginUser = async (input: LoginInput, clientIp?: string) => {
       lastName: user.lastName,
       phone: user.phone,
       role: user.role,
+      activeRole: user.activeRole || user.role,
       status: user.status,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
@@ -611,7 +620,22 @@ export const resetPassword = async (input: ResetPasswordInput) => {
  */
 export const refreshAccessToken = async (refreshToken: string) => {
   try {
+    // First validate the token is not blacklisted
+    const storedUserId = await validateRefreshToken(refreshToken);
+    if (!storedUserId) {
+      throw new GraphQLError('Refresh token has been invalidated', {
+        extensions: { code: 'INVALID_REFRESH_TOKEN' },
+      });
+    }
+
     const payload = verifyToken(refreshToken);
+
+    // Ensure the token belongs to the claimed user
+    if (payload.userId !== storedUserId) {
+      throw new GraphQLError('Token mismatch', {
+        extensions: { code: 'INVALID_REFRESH_TOKEN' },
+      });
+    }
 
     // Find user to make sure they still exist and are active
     const user = await prisma.user.findUnique({
@@ -641,10 +665,12 @@ export const refreshAccessToken = async (refreshToken: string) => {
         firstName: user.firstName,
         lastName: user.lastName,
         role: user.role,
+        activeRole: user.activeRole || user.role,
         status: user.status,
       },
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof GraphQLError) throw error;
     throw new GraphQLError('Invalid or expired refresh token', {
       extensions: { code: 'INVALID_REFRESH_TOKEN' },
     });
@@ -664,6 +690,7 @@ export const getCurrentUser = async (userId: string) => {
       lastName: true,
       phone: true,
       role: true,
+      activeRole: true,
       status: true,
       isEmailVerified: true,
       createdAt: true,
@@ -677,7 +704,11 @@ export const getCurrentUser = async (userId: string) => {
     });
   }
 
-  return user;
+  // Return with computed activeRole
+  return {
+    ...user,
+    activeRole: user.activeRole || user.role,
+  };
 };
 
 /**
@@ -742,6 +773,20 @@ export const changePassword = async (
   };
 };
 
+/**
+ * Logout - invalidate refresh token
+ */
+export const logout = async (refreshToken?: string): Promise<{ success: boolean; message: string }> => {
+  if (refreshToken) {
+    await invalidateRefreshToken(refreshToken);
+  }
+  
+  return {
+    success: true,
+    message: 'Logged out successfully.',
+  };
+};
+
 export default {
   registerUser,
   verifyEmail,
@@ -752,5 +797,6 @@ export default {
   refreshAccessToken,
   getCurrentUser,
   changePassword,
+  logout,
   getClientIp,
 };

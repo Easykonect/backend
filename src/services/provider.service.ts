@@ -11,6 +11,11 @@
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { UserRole, AccountStatus, VerificationStatus } from '@/constants';
+import { 
+  sendProviderApprovedEmail, 
+  sendProviderRejectedEmail,
+  sendProviderSubmissionEmail 
+} from '@/lib/email';
 
 // ==================
 // Types
@@ -52,6 +57,7 @@ const formatUserWithProvider = (user: any, provider: any = null) => ({
   lastName: user.lastName,
   phone: user.phone,
   role: user.role,
+  activeRole: user.activeRole || user.role, // Default to role if not set
   status: user.status,
   isEmailVerified: user.isEmailVerified,
   providerProfile: provider ? {
@@ -282,6 +288,12 @@ export const approveProvider = async (providerId: string) => {
     });
   }
 
+  if (provider.verificationStatus === VerificationStatus.VERIFIED) {
+    throw new GraphQLError('Provider is already verified', {
+      extensions: { code: 'ALREADY_VERIFIED' },
+    });
+  }
+
   const updatedProvider = await prisma.serviceProvider.update({
     where: { id: providerId },
     data: {
@@ -290,7 +302,17 @@ export const approveProvider = async (providerId: string) => {
     include: { user: true },
   });
 
-  // TODO: Send approval notification email
+  // Send approval notification email
+  try {
+    await sendProviderApprovedEmail(
+      updatedProvider.user.email,
+      updatedProvider.user.firstName,
+      updatedProvider.businessName
+    );
+  } catch (error) {
+    console.error('Failed to send provider approval email:', error);
+    // Don't throw - the provider is still approved
+  }
 
   return formatUserWithProvider(updatedProvider.user, updatedProvider);
 };
@@ -310,6 +332,12 @@ export const rejectProvider = async (providerId: string, reason: string) => {
     });
   }
 
+  if (provider.verificationStatus === VerificationStatus.VERIFIED) {
+    throw new GraphQLError('Cannot reject an already verified provider', {
+      extensions: { code: 'ALREADY_VERIFIED' },
+    });
+  }
+
   const updatedProvider = await prisma.serviceProvider.update({
     where: { id: providerId },
     data: {
@@ -318,7 +346,221 @@ export const rejectProvider = async (providerId: string, reason: string) => {
     include: { user: true },
   });
 
-  // TODO: Send rejection notification email with reason
+  // Send rejection notification email with reason
+  try {
+    await sendProviderRejectedEmail(
+      updatedProvider.user.email,
+      updatedProvider.user.firstName,
+      updatedProvider.businessName,
+      reason
+    );
+  } catch (error) {
+    console.error('Failed to send provider rejection email:', error);
+    // Don't throw - the provider is still rejected
+  }
 
   return formatUserWithProvider(updatedProvider.user, updatedProvider);
+};
+
+/**
+ * Submit Provider for Verification
+ * Allows providers to submit/re-submit their profile for admin review
+ */
+export const submitForVerification = async (userId: string) => {
+  // Find user with provider
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { provider: true },
+  });
+
+  if (!user) {
+    throw new GraphQLError('User not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+
+  // Check if user is a provider
+  if (user.role !== UserRole.SERVICE_PROVIDER || !user.provider) {
+    throw new GraphQLError('You must be a service provider to submit for verification', {
+      extensions: { code: 'NOT_PROVIDER' },
+    });
+  }
+
+  // Check if already verified
+  if (user.provider.verificationStatus === VerificationStatus.VERIFIED) {
+    throw new GraphQLError('Your provider account is already verified', {
+      extensions: { code: 'ALREADY_VERIFIED' },
+    });
+  }
+
+  // Check if already pending
+  if (user.provider.verificationStatus === VerificationStatus.PENDING) {
+    throw new GraphQLError('Your verification is already pending review', {
+      extensions: { code: 'ALREADY_PENDING' },
+    });
+  }
+
+  // Validate required fields before submission
+  if (!user.provider.businessName || !user.provider.address || !user.provider.city) {
+    throw new GraphQLError('Please complete your business profile before submitting for verification. Required: businessName, address, city', {
+      extensions: { code: 'INCOMPLETE_PROFILE' },
+    });
+  }
+
+  // Update status to PENDING
+  const updatedProvider = await prisma.serviceProvider.update({
+    where: { id: user.provider.id },
+    data: {
+      verificationStatus: VerificationStatus.PENDING,
+    },
+    include: { user: true },
+  });
+
+  // Send submission confirmation email
+  try {
+    await sendProviderSubmissionEmail(
+      user.email,
+      user.firstName,
+      updatedProvider.businessName
+    );
+  } catch (error) {
+    console.error('Failed to send provider submission email:', error);
+    // Don't throw - the submission is still recorded
+  }
+
+  return formatUserWithProvider(updatedProvider.user, updatedProvider);
+};
+
+/**
+ * Get Provider Verification Status
+ */
+export const getVerificationStatus = async (userId: string) => {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { provider: true },
+  });
+
+  if (!user) {
+    throw new GraphQLError('User not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+
+  if (!user.provider) {
+    throw new GraphQLError('You are not a service provider', {
+      extensions: { code: 'NOT_PROVIDER' },
+    });
+  }
+
+  return {
+    status: user.provider.verificationStatus,
+    canSubmit: user.provider.verificationStatus === VerificationStatus.UNVERIFIED || 
+               user.provider.verificationStatus === VerificationStatus.REJECTED,
+    message: getVerificationStatusMessage(user.provider.verificationStatus),
+  };
+};
+
+/**
+ * Get verification status message
+ */
+const getVerificationStatusMessage = (status: string): string => {
+  switch (status) {
+    case VerificationStatus.UNVERIFIED:
+      return 'Your provider account has not been submitted for verification. Complete your profile and submit for review.';
+    case VerificationStatus.PENDING:
+      return 'Your verification is under review. This typically takes 1-2 business days.';
+    case VerificationStatus.VERIFIED:
+      return 'Your provider account is verified! You can create and publish services.';
+    case VerificationStatus.REJECTED:
+      return 'Your verification was not approved. Please update your profile and re-submit.';
+    default:
+      return 'Unknown verification status.';
+  }
+};
+
+// ==================
+// Role Switching Functions
+// ==================
+
+/**
+ * Switch active role between SERVICE_USER and SERVICE_PROVIDER
+ * Only available for users who have a provider profile
+ */
+export const switchActiveRole = async (userId: string, targetRole: string) => {
+  // Validate target role
+  if (targetRole !== UserRole.SERVICE_USER && targetRole !== UserRole.SERVICE_PROVIDER) {
+    throw new GraphQLError('Invalid target role. Must be SERVICE_USER or SERVICE_PROVIDER', {
+      extensions: { code: 'INVALID_ROLE' },
+    });
+  }
+
+  // Find user with provider
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { provider: true },
+  });
+
+  if (!user) {
+    throw new GraphQLError('User not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+
+  // Check if user has provider profile (required to switch roles)
+  if (!user.provider) {
+    throw new GraphQLError('You must be a registered provider to switch roles. Use becomeProvider first.', {
+      extensions: { code: 'NOT_PROVIDER' },
+    });
+  }
+
+  // Check if already in the target role
+  const currentActiveRole = user.activeRole || user.role;
+  if (currentActiveRole === targetRole) {
+    throw new GraphQLError(`You are already in ${targetRole} mode`, {
+      extensions: { code: 'ALREADY_IN_ROLE' },
+    });
+  }
+
+  // Update active role
+  const updatedUser = await prisma.user.update({
+    where: { id: userId },
+    data: { activeRole: targetRole as any },
+  });
+
+  // Fetch with provider for response
+  const userWithProvider = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { provider: true },
+  });
+
+  return formatUserWithProvider(userWithProvider, userWithProvider?.provider);
+};
+
+/**
+ * Get current active role
+ */
+export const getActiveRole = async (userId: string) => {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { provider: true },
+  });
+
+  if (!user) {
+    throw new GraphQLError('User not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+
+  const activeRole = user.activeRole || user.role;
+  const canSwitch = user.role === UserRole.SERVICE_PROVIDER && user.provider !== null;
+
+  return {
+    currentRole: user.role,
+    activeRole,
+    canSwitch,
+    hasProviderProfile: user.provider !== null,
+    message: canSwitch 
+      ? `You are currently in ${activeRole} mode. You can switch to ${activeRole === UserRole.SERVICE_PROVIDER ? UserRole.SERVICE_USER : UserRole.SERVICE_PROVIDER} mode.`
+      : 'You cannot switch roles. Only registered providers can switch between user and provider modes.',
+  };
 };

@@ -1,6 +1,6 @@
 # EasyKonnect Backend - Implementation Status Report
 
-**Last Updated:** March 10, 2026  
+**Last Updated:** March 14, 2026  
 **Project:** EasyKonnect Service Marketplace Platform  
 **Backend Repository:** https://github.com/Easykonect/backend  
 **Deployed API:** https://backend-ehtm.onrender.com/api/graphql  
@@ -11,13 +11,14 @@
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
-2. [API Architecture (Unified Design)](#api-architecture-unified-design)
-3. [Completed Features](#completed-features)
-4. [Pending Features](#pending-features)
-5. [Database Schema Status](#database-schema-status)
-6. [API Endpoints Status](#api-endpoints-status)
-7. [UX Requirements vs Implementation](#ux-requirements-vs-implementation)
-8. [Next Steps & Priorities](#next-steps--priorities)
+2. [Frontend-Backend Alignment](#frontend-backend-alignment)
+3. [API Architecture (Unified Design)](#api-architecture-unified-design)
+4. [Completed Features](#completed-features)
+5. [Pending Features](#pending-features)
+6. [Database Schema Status](#database-schema-status)
+7. [API Endpoints Status](#api-endpoints-status)
+8. [UX Requirements vs Implementation](#ux-requirements-vs-implementation)
+9. [Next Steps & Priorities](#next-steps--priorities)
 
 ---
 
@@ -32,23 +33,196 @@
 - **GraphQL API** - Fully functional with Apollo Server v4
 - **Deployment** - Live on Render with Apollo Sandbox for testing
 - **Security** - Password validation (min 8 chars, uppercase, lowercase, number, special char), bcrypt hashing (12 rounds), account lockout after 5 failed login attempts
-- **Service Provider Upgrade Flow** - `becomeProvider` mutation to upgrade SERVICE_USER to SERVICE_PROVIDER ✅ NEW
-- **Provider Profile Management** - `updateProviderProfile`, `getProviderProfile` mutations ✅ NEW
-- **Services CRUD Operations** - Complete service management for providers ✅ NEW
-- **Service Categories CRUD** - Admin-managed service categories ✅ NEW
-- **Admin Authentication** - Separate `adminLogin`, `createAdmin` endpoints ✅ NEW
-- **Admin Management** - Suspend/activate admins, update roles ✅ NEW
-- **Password Management** - `changePassword` for authenticated users ✅ NEW
-- **Account Deletion** - `deleteOwnAccount` for users to delete their accounts ✅ NEW
+- **Service Provider Upgrade Flow** - `becomeProvider` mutation to upgrade SERVICE_USER to SERVICE_PROVIDER
+- **Provider Profile Management** - `updateProviderProfile`, `getProviderProfile` mutations
+- **Services CRUD Operations** - Complete service management for providers
+- **Service Categories CRUD** - Admin-managed service categories
+- **Admin Authentication** - Separate `adminLogin`, `createAdmin` endpoints
+- **Admin Management** - Suspend/activate admins, update roles
+- **Password Management** - `changePassword` for authenticated users
+- **Account Deletion** - `deleteOwnAccount` for users to delete their accounts
+- **Booking System** - Complete booking flow with status management ✅ (March 13, 2026)
+  - User booking creation (`createBooking`)
+  - User booking management (`updateBooking`, `cancelBooking`)
+  - Provider booking management (`acceptBooking`, `rejectBooking`, `startService`, `completeService`)
+  - Admin booking oversight (`allBookings`, `adminCancelBooking`)
+  - Booking statistics for dashboards (`myBookingStats`, `providerBookingStats`)
+- **Provider Verification Workflow** - Complete verification system ✅ (March 13, 2026)
+  - Provider submits for verification (`submitProviderForVerification`)
+  - Admin reviews pending providers (`pendingProviders`)
+  - Admin approves/rejects providers (`approveProvider`, `rejectProvider`)
+  - Verification status check (`myVerificationStatus`)
+  - Email notifications for approval/rejection
+- **Review System** - Complete review and rating system ✅ (March 13, 2026)
+  - User creates reviews for completed bookings (`createReview`)
+  - User updates reviews within 24 hours (`updateReview`)
+  - Provider responds to reviews (`respondToReview`)
+  - Get reviews by provider/service (`providerReviews`, `serviceReviews`)
+  - Provider rating statistics with distribution (`providerRating`)
+  - Check if booking can be reviewed (`canReviewBooking`)
+  - Admin can delete reviews (`deleteReview`)
+- **Role Switching (Dual Mode)** - Complete role toggle system ✅ (March 14, 2026)
+  - Switch active role (`switchActiveRole`)
+  - Check active role status (`myActiveRole`)
+  - Providers can toggle between User Mode and Provider Mode
+- **Favourites System** - Complete favourite services system ✅ (March 14, 2026)
+  - Add service to favourites (`addFavourite`)
+  - Remove service from favourites (`removeFavourite`)
+  - Toggle favourite status (`toggleFavourite`)
+  - Get user's favourite services (`myFavourites`)
+  - Check if service is favourited (`isFavourited`)
+  - Get favourite count for a service (`serviceFavouriteCount`)
+- **Dispute Resolution System** - Complete booking dispute management ✅ (March 14, 2026)
+  - User/Provider creates dispute (`createDispute`)
+  - Add evidence to dispute (`addDisputeEvidence`)
+  - Get dispute details (`dispute`, `bookingDispute`)
+  - Get user's disputes (`myDisputes`)
+  - Admin reviews disputes (`allDisputes`, `takeDisputeUnderReview`)
+  - Admin resolves disputes (`resolveDispute`)
+  - Admin closes invalid disputes (`closeDispute`)
+  - Dispute statistics for dashboard (`disputeStats`, `openDisputesCount`)
+  - Multiple resolution types: Full Refund, Partial Refund, No Refund, Redo Service, Mutual Agreement, Dismissed
+- **File Upload System** - Complete Cloudinary integration ✅ (March 14, 2026)
+  - Profile photo upload (`uploadProfilePhoto`)
+  - Profile photo removal (`removeProfilePhoto`)
+  - Service images upload (`uploadServiceImages`)
+  - Service image removal (`removeServiceImage`)
+  - Provider documents upload (`uploadProviderDocuments`)
+  - Provider document removal (`removeProviderDocument`)
+  - Signed upload params for client-side uploads (`getProfileUploadParams`, `getServiceUploadParams`, `getDocumentUploadParams`, `getEvidenceUploadParams`)
+  - Upload statistics for admin dashboard (`uploadStats`)
+  - Image optimization and transformations
+  - File type validation and size limits
+- **Messaging System** - Complete chat system ✅ (March 14, 2026)
+  - Start conversation (`startConversation`)
+  - Send messages (`sendMessage`)
+  - Get conversations (`myConversations`)
+  - Get messages (`conversationMessages`)
+  - Mark messages as read (`markMessagesAsRead`)
+  - Archive conversations (`archiveConversation`)
+  - Delete messages (`deleteMessage`)
+  - Unread message count (`unreadMessageCount`)
+  - Booking-related chat (`bookingConversation`)
+  - Support chat with admin (`startSupportChat`)
+  - Multiple conversation types: User-Provider, User-Admin, Admin-SuperAdmin, Booking-Related
+- **Notification System** - Complete notification management ✅ (March 14, 2026)
+  - Get notifications (`myNotifications`)
+  - Get notification by ID (`notification`)
+  - Mark notification as read (`markNotificationAsRead`)
+  - Mark all as read (`markAllNotificationsAsRead`)
+  - Delete notifications (`deleteNotification`, `deleteReadNotifications`)
+  - Unread count (`unreadNotificationCount`)
+  - Notification statistics (`notificationStats`)
+  - System announcements (`sendSystemAnnouncement`)
+  - Notification types: Booking, Payment, Review, Provider verification, Service approval, Dispute, Message, Account, System
+- **Real-time WebSocket System** - Complete Socket.io implementation ✅ (March 14, 2026)
+  - WebSocket server with Socket.io
+  - Redis Pub/Sub for horizontal scaling
+  - Real-time message delivery
+  - Typing indicators (`typing:start`, `typing:stop`)
+  - Read receipts in real-time
+  - User presence (online/offline status)
+  - Real-time notifications
+  - Conversation room management
+  - Heartbeat for connection keepalive
+  - Authentication via JWT
+- **Background Job Processing** - Complete BullMQ implementation ✅ (March 14, 2026)
+  - Email queue with retry logic
+  - Notification queue for async processing
+  - Background job scheduling
+  - Daily digest email automation
+  - Automatic cleanup of old notifications/messages
+  - Analytics snapshot generation
+  - Graceful shutdown handling
+- **Security Hardening** - Complete security audit and fixes ✅ (March 14, 2026)
+  - Rate limiting middleware with operation-specific limits
+  - GraphQL introspection disabled in production
+  - Query depth limiting (max 10 levels)
+  - Request body size validation (1MB max)
+  - Refresh token invalidation on logout
+  - Token blacklisting with Redis
+  - CORS configuration
+  - Error message sanitization in production
+  - Database indexes for performance optimization
+  - IP blocking capability
 
 ### ⏳ What's Pending
-- **Booking System** - Service booking, acceptance, rejection, status updates
 - **Payment Integration** - Paystack/Stripe integration for transactions
-- **Review System** - Rating and reviews for completed bookings
-- **Provider Verification Workflow** - Admin approval for new providers
 - **Geolocation Features** - Location-based provider search
-- **Notifications** - Real-time push notifications and in-app notifications
-- **File Upload** - Provider documents, service images
+- **Push Notifications** - Firebase/APNs for mobile push notifications
+
+---
+
+## Frontend-Backend Alignment
+
+> **Last Synced:** March 14, 2026  
+> **Frontend Status Report Reviewed:** EasyKonnet App Development Progress Report
+
+### ✅ APIs Ready for Integration (Frontend shows as ❓)
+
+These APIs exist in the backend but may not have been documented to frontend:
+
+| Feature | API Available | Frontend Status | Notes |
+|---------|--------------|-----------------|-------|
+| Leave a Review | `createReview(input: CreateReviewInput!)` | ❓ pending integration | **Ready to integrate** - Input: `{ bookingId, rating, comment }` |
+| View Provider Ratings | `providerReviews(providerId)`, `providerRating(providerId)` | ❓ pending integration | **Ready to integrate** - Returns reviews + stats |
+| Role Switch UI | `switchActiveRole(targetRole)`, `myActiveRole` | 🔲 Frontend only | **API exists** - Can use `switchActiveRole(SERVICE_USER)` or `switchActiveRole(SERVICE_PROVIDER)` |
+| Delete a Review | `deleteReview(id)` | ❓ pending integration | **Ready to integrate** - Admin only |
+| Provider Earnings Summary | `providerBookingStats` | ❓ pending integration | **Ready to integrate** - Returns totalEarnings, completedBookings, etc. |
+| Favourite Services | `addFavourite`, `removeFavourite`, `toggleFavourite`, `myFavourites`, `isFavourited` | ❓ pending integration | **Ready to integrate** - Full favourites system |
+| Dispute Management | `createDispute`, `myDisputes`, `bookingDispute` | ❓ pending integration | **Ready to integrate** - Full dispute system |
+
+### ⏳ APIs Not Yet Built (Confirmed Pending)
+
+| Feature | API Needed | Priority | Notes |
+|---------|-----------|----------|-------|
+| Initiate Payment | `initializePayment(bookingId)` | HIGH | Paystack/Stripe integration needed |
+| Verify Payment | `verifyPayment(reference)` | HIGH | Payment webhook handler needed |
+| Request Refund | `requestRefund(bookingId, reason)` | MEDIUM | Part of payment system |
+| Payment History | `myPayments`, `allPayments` | MEDIUM | Part of payment system |
+| Register Push Token | `registerPushToken(token)` | MEDIUM | Expo push token storage |
+
+### ✅ APIs Now Built (Previously Pending)
+
+| Feature | API | Status | Notes |
+|---------|-----|--------|-------|
+| Send Message | `sendMessage(conversationId, content)` | ✅ Built | Full messaging system |
+| List Conversations | `myConversations` | ✅ Built | With pagination & filters |
+| Read Messages | `conversationMessages(conversationId)` | ✅ Built | With read receipts |
+| Real-time Chat | WebSocket via Socket.io | ✅ Built | Redis-powered scaling |
+| Notifications List | `myNotifications` | ✅ Built | With filters & pagination |
+| Mark Notification Read | `markNotificationAsRead(id)` | ✅ Built | Single & bulk operations |
+| Upload Profile Photo | `uploadProfilePhoto` | ✅ Built | Cloudinary integration |
+| Upload Service Images | `uploadServiceImages` | ✅ Built | Cloudinary integration |
+
+### ✅ Admin APIs Already Built
+
+| Feature | API | Status |
+|---------|-----|--------|
+| View All Bookings | `allBookings(filters, pagination)` | ✅ Built |
+| View Single Booking | `booking(id)` | ✅ Built |
+| Cancel Any Booking | `adminCancelBooking(id, reason)` | ✅ Built |
+| Manage Categories | `createCategory`, `updateCategory`, `deleteCategory` | ✅ Built |
+| Delete a Review | `deleteReview(id)` | ✅ Built |
+| View All Disputes | `allDisputes(filters, pagination)` | ✅ Built |
+| Review Dispute | `takeDisputeUnderReview(disputeId)` | ✅ Built |
+| Resolve Dispute | `resolveDispute(disputeId, input)` | ✅ Built |
+| Close Dispute | `closeDispute(disputeId, reason)` | ✅ Built |
+| Dispute Stats | `disputeStats`, `openDisputesCount` | ✅ Built |
+| System Announcements | `sendSystemAnnouncement` | ✅ Built |
+| Upload Stats | `uploadStats` | ✅ Built |
+| Notification Stats | `notificationStats` | ✅ Built |
+
+### ❌ Admin APIs Not Yet Built
+
+| Feature | API Needed | Priority |
+|---------|-----------|----------|
+| View All Reviews | `allReviews(filters, pagination)` | LOW |
+| View All Payments | `allPayments(filters, pagination)` | HIGH (with payment system) |
+| Process a Refund | `processRefund(paymentId)` | HIGH (with payment system) |
+| Platform Analytics | `platformStats` | LOW |
+| Audit Logs | `auditLogs(filters, pagination)` | LOW |
+| Export Data | REST endpoint for CSV/Excel | LOW |
 
 ---
 
@@ -462,6 +636,11 @@ const { user } = await becomeProvider({
 | **Payment** | 12 fields | Booking | ✅ Schema Complete |
 | **Review** | 11 fields | Booking, User, Provider | ✅ Schema Complete |
 | **ServiceCategory** | 8 fields | Services | ✅ Schema Complete |
+| **Favourite** | 5 fields | User, Service | ✅ Schema Complete |
+| **Dispute** | 15 fields | Booking, Users | ✅ Schema Complete |
+| **Conversation** | 10 fields | Messages, Users | ✅ Schema Complete |
+| **Message** | 12 fields | Conversation, Sender | ✅ Schema Complete |
+| **Notification** | 12 fields | User | ✅ Schema Complete |
 
 ### 📊 Schema Coverage vs UX Requirements
 
@@ -492,78 +671,178 @@ const { user } = await becomeProvider({
 - ✅ `refreshToken(refreshToken: String!)` - Token refresh
 - ✅ `forgotPassword(input: ForgotPasswordInput!)` - Request password reset
 - ✅ `resetPassword(input: ResetPasswordInput!)` - Reset password with OTP
+- ✅ `changePassword(input: ChangePasswordInput!)` - Change password while logged in
+- ✅ `logout` - Logout and invalidate refresh token
 
 #### User Management
 - ✅ `me` - Get current authenticated user
 - ✅ `user(id: ID!)` - Get user by ID
 - ✅ `users(pagination: PaginationInput)` - List all users (paginated)
 - ✅ `updateProfile(input: UpdateProfileInput!)` - Update user profile
-- ✅ `deleteUser(id: ID!)` - Delete user account
+- ✅ `deleteUser(id: ID!)` - Delete user account (admin)
+- ✅ `deleteAccount` - Delete own account
+
+#### Service Provider Management
+- ✅ `becomeProvider(input: BecomeProviderInput!)` - Upgrade to SERVICE_PROVIDER
+- ✅ `updateProviderProfile(input: UpdateProviderProfileInput!)` - Update business profile
+- ✅ `submitProviderForVerification` - Submit provider profile for admin verification ✅ NEW
+- ✅ `myVerificationStatus` - Get provider's verification status ✅ NEW
+- ✅ `pendingProviders(pagination: PaginationInput)` - Get providers awaiting verification (admin)
+- ✅ `approveProvider(providerId: ID!)` - Approve provider with email notification (admin)
+- ✅ `rejectProvider(providerId: ID!, reason: String!)` - Reject provider with email notification (admin)
+
+#### Service Management
+- ✅ `services(filters: ServiceFiltersInput, pagination: PaginationInput)` - List services with filters
+- ✅ `service(id: ID!)` - Get service by ID
+- ✅ `myServices(pagination: PaginationInput)` - Get provider's own services
+- ✅ `createService(input: CreateServiceInput!)` - Create new service
+- ✅ `updateService(id: ID!, input: UpdateServiceInput!)` - Update service
+- ✅ `deleteService(id: ID!)` - Delete service
+- ✅ `submitServiceForApproval(id: ID!)` - Submit service for admin approval
+- ✅ `pendingServices(pagination: PaginationInput)` - Get services awaiting approval (admin)
+- ✅ `approveService(serviceId: ID!)` - Approve service (admin)
+- ✅ `rejectService(serviceId: ID!, reason: String!)` - Reject service (admin)
+- ✅ `suspendService(serviceId: ID!, reason: String!)` - Suspend service (admin)
+
+#### Category Management
+- ✅ `categories(pagination: PaginationInput)` - List all categories
+- ✅ `category(id: ID!)` - Get category by ID
+- ✅ `createCategory(input: CreateCategoryInput!)` - Create category (admin)
+- ✅ `updateCategory(id: ID!, input: UpdateCategoryInput!)` - Update category (admin)
+- ✅ `deleteCategory(id: ID!)` - Delete category (admin)
+
+#### Booking Management ✅ (March 13, 2026)
+- ✅ `booking(id: ID!)` - Get booking by ID
+- ✅ `myBookings(filters: BookingFiltersInput, pagination: PaginationInput)` - User's bookings
+- ✅ `providerBookings(filters: BookingFiltersInput, pagination: PaginationInput)` - Provider's bookings
+- ✅ `allBookings(filters: BookingFiltersInput, pagination: PaginationInput)` - All bookings (admin)
+- ✅ `myBookingStats` - User booking statistics
+- ✅ `providerBookingStats` - Provider booking statistics
+- ✅ `createBooking(input: CreateBookingInput!)` - Create new booking (user)
+- ✅ `updateBooking(id: ID!, input: UpdateBookingInput!)` - Update pending booking (user)
+- ✅ `cancelBooking(id: ID!, reason: String!)` - Cancel booking (user)
+- ✅ `acceptBooking(id: ID!)` - Accept booking (provider)
+- ✅ `rejectBooking(id: ID!, reason: String!)` - Reject booking (provider)
+- ✅ `startService(id: ID!)` - Start service, marks as IN_PROGRESS (provider)
+- ✅ `completeService(id: ID!)` - Complete service, marks as COMPLETED (provider)
+- ✅ `adminCancelBooking(id: ID!, reason: String!)` - Admin cancel any booking
+
+#### Review Management ✅ NEW (March 13, 2026)
+- ✅ `review(id: ID!)` - Get review by ID
+- ✅ `providerReviews(providerId: ID!, filters, pagination)` - Get reviews for a provider
+- ✅ `serviceReviews(serviceId: ID!, pagination)` - Get reviews for a service
+- ✅ `myReviews(pagination: PaginationInput)` - Get my written reviews
+- ✅ `providerRating(providerId: ID!)` - Get provider rating stats and distribution
+- ✅ `canReviewBooking(bookingId: ID!)` - Check if user can review a booking
+- ✅ `createReview(input: CreateReviewInput!)` - Create review for completed booking
+- ✅ `updateReview(id: ID!, input: UpdateReviewInput!)` - Update review within 24 hours
+- ✅ `respondToReview(reviewId: ID!, response: String!)` - Provider responds to review
+- ✅ `deleteReview(id: ID!)` - Delete review (admin)
+
+#### Favourites Management ✅ NEW (March 14, 2026)
+- ✅ `myFavourites(pagination: PaginationInput)` - Get user's favourites
+- ✅ `addFavourite(serviceId: ID!)` - Add to favourites
+- ✅ `removeFavourite(serviceId: ID!)` - Remove from favourites
+- ✅ `toggleFavourite(serviceId: ID!)` - Toggle favourite status
+- ✅ `isFavourited(serviceId: ID!)` - Check if favourited
+- ✅ `serviceFavouriteCount(serviceId: ID!)` - Get favourite count
+
+#### Dispute Management ✅ NEW (March 14, 2026)
+- ✅ `dispute(id: ID!)` - Get dispute by ID
+- ✅ `myDisputes(filters, pagination)` - Get user's disputes
+- ✅ `bookingDispute(bookingId: ID!)` - Get dispute for a booking
+- ✅ `allDisputes(filters, pagination)` - All disputes (admin)
+- ✅ `disputeStats` - Dispute statistics (admin)
+- ✅ `openDisputesCount` - Count of open disputes (admin)
+- ✅ `createDispute(input: CreateDisputeInput!)` - Create dispute
+- ✅ `addDisputeEvidence(disputeId: ID!, evidence: String!)` - Add evidence
+- ✅ `takeDisputeUnderReview(disputeId: ID!)` - Take under review (admin)
+- ✅ `resolveDispute(disputeId: ID!, input: ResolveDisputeInput!)` - Resolve (admin)
+- ✅ `closeDispute(disputeId: ID!, reason: String!)` - Close invalid (admin)
+
+#### File Upload Management ✅ NEW (March 14, 2026)
+- ✅ `uploadProfilePhoto(file: Upload!)` - Upload profile photo
+- ✅ `removeProfilePhoto` - Remove profile photo
+- ✅ `uploadServiceImages(serviceId: ID!, files: [Upload!]!)` - Upload service images
+- ✅ `removeServiceImage(serviceId: ID!, imageUrl: String!)` - Remove service image
+- ✅ `uploadProviderDocuments(files: [Upload!]!)` - Upload verification documents
+- ✅ `removeProviderDocument(documentUrl: String!)` - Remove document
+- ✅ `getProfileUploadParams` - Get signed upload params for profile
+- ✅ `getServiceUploadParams(serviceId: ID!)` - Get signed upload params for service
+- ✅ `getDocumentUploadParams` - Get signed upload params for documents
+- ✅ `getEvidenceUploadParams(disputeId: ID!)` - Get signed upload params for evidence
+- ✅ `uploadStats` - Upload statistics (admin)
+
+#### Messaging Management ✅ NEW (March 14, 2026)
+- ✅ `myConversations(filters, pagination)` - Get user's conversations
+- ✅ `conversation(id: ID!)` - Get conversation by ID
+- ✅ `conversationMessages(conversationId: ID!, pagination)` - Get messages
+- ✅ `bookingConversation(bookingId: ID!)` - Get/create booking conversation
+- ✅ `unreadMessageCount` - Get unread message count
+- ✅ `startConversation(input: StartConversationInput!)` - Start new conversation
+- ✅ `startSupportChat(subject: String!)` - Start support chat with admin
+- ✅ `sendMessage(input: SendMessageInput!)` - Send message
+- ✅ `markMessagesAsRead(conversationId: ID!, messageIds: [ID!])` - Mark as read
+- ✅ `archiveConversation(conversationId: ID!)` - Archive conversation
+- ✅ `deleteMessage(messageId: ID!)` - Delete own message
+
+#### Notification Management ✅ NEW (March 14, 2026)
+- ✅ `myNotifications(filters, pagination)` - Get user's notifications
+- ✅ `notification(id: ID!)` - Get notification by ID
+- ✅ `unreadNotificationCount` - Get unread count
+- ✅ `notificationStats` - Notification statistics
+- ✅ `markNotificationAsRead(id: ID!)` - Mark as read
+- ✅ `markAllNotificationsAsRead` - Mark all as read
+- ✅ `deleteNotification(id: ID!)` - Delete notification
+- ✅ `deleteReadNotifications` - Delete all read notifications
+- ✅ `sendSystemAnnouncement(input: SystemAnnouncementInput!)` - Send announcement (admin)
+
+#### Admin Authentication (Separate)
+- ✅ `adminLogin(input: AdminLoginInput!)` - Admin login
+- ✅ `adminRefreshToken(refreshToken: String!)` - Admin token refresh
+- ✅ `adminForgotPassword(input: AdminForgotPasswordInput!)` - Admin password reset request
+- ✅ `adminResetPassword(input: AdminResetPasswordInput!)` - Admin reset password
+- ✅ `adminChangePassword(input: AdminChangePasswordInput!)` - Admin change password
+- ✅ `adminLogout` - Admin logout
+- ✅ `adminMe` - Get current admin
+- ✅ `admins(pagination: PaginationInput)` - List all admins (super admin)
+- ✅ `admin(id: ID!)` - Get admin by ID (super admin)
+- ✅ `createAdmin(input: CreateAdminInput!)` - Create admin (super admin)
+- ✅ `updateAdminProfile(input: UpdateAdminInput!)` - Update admin profile
+- ✅ `suspendAdmin(adminId: ID!, reason: String!)` - Suspend admin (super admin)
+- ✅ `activateAdmin(adminId: ID!)` - Activate admin (super admin)
+- ✅ `updateAdminRole(adminId: ID!, role: AdminRole!)` - Update admin role (super admin)
+- ✅ `deleteAdmin(adminId: ID!)` - Delete admin (super admin)
+
+#### User Management (Admin)
+- ✅ `suspendUser(userId: ID!, reason: String!)` - Suspend user
+- ✅ `activateUser(userId: ID!)` - Activate user
 
 ### ❌ Missing Endpoints (Priority Order)
 
 #### 🔴 High Priority (MVP)
 
-**Service Provider APIs**
-- ❌ `registerAsProvider(input: RegisterProviderInput!)` - Convert to provider
-- ❌ `uploadProviderDocuments(documents: [Upload!]!)` - Upload verification docs
-- ❌ `updateProviderProfile(input: UpdateProviderInput!)` - Update business info
-
-**Service APIs**
-- ❌ `createService(input: CreateServiceInput!)` - Create new service
-- ❌ `updateService(id: ID!, input: UpdateServiceInput!)` - Update service
-- ❌ `deleteService(id: ID!)` - Delete service
-- ❌ `services(filters: ServiceFiltersInput, pagination: PaginationInput)` - List services
-- ❌ `service(id: ID!)` - Get service details
-- ❌ `uploadServiceImages(serviceId: ID!, images: [Upload!]!)` - Add images
-
-**Booking APIs**
-- ❌ `createBooking(input: CreateBookingInput!)` - Book a service
-- ❌ `acceptBooking(bookingId: ID!)` - Provider accepts booking
-- ❌ `rejectBooking(bookingId: ID!, reason: String!)` - Provider rejects
-- ❌ `updateBookingStatus(bookingId: ID!, status: BookingStatus!)` - Status change
-- ❌ `cancelBooking(bookingId: ID!, reason: String!)` - Cancel booking
-- ❌ `myBookings(filters: BookingFiltersInput)` - User's bookings
-- ❌ `providerBookings(filters: BookingFiltersInput)` - Provider's bookings
-
 **Payment APIs**
 - ❌ `initializePayment(bookingId: ID!)` - Start payment process
 - ❌ `verifyPayment(transactionRef: String!)` - Verify payment status
 - ❌ `myPayments(pagination: PaginationInput)` - Payment history
+- ❌ `allPayments(pagination: PaginationInput)` - All payments (admin)
+- ❌ `processRefund(paymentId: ID!)` - Process refund (admin)
 
-#### 🟡 Medium Priority
+#### � Medium Priority
 
-**Review APIs**
-- ❌ `createReview(input: CreateReviewInput!)` - Rate a booking
-- ❌ `respondToReview(reviewId: ID!, response: String!)` - Provider response
-- ❌ `reviews(providerId: ID!, pagination: PaginationInput)` - Provider reviews
-- ❌ `providerRating(providerId: ID!)` - Get average rating
+**Push Notifications**
+- ❌ `registerPushToken(token: String!, platform: String!)` - Register device token
+- ❌ `removePushToken(token: String!)` - Remove device token
 
-**Service Category APIs**
-- ❌ `createCategory(input: CreateCategoryInput!)` - Admin creates category
-- ❌ `updateCategory(id: ID!, input: UpdateCategoryInput!)` - Update category
-- ❌ `deleteCategory(id: ID!)` - Delete category
-- ❌ `categories` - List all categories
-
-**Admin APIs**
-- ❌ `approveProvider(providerId: ID!)` - Verify provider
-- ❌ `rejectProvider(providerId: ID!, reason: String!)` - Reject provider
-- ❌ `suspendUser(userId: ID!, reason: String!)` - Suspend account
-- ❌ `activateUser(userId: ID!)` - Activate account
-- ❌ `approveService(serviceId: ID!)` - Approve service listing
-- ❌ `suspendService(serviceId: ID!, reason: String!)` - Suspend service
-- ❌ `platformAnalytics` - Get platform statistics
+**Geolocation**
+- ❌ `nearbyProviders(latitude: Float!, longitude: Float!, radius: Float!)` - Geo search
 
 #### 🟢 Low Priority
 
-**Notification APIs**
-- ❌ `notifications(pagination: PaginationInput)` - Get notifications
-- ❌ `markNotificationRead(notificationId: ID!)` - Mark as read
-- ❌ `updateNotificationSettings(input: NotificationSettingsInput!)` - Settings
-
-**Search & Filter APIs**
-- ❌ `searchServices(query: String!, filters: ServiceFiltersInput)` - Full-text search
-- ❌ `nearbyProviders(latitude: Float!, longitude: Float!, radius: Float!)` - Geo search
+**Admin Analytics**
+- ❌ `platformAnalytics` - Get platform statistics
+- ❌ `auditLogs(pagination: PaginationInput)` - Audit logs
 
 ---
 
@@ -581,66 +860,136 @@ const { user } = await becomeProvider({
 | **Token-based Authentication** | ✅ Complete | JWT with access + refresh tokens |
 | **Password Recovery** | ✅ Complete | OTP-based reset flow |
 | **Profile Management** | ✅ Complete | Update name and phone |
+| **Service Provider Registration** | ✅ Complete | `becomeProvider` mutation, profile management |
+| **Identity Verification** | ✅ Complete | Admin approval/rejection workflow |
+| **Service Listings** | ✅ Complete | Full CRUD, filters, approval workflow |
+| **Service Browsing** | ✅ Complete | List, filter by category/price/status |
+| **Service Categories** | ✅ Complete | Full CRUD with admin management |
+| **Booking System** | ✅ Complete (March 2026) | Full booking lifecycle with status workflow |
+| **Admin Management** | ✅ Complete | Admin auth, user/provider/service management |
+| **Reviews & Ratings** | ✅ Complete (March 2026) | 1-5 rating, comments, provider response, stats |
 
 ### ⏳ Partially Implemented UX Features
 
 | UX Feature | Current Status | What's Missing | Priority |
 |------------|----------------|----------------|----------|
-| **Service Provider Registration** | ⚠️ Schema Only | Registration flow, document upload | 🔴 High |
-| **Identity Verification** | ⚠️ Schema Only | Document upload, admin approval workflow | 🔴 High |
-| **Service Listings** | ⚠️ Schema Only | CRUD operations, image upload | 🔴 High |
-| **Service Browsing** | ⚠️ Schema Only | List, filter, search APIs | 🔴 High |
-| **Booking System** | ⚠️ Schema Only | Complete booking flow | 🔴 High |
 | **Payment Integration** | ⚠️ Schema Only | Paystack/Stripe setup, webhooks | 🔴 High |
-| **Reviews & Ratings** | ⚠️ Schema Only | Create, list, respond to reviews | 🟡 Medium |
-| **Admin Management** | ⚠️ Schema Only | Approval workflows, analytics | 🟡 Medium |
+| **Push Notifications** | ⚠️ In-App Only | Firebase/APNs for mobile push | 🟡 Medium |
 
 ### ❌ Not Yet Implemented UX Features
 
 | UX Feature | Requirement | Estimated Effort |
 |------------|-------------|------------------|
 | **Social Login** | Google/Facebook OAuth | 3-4 days |
-| **Push Notifications** | Real-time updates for bookings | 3-4 days |
 | **Geolocation Search** | Find providers near user | 2-3 days |
-| **In-App Messaging** | Chat between user and provider | 5-7 days |
 | **Availability Calendar** | Provider time slot management | 3-4 days |
 | **Multi-currency Support** | International payments | 2-3 days |
-| **Service Gallery** | Multiple images per service | 2 days |
-| **Booking History** | Detailed history with filters | 1 day |
-| **Provider Analytics** | Earnings, ratings dashboard | 3 days |
-| **Dispute Resolution** | Admin dispute handling | 3 days |
+
+### ✅ Recently Implemented UX Features (March 2026)
+
+| UX Feature | Implementation Status | Notes |
+|------------|----------------------|-------|
+| **File Uploads** | ✅ Complete | Cloudinary integration, profile photos, service images, documents |
+| **In-App Messaging** | ✅ Complete | Full chat system with multiple conversation types |
+| **Real-time Chat** | ✅ Complete | WebSocket via Socket.io with Redis scaling |
+| **Notification System** | ✅ Complete | In-app notifications with real-time delivery |
+| **Dispute Resolution** | ✅ Complete | Full dispute lifecycle with admin management |
+| **Favourites System** | ✅ Complete | Add/remove/toggle favourites |
+| **Background Jobs** | ✅ Complete | BullMQ with email and notification queues |
 
 ---
 
 ## Next Steps & Priorities
 
-### 🎯 Phase 1: Core Marketplace MVP (4-6 weeks)
+### ✅ Phase 1: Core Marketplace MVP - COMPLETE
 
-**Week 1-2: Service Provider System**
-1. ✅ Schema already complete
-2. Implement `registerAsProvider` mutation
-3. Add file upload for verification documents
-4. Create admin approval workflow
-5. Build provider profile management
+**Authentication & User Management** ✅
+- User registration with email verification
+- Login, logout, password recovery
+- Profile management
+- Account lockout protection
 
-**Week 3-4: Services CRUD**
-1. Implement service creation with images
-2. Build service listing with filters (category, price, location)
-3. Add service search functionality
-4. Implement service category management
+**Service Provider System** ✅
+- Provider registration (becomeProvider)
+- Provider profile management
+- Admin approval/rejection workflow
 
-**Week 5-6: Booking System**
-1. Create booking flow (request → accept/reject → in-progress → complete)
-2. Implement booking cancellation
-3. Build booking history for users and providers
-4. Add status update notifications (via email for now)
+**Services CRUD** ✅
+- Service creation with pricing
+- Service listing with filters (category, price, status, provider)
+- Service search and browsing
+- Admin approval workflow
 
-### 🎯 Phase 2: Payment Integration (2-3 weeks)
+**Booking System** ✅ (March 13, 2026)
+- Full booking lifecycle (PENDING → ACCEPTED → IN_PROGRESS → COMPLETED)
+- User booking management (create, update, cancel)
+- Provider booking management (accept, reject, start, complete)
+- Admin booking oversight
+- Booking statistics for users and providers
+- 10% platform commission calculation
+
+### ✅ Phase 2: Reviews & Quality - COMPLETE (March 13, 2026)
+
+**Reviews & Ratings** ✅
+- Review creation after booking completion
+- Provider response system
+- Average ratings with distribution
+- Reviews with pagination
+
+### ✅ Phase 3: File Uploads - COMPLETE (March 14, 2026)
+
+**Cloudinary Integration** ✅
+- Provider document upload (verification docs)
+- Service image upload (multiple images)
+- Profile photo upload
+- Image optimization and transformations
+- Signed upload params for client-side uploads
+
+### ✅ Phase 4: Messaging & Notifications - COMPLETE (March 14, 2026)
+
+**In-App Messaging** ✅
+- User-Provider conversations
+- User-Admin support chat
+- Admin-SuperAdmin communication
+- Booking-related chat
+- Message attachments support
+
+**Real-time System** ✅
+- WebSocket server with Socket.io
+- Redis Pub/Sub for horizontal scaling
+- Typing indicators
+- Read receipts
+- User presence (online/offline)
+- Real-time notifications
+
+**Notification System** ✅
+- In-app notifications for all events
+- System announcements
+- Notification statistics
+
+### ✅ Phase 5: Advanced Features - COMPLETE (March 14, 2026)
+
+**Favourites System** ✅
+- Add/remove/toggle favourites
+- Favourite counts
+
+**Dispute Resolution** ✅
+- Full dispute lifecycle
+- Admin management
+- Multiple resolution types
+
+**Background Job Processing** ✅
+- BullMQ with Redis
+- Email queue with templates
+- Notification queue
+- Scheduled jobs (cleanup, digest, analytics)
+
+### 🎯 Phase 6: Payment Integration (2-3 weeks) - NEXT
 
 **Week 1-2: Paystack Integration**
-1. Initialize payment on booking creation
+1. Initialize payment on booking acceptance
 2. Verify payment via webhooks
-3. Calculate and deduct commission
+3. Calculate and apply commission
 4. Create payment records
 
 **Week 3: Payout & Refunds**
@@ -648,43 +997,29 @@ const { user } = await becomeProvider({
 2. Refund processing for cancellations
 3. Payment history and reporting
 
-### 🎯 Phase 3: Reviews & Quality (1-2 weeks)
+### 🎯 Phase 7: Enhanced Features (Optional)
 
-1. Implement review creation after booking completion
-2. Build provider response system
-3. Calculate average ratings
-4. Display reviews with pagination
-
-### 🎯 Phase 4: Admin Panel (2-3 weeks)
-
-1. User management (suspend, activate, delete)
-2. Provider verification workflow
-3. Service moderation
-4. Transaction monitoring
-5. Platform analytics dashboard
-6. Commission configuration
-
-### 🎯 Phase 5: Enhanced Features (3-4 weeks)
-
-1. Push notifications (Firebase)
+1. Push notifications (Firebase/APNs)
 2. Geolocation search
-3. Advanced filters and search
-4. Provider availability calendar
-5. In-app chat (optional)
-6. Social login (Google/Facebook)
+3. Provider availability calendar
+4. Social login (Google/Facebook)
 
 ---
 
 ## Technical Debt & Improvements
 
+### ✅ Resolved Technical Debt (March 2026)
+- ✅ File upload system - Cloudinary integration complete
+- ✅ Image optimization/processing - Cloudinary transformations
+- ✅ Background job processing - BullMQ with Redis queues
+- ✅ Real-time updates - WebSocket with Socket.io
+
 ### Current Technical Debt
 - ❌ Email service using Mailtrap (dev only) - needs production SMTP
-- ❌ No file upload system - need to implement (AWS S3, Cloudinary, or similar)
-- ❌ No image optimization/processing
-- ❌ No request rate limiting
-- ❌ No API caching
-- ❌ No background job processing (for emails, notifications)
+- ❌ No request rate limiting (basic rate limiting in Redis available but not enforced on API)
+- ❌ No API caching (Redis available but caching not implemented on GraphQL)
 - ❌ No comprehensive error logging (Sentry, LogRocket)
+- ❌ No push notifications (Firebase/APNs) - only in-app notifications
 - ❌ No automated testing suite
 
 ### Recommended Improvements
@@ -724,15 +1059,58 @@ const { user } = await becomeProvider({
 ## Summary
 
 **Total UX Features**: ~50 features  
-**Implemented**: ~15 features (30%)  
-**Partially Complete**: ~8 features (16%)  
-**Pending**: ~27 features (54%)
+**Implemented**: ~35 features (70%)  
+**Partially Complete**: ~5 features (10%)  
+**Pending**: ~10 features (20%)
 
-**Estimated Time to MVP**: 4-6 weeks for core marketplace functionality  
-**Estimated Time to Full Platform**: 12-16 weeks including all UX features
+**Current State**: ✅ Authentication, User Management, Provider System, Services, Categories, and Booking System fully functional  
+**Next Milestone**: 🎯 Payment Integration (Paystack/Stripe)
 
-**Current State**: ✅ Authentication & user management fully functional and deployed  
-**Next Milestone**: 🎯 Implement service provider registration and service listings (Phase 1)
+**Estimated Time to Full Platform**: 4-6 weeks for remaining features (payments, file uploads, enhanced features)
+
+---
+
+### Recent Updates
+
+#### March 14, 2026 - Role Switching (Dual Mode) Complete
+- ✅ Added `activeRole` field to User model - tracks current operating mode
+- ✅ Added `switchActiveRole` mutation - toggle between SERVICE_USER and SERVICE_PROVIDER
+- ✅ Added `myActiveRole` query - check current role status and switching capability
+- ✅ Providers can now switch to User Mode to book services from other providers
+- ✅ Updated all auth responses to include activeRole
+- ✅ Frontend can use activeRole to show appropriate UI (provider dashboard vs user dashboard)
+
+#### March 13, 2026 - Review System Complete
+- ✅ Added `createReview` mutation - users can review completed bookings (1-5 stars)
+- ✅ Added `updateReview` mutation - edit reviews within 24 hours
+- ✅ Added `respondToReview` mutation - providers can respond to reviews
+- ✅ Added `providerReviews` query - get all reviews for a provider with filters
+- ✅ Added `serviceReviews` query - get reviews for a specific service
+- ✅ Added `myReviews` query - users can see their written reviews
+- ✅ Added `providerRating` query - get average rating with distribution (5-star breakdown)
+- ✅ Added `canReviewBooking` query - check if a booking can be reviewed
+- ✅ Added `deleteReview` mutation - admin can delete inappropriate reviews
+- ✅ Review validation: only completed bookings, one review per booking
+
+#### March 13, 2026 - Provider Verification Workflow Complete
+- ✅ Added `submitProviderForVerification` mutation - providers can submit/re-submit for review
+- ✅ Added `myVerificationStatus` query - check verification status with helpful messages
+- ✅ Enhanced `approveProvider` - now sends congratulations email
+- ✅ Enhanced `rejectProvider` - now sends email with rejection reason
+- ✅ Added email templates for provider verification (submission, approval, rejection)
+- ✅ Re-submission flow after rejection
+
+#### March 13, 2026 - Booking System Complete
+- ✅ Added full booking lifecycle management
+- ✅ 14 new GraphQL endpoints (queries + mutations)
+- ✅ User booking operations (create, update, cancel)
+- ✅ Provider operations (accept, reject, start, complete)
+- ✅ Admin oversight (view all, admin cancel)
+- ✅ Booking statistics for users and providers
+- ✅ 10% platform commission calculation
+- ✅ Validation: 2-hour minimum advance booking, 24-hour cancellation window
+- ✅ Updated SpectaQL documentation
+- ✅ Updated Frontend Integration guide
 
 ---
 

@@ -60,6 +60,61 @@ export const typeDefs = gql`
     SUSPENDED
   }
 
+  enum DisputeStatus {
+    OPEN
+    UNDER_REVIEW
+    RESOLVED
+    CLOSED
+  }
+
+  enum DisputeResolution {
+    REFUND_FULL
+    REFUND_PARTIAL
+    NO_REFUND
+    REDO_SERVICE
+    MUTUAL_AGREEMENT
+    DISMISSED
+  }
+
+  enum ConversationType {
+    USER_PROVIDER
+    USER_ADMIN
+    ADMIN_SUPERADMIN
+    BOOKING_RELATED
+  }
+
+  enum MessageStatus {
+    SENT
+    DELIVERED
+    READ
+  }
+
+  enum NotificationType {
+    BOOKING_CREATED
+    BOOKING_ACCEPTED
+    BOOKING_REJECTED
+    BOOKING_CANCELLED
+    BOOKING_STARTED
+    BOOKING_COMPLETED
+    PAYMENT_RECEIVED
+    PAYMENT_FAILED
+    REFUND_PROCESSED
+    REVIEW_RECEIVED
+    REVIEW_RESPONSE
+    VERIFICATION_APPROVED
+    VERIFICATION_REJECTED
+    SERVICE_APPROVED
+    SERVICE_REJECTED
+    SERVICE_SUSPENDED
+    DISPUTE_OPENED
+    DISPUTE_UPDATED
+    DISPUTE_RESOLVED
+    NEW_MESSAGE
+    ACCOUNT_SUSPENDED
+    ACCOUNT_ACTIVATED
+    SYSTEM_ANNOUNCEMENT
+  }
+
   # Admin role enum (subset for creation)
   enum AdminRole {
     ADMIN
@@ -159,13 +214,245 @@ export const typeDefs = gql`
   # Review
   type Review {
     id: ID!
-    bookingId: ID!
-    user: User!
-    provider: ServiceProviderProfile!
     rating: Int!
     comment: String
+    response: String
+    respondedAt: String
     createdAt: String!
     updatedAt: String!
+    user: ReviewUser
+    provider: ReviewProvider
+    booking: ReviewBooking
+  }
+
+  type ReviewUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    email: String!
+  }
+
+  type ReviewProvider {
+    id: ID!
+    businessName: String!
+    user: ReviewProviderUser
+  }
+
+  type ReviewProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+  }
+
+  type ReviewBooking {
+    id: ID!
+    scheduledDate: String!
+    service: ReviewService
+  }
+
+  type ReviewService {
+    id: ID!
+    title: String!
+  }
+
+  # Paginated Reviews
+  type PaginatedReviews {
+    reviews: [Review!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Provider Rating Stats
+  type ProviderRatingStats {
+    averageRating: Float!
+    totalReviews: Int!
+    fiveStars: Int!
+    fourStars: Int!
+    threeStars: Int!
+    twoStars: Int!
+    oneStar: Int!
+  }
+
+  # Can Review Response
+  type CanReviewResponse {
+    canReview: Boolean!
+    reason: String
+  }
+
+  # ==================
+  # Favourite Types
+  # ==================
+
+  # Favourite
+  type Favourite {
+    id: ID!
+    createdAt: String!
+    service: FavouriteService
+  }
+
+  # Service details in favourite
+  type FavouriteService {
+    id: ID!
+    name: String!
+    slug: String!
+    description: String!
+    price: Float!
+    duration: Int!
+    status: ServiceStatus!
+    images: [String!]!
+    createdAt: String!
+    updatedAt: String!
+    category: FavouriteCategory
+    provider: FavouriteProvider
+  }
+
+  type FavouriteCategory {
+    id: ID!
+    name: String!
+    slug: String!
+    icon: String
+  }
+
+  type FavouriteProvider {
+    id: ID!
+    businessName: String!
+    verificationStatus: VerificationStatus!
+    city: String!
+    state: String!
+    user: FavouriteProviderUser
+  }
+
+  type FavouriteProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+  }
+
+  # Paginated Favourites
+  type PaginatedFavourites {
+    favourites: [Favourite!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Is Favourited Response
+  type IsFavouritedResponse {
+    isFavourited: Boolean!
+    favouriteId: ID
+  }
+
+  # Toggle Favourite Response
+  type ToggleFavouriteResponse {
+    isFavourited: Boolean!
+    message: String!
+  }
+
+  # Service Favourite Count Response
+  type ServiceFavouriteCountResponse {
+    count: Int!
+  }
+
+  # ==================
+  # Dispute Types
+  # ==================
+
+  # Dispute
+  type Dispute {
+    id: ID!
+    reason: String!
+    description: String!
+    evidence: [String!]!
+    status: DisputeStatus!
+    raisedByRole: UserRole!
+    resolution: DisputeResolution
+    resolutionNotes: String
+    refundAmount: Float
+    resolvedAt: String
+    createdAt: String!
+    updatedAt: String!
+    booking: DisputeBooking
+  }
+
+  type DisputeBooking {
+    id: ID!
+    status: BookingStatus!
+    scheduledDate: String!
+    scheduledTime: String!
+    servicePrice: Float!
+    totalAmount: Float!
+    user: DisputeUser
+    provider: DisputeProvider
+    service: DisputeService
+  }
+
+  type DisputeUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    email: String!
+  }
+
+  type DisputeProvider {
+    id: ID!
+    businessName: String!
+    user: DisputeProviderUser
+  }
+
+  type DisputeProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    email: String!
+  }
+
+  type DisputeService {
+    id: ID!
+    name: String!
+    price: Float!
+  }
+
+  # Paginated Disputes
+  type PaginatedDisputes {
+    disputes: [Dispute!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Open Disputes Count Response
+  type OpenDisputesCountResponse {
+    count: Int!
+  }
+
+  # Dispute Statistics
+  type DisputeStats {
+    total: Int!
+    open: Int!
+    underReview: Int!
+    resolved: Int!
+    closed: Int!
+    pending: Int!
+    resolutions: DisputeResolutionBreakdown
+  }
+
+  type DisputeResolutionBreakdown {
+    REFUND_FULL: Int
+    REFUND_PARTIAL: Int
+    NO_REFUND: Int
+    REDO_SERVICE: Int
+    MUTUAL_AGREEMENT: Int
+    DISMISSED: Int
   }
 
   # Booking Statistics
@@ -186,13 +473,24 @@ export const typeDefs = gql`
     firstName: String!
     lastName: String!
     phone: String
+    profilePhoto: String
     role: UserRole!
+    activeRole: UserRole!  # Current active mode (for role switching)
     status: AccountStatus!
     isEmailVerified: Boolean!
     # Provider profile is only populated when role is SERVICE_PROVIDER
     providerProfile: ServiceProviderProfile
     createdAt: String!
     updatedAt: String!
+  }
+
+  # Active Role Status
+  type ActiveRoleStatus {
+    currentRole: UserRole!
+    activeRole: UserRole!
+    canSwitch: Boolean!
+    hasProviderProfile: Boolean!
+    message: String!
   }
 
   # Admin User - separate type for clarity
@@ -240,6 +538,12 @@ export const typeDefs = gql`
 
   type MessageResponse {
     success: Boolean!
+    message: String!
+  }
+
+  type VerificationStatusResponse {
+    status: VerificationStatus!
+    canSubmit: Boolean!
     message: String!
   }
 
@@ -441,6 +745,271 @@ export const typeDefs = gql`
   }
 
   # ==================
+  # Input Types - Reviews
+  # ==================
+
+  input CreateReviewInput {
+    bookingId: ID!
+    rating: Int!
+    comment: String
+  }
+
+  input UpdateReviewInput {
+    rating: Int
+    comment: String
+  }
+
+  input ReviewFiltersInput {
+    rating: Int
+    hasResponse: Boolean
+  }
+
+  # ==================
+  # Input Types - Disputes
+  # ==================
+
+  input CreateDisputeInput {
+    bookingId: ID!
+    reason: String!
+    description: String!
+    evidence: [String!]
+  }
+
+  input ResolveDisputeInput {
+    resolution: DisputeResolution!
+    resolutionNotes: String!
+    refundAmount: Float
+  }
+
+  input DisputeFiltersInput {
+    status: DisputeStatus
+    raisedByRole: UserRole
+  }
+
+  # ==================
+  # Input Types - File Uploads
+  # ==================
+
+  input FileUploadInput {
+    base64Data: String!
+    filename: String!
+  }
+
+  # ==================
+  # Upload Types
+  # ==================
+
+  # Upload result
+  type UploadResult {
+    url: String!
+    publicId: String!
+    format: String!
+    width: Int
+    height: Int
+    bytes: Int!
+    resourceType: String!
+  }
+
+  # Profile photo upload response
+  type ProfilePhotoResponse {
+    success: Boolean!
+    url: String!
+    publicId: String!
+    message: String!
+  }
+
+  # Multiple upload response
+  type MultipleUploadResponse {
+    success: Boolean!
+    urls: [String!]!
+    message: String!
+  }
+
+  # Signed upload parameters (for client-side uploads)
+  type SignedUploadParams {
+    signature: String!
+    timestamp: Int!
+    cloudName: String!
+    apiKey: String!
+    folder: String!
+  }
+
+  # Upload statistics (Admin)
+  type UploadStats {
+    totalProfiles: Int!
+    totalServiceImages: Int!
+    totalDocuments: Int!
+  }
+
+  # ==================
+  # Messaging Types
+  # ==================
+
+  # Conversation participant info
+  type ConversationParticipant {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    profilePhoto: String
+    role: UserRole!
+    businessName: String
+  }
+
+  # Conversation
+  type Conversation {
+    id: ID!
+    type: ConversationType!
+    participantIds: [ID!]!
+    bookingId: ID
+    subject: String
+    isActive: Boolean!
+    lastMessageAt: String
+    lastMessageText: String
+    createdAt: String!
+    updatedAt: String!
+    otherParticipant: ConversationParticipant
+    unreadCount: Int
+  }
+
+  # Paginated Conversations
+  type PaginatedConversations {
+    conversations: [Conversation!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Message sender info
+  type MessageSender {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    profilePhoto: String
+    role: UserRole!
+    businessName: String
+  }
+
+  # Message
+  type Message {
+    id: ID!
+    conversationId: ID!
+    senderId: ID!
+    senderRole: UserRole!
+    content: String!
+    attachments: [String!]!
+    status: MessageStatus!
+    readBy: [ID!]!
+    readAt: String
+    replyToId: ID
+    isDeleted: Boolean!
+    createdAt: String!
+    updatedAt: String!
+    sender: MessageSender
+  }
+
+  # Paginated Messages
+  type PaginatedMessages {
+    messages: [Message!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Unread message count
+  type UnreadMessageCount {
+    count: Int!
+  }
+
+  # ==================
+  # Notification Types
+  # ==================
+
+  # Notification
+  type Notification {
+    id: ID!
+    userId: ID!
+    type: NotificationType!
+    title: String!
+    message: String!
+    entityType: String
+    entityId: ID
+    metadata: String
+    isRead: Boolean!
+    readAt: String
+    isPushed: Boolean!
+    pushedAt: String
+    createdAt: String!
+  }
+
+  # Paginated Notifications
+  type PaginatedNotifications {
+    notifications: [Notification!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Unread notification count
+  type UnreadNotificationCount {
+    count: Int!
+  }
+
+  # Notification statistics
+  type NotificationStats {
+    total: Int!
+    unread: Int!
+    read: Int!
+    byType: String  # JSON string of type counts
+  }
+
+  # ==================
+  # Input Types - Messaging
+  # ==================
+
+  input StartConversationInput {
+    participantId: ID!
+    subject: String
+    bookingId: ID
+    initialMessage: String
+  }
+
+  input SendMessageInput {
+    conversationId: ID!
+    content: String!
+    attachments: [String!]
+    replyToId: ID
+  }
+
+  input StartSupportChatInput {
+    subject: String!
+    initialMessage: String!
+  }
+
+  # ==================
+  # Input Types - Notifications
+  # ==================
+
+  input NotificationFiltersInput {
+    type: NotificationType
+    isRead: Boolean
+  }
+
+  input SendAnnouncementInput {
+    title: String!
+    message: String!
+    targetRoles: [UserRole!]
+  }
+
+  # ==================
   # Input Types - Admin (Separate)
   # ==================
 
@@ -529,6 +1098,34 @@ export const typeDefs = gql`
     
     # Get services by provider (for provider's own services)
     myServices(pagination: PaginationInput): PaginatedServices!
+    
+    # Get provider verification status
+    myVerificationStatus: VerificationStatusResponse!
+
+    # Get current active role status (for role switching)
+    myActiveRole: ActiveRoleStatus!
+
+    # ==================
+    # Review Queries
+    # ==================
+
+    # Get review by ID
+    review(id: ID!): Review
+
+    # Get reviews for a provider
+    providerReviews(providerId: ID!, filters: ReviewFiltersInput, pagination: PaginationInput): PaginatedReviews!
+
+    # Get reviews for a service
+    serviceReviews(serviceId: ID!, pagination: PaginationInput): PaginatedReviews!
+
+    # Get my reviews (reviews I've written)
+    myReviews(pagination: PaginationInput): PaginatedReviews!
+
+    # Get provider's rating statistics
+    providerRating(providerId: ID!): ProviderRatingStats!
+
+    # Check if user can review a booking
+    canReviewBooking(bookingId: ID!): CanReviewResponse!
 
     # ==================
     # Admin Queries (Separate)
@@ -570,6 +1167,98 @@ export const typeDefs = gql`
     
     # Get all bookings (Admin only)
     allBookings(filters: BookingFiltersInput, pagination: PaginationInput): PaginatedBookings!
+
+    # ==================
+    # Favourite Queries
+    # ==================
+    
+    # Get user's favourites
+    myFavourites(pagination: PaginationInput): PaginatedFavourites!
+    
+    # Get a specific favourite by ID
+    favourite(id: ID!): Favourite
+    
+    # Check if a service is favourited
+    isFavourited(serviceId: ID!): IsFavouritedResponse!
+    
+    # Get favourite count for a service (public - useful for popularity)
+    serviceFavouriteCount(serviceId: ID!): ServiceFavouriteCountResponse!
+
+    # ==================
+    # Dispute Queries
+    # ==================
+    
+    # Get dispute by ID
+    dispute(id: ID!): Dispute
+    
+    # Get dispute for a booking
+    bookingDispute(bookingId: ID!): Dispute
+    
+    # Get user's disputes (as user or provider)
+    myDisputes(filters: DisputeFiltersInput, pagination: PaginationInput): PaginatedDisputes!
+    
+    # Get all disputes (Admin only)
+    allDisputes(filters: DisputeFiltersInput, pagination: PaginationInput): PaginatedDisputes!
+    
+    # Get open disputes count (Admin dashboard)
+    openDisputesCount: OpenDisputesCountResponse!
+    
+    # Get dispute statistics (Admin dashboard)
+    disputeStats: DisputeStats!
+
+    # ==================
+    # Upload Queries
+    # ==================
+    
+    # Get signed upload parameters for client-side upload (Profile)
+    getProfileUploadParams: SignedUploadParams!
+    
+    # Get signed upload parameters for client-side upload (Service images)
+    getServiceUploadParams: SignedUploadParams!
+    
+    # Get signed upload parameters for client-side upload (Documents)
+    getDocumentUploadParams: SignedUploadParams!
+    
+    # Get signed upload parameters for client-side upload (Evidence)
+    getEvidenceUploadParams: SignedUploadParams!
+    
+    # Get upload statistics (Admin)
+    uploadStats: UploadStats!
+
+    # ==================
+    # Messaging Queries
+    # ==================
+
+    # Get user's conversations
+    myConversations(pagination: PaginationInput): PaginatedConversations!
+
+    # Get conversation by ID
+    conversation(id: ID!): Conversation
+
+    # Get messages in a conversation
+    conversationMessages(conversationId: ID!, pagination: PaginationInput): PaginatedMessages!
+
+    # Get unread message count
+    unreadMessageCount: UnreadMessageCount!
+
+    # Get booking conversation (creates if doesn't exist)
+    bookingConversation(bookingId: ID!): Conversation
+
+    # ==================
+    # Notification Queries
+    # ==================
+
+    # Get user's notifications
+    myNotifications(filters: NotificationFiltersInput, pagination: PaginationInput): PaginatedNotifications!
+
+    # Get notification by ID
+    notification(id: ID!): Notification
+
+    # Get unread notification count
+    unreadNotificationCount: UnreadNotificationCount!
+
+    # Get notification statistics
+    notificationStats: NotificationStats!
   }
 
   # ==================
@@ -605,7 +1294,7 @@ export const typeDefs = gql`
     changePassword(input: ChangePasswordInput!): MessageResponse!
     
     # Logout (invalidate refresh token)
-    logout: MessageResponse!
+    logout(refreshToken: String): MessageResponse!
 
     # ==================
     # User Profile (Unified)
@@ -626,6 +1315,12 @@ export const typeDefs = gql`
     
     # Update provider profile
     updateProviderProfile(input: UpdateProviderProfileInput!): User!
+    
+    # Submit provider profile for verification (can re-submit after rejection)
+    submitProviderForVerification: User!
+
+    # Switch between SERVICE_USER and SERVICE_PROVIDER mode (only for registered providers)
+    switchActiveRole(targetRole: UserRole!): User!
 
     # ==================
     # Service Management (Provider Only)
@@ -680,6 +1375,125 @@ export const typeDefs = gql`
     adminCancelBooking(id: ID!, reason: String!): Booking!
 
     # ==================
+    # Review Management
+    # ==================
+
+    # Create a review for a completed booking (User)
+    createReview(input: CreateReviewInput!): Review!
+
+    # Update own review within 24 hours (User)
+    updateReview(id: ID!, input: UpdateReviewInput!): Review!
+
+    # Respond to a review (Provider)
+    respondToReview(reviewId: ID!, response: String!): Review!
+
+    # Delete a review (Admin)
+    deleteReview(id: ID!): MessageResponse!
+
+    # ==================
+    # Favourite Management (User)
+    # ==================
+
+    # Add a service to favourites
+    addFavourite(serviceId: ID!): Favourite!
+
+    # Remove a service from favourites
+    removeFavourite(serviceId: ID!): MessageResponse!
+
+    # Toggle favourite status (add if not favourited, remove if favourited)
+    toggleFavourite(serviceId: ID!): ToggleFavouriteResponse!
+
+    # ==================
+    # Dispute Management (User/Provider)
+    # ==================
+
+    # Create a dispute for a booking (User or Provider)
+    createDispute(input: CreateDisputeInput!): Dispute!
+
+    # Add evidence to an open dispute
+    addDisputeEvidence(disputeId: ID!, evidence: [String!]!): Dispute!
+
+    # ==================
+    # Dispute Management (Admin)
+    # ==================
+
+    # Take dispute under review
+    takeDisputeUnderReview(disputeId: ID!): Dispute!
+
+    # Resolve a dispute
+    resolveDispute(disputeId: ID!, input: ResolveDisputeInput!): Dispute!
+
+    # Close a dispute without resolution (for invalid disputes)
+    closeDispute(disputeId: ID!, reason: String!): Dispute!
+
+    # ==================
+    # File Upload Management (User)
+    # ==================
+
+    # Upload profile photo
+    uploadProfilePhoto(file: FileUploadInput!): ProfilePhotoResponse!
+
+    # Remove profile photo
+    removeProfilePhoto: MessageResponse!
+
+    # ==================
+    # File Upload Management (Provider)
+    # ==================
+
+    # Upload service images
+    uploadServiceImages(serviceId: ID!, files: [FileUploadInput!]!): MultipleUploadResponse!
+
+    # Remove service image
+    removeServiceImage(serviceId: ID!, imageUrl: String!): MessageResponse!
+
+    # Upload provider documents
+    uploadProviderDocuments(files: [FileUploadInput!]!): MultipleUploadResponse!
+
+    # Remove provider document
+    removeProviderDocument(documentUrl: String!): MessageResponse!
+
+    # ==================
+    # Messaging Mutations
+    # ==================
+
+    # Start a new conversation or get existing
+    startConversation(input: StartConversationInput!): Conversation!
+
+    # Send a message
+    sendMessage(input: SendMessageInput!): Message!
+
+    # Mark messages as read
+    markMessagesAsRead(conversationId: ID!, messageIds: [ID!]): MessageResponse!
+
+    # Archive a conversation
+    archiveConversation(conversationId: ID!): MessageResponse!
+
+    # Delete a message (soft delete, own messages only)
+    deleteMessage(messageId: ID!): MessageResponse!
+
+    # Start a support chat with admin
+    startSupportChat(input: StartSupportChatInput!): Conversation!
+
+    # ==================
+    # Notification Mutations
+    # ==================
+
+    # Mark notification as read
+    markNotificationAsRead(notificationId: ID!): Notification!
+
+    # Mark all notifications as read
+    markAllNotificationsAsRead: MessageResponse!
+
+    # Delete a notification
+    deleteNotification(notificationId: ID!): MessageResponse!
+
+    # Delete all read notifications
+    deleteReadNotifications: MessageResponse!
+
+    # Send system announcement (Admin only)
+    sendSystemAnnouncement(input: SendAnnouncementInput!): MessageResponse!
+
+    # ==================
     # Admin Auth (Separate - Different Endpoints)
     # ==================
     
@@ -698,8 +1512,8 @@ export const typeDefs = gql`
     # Admin change password
     adminChangePassword(input: AdminChangePasswordInput!): MessageResponse!
     
-    # Admin logout
-    adminLogout: MessageResponse!
+    # Admin logout (invalidate refresh token)
+    adminLogout(refreshToken: String): MessageResponse!
 
     # ==================
     # Admin Profile Management
