@@ -37,7 +37,7 @@ export const config = {
 
   // JWT Authentication
   jwt: {
-    secret: process.env.JWT_SECRET || 'default-secret-change-in-production',
+    secret: process.env.JWT_SECRET || '',
     expiresIn: process.env.JWT_EXPIRES_IN || '7d',
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
   },
@@ -49,13 +49,13 @@ export const config = {
 
   // Email Configuration
   email: {
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    host: process.env.SMTP_HOST || '',
     port: parseInt(process.env.SMTP_PORT || '587', 10),
     secure: process.env.SMTP_SECURE === 'true',
     user: process.env.SMTP_USER || '',
     pass: process.env.SMTP_PASS || '',
-    fromName: process.env.EMAIL_FROM_NAME || 'EasyKonnect',
-    fromAddress: process.env.EMAIL_FROM_ADDRESS || 'noreply@easykonnect.com',
+    fromName: process.env.EMAIL_FROM_NAME || '',
+    fromAddress: process.env.EMAIL_FROM_ADDRESS || '',
   },
 
   // Cloudinary
@@ -112,9 +112,11 @@ export const config = {
 
   // Platform Settings
   platform: {
-    name: process.env.PLATFORM_NAME || 'EasyKonnect',
-    commissionRate: parseFloat(process.env.COMMISSION_RATE || '0.10'), // 10% commission
-    currency: process.env.CURRENCY || 'NGN',
+    name: process.env.PLATFORM_NAME || '',
+    commissionRate: parseFloat(process.env.COMMISSION_RATE || '0.10'),
+    currency: process.env.CURRENCY || '',
+    frontendUrl: process.env.FRONTEND_URL || '',
+    supportEmail: process.env.SUPPORT_EMAIL || '',
   },
 
   // Pagination Defaults
@@ -140,6 +142,19 @@ export const validateEnv = (): void => {
   const required = [
     'DATABASE_URL',
     'JWT_SECRET',
+    'SMTP_HOST',
+    'SMTP_USER',
+    'SMTP_PASS',
+    'EMAIL_FROM_NAME',
+    'EMAIL_FROM_ADDRESS',
+    'CLOUDINARY_CLOUD_NAME',
+    'CLOUDINARY_API_KEY',
+    'CLOUDINARY_API_SECRET',
+    'REDIS_URL',
+    'PLATFORM_NAME',
+    'CURRENCY',
+    'FRONTEND_URL',
+    'SUPPORT_EMAIL',
   ];
 
   const missing = required.filter(key => !process.env[key]);
@@ -148,8 +163,7 @@ export const validateEnv = (): void => {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
 
-  // Warn about default JWT secret in production
-  if (config.isProduction && config.jwt.secret === 'default-secret-change-in-production') {
+  if (config.isProduction && !config.jwt.secret) {
     throw new Error('JWT_SECRET must be set in production!');
   }
 };

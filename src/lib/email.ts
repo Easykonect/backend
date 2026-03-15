@@ -234,12 +234,12 @@ const emailTemplates = {
             </div>
             <p>Log in to your dashboard to start creating services and growing your business!</p>
             <div style="text-align: center; margin: 25px 0;">
-              <a href="https://easykonect.com/provider/dashboard" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 30px; text-decoration: none; border-radius: 25px; font-weight: bold;">Go to Dashboard</a>
+              <a href="${config.platform.frontendUrl}/provider/dashboard" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 30px; text-decoration: none; border-radius: 25px; font-weight: bold;">Go to Dashboard</a>
             </div>
             <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
             <p style="color: #999; font-size: 12px; text-align: center;">
-              © ${new Date().getFullYear()} EasyKonnect. All rights reserved.<br>
-              Welcome to the EasyKonnect provider community!
+              © ${new Date().getFullYear()} ${config.platform.name}. All rights reserved.<br>
+              Welcome to the ${config.platform.name} provider community!
             </p>
           </div>
         </body>
@@ -259,10 +259,10 @@ const emailTemplates = {
       
       Log in to your dashboard to start creating services and growing your business!
       
-      Dashboard: https://easykonect.com/provider/dashboard
+      Dashboard: ${config.platform.frontendUrl}/provider/dashboard
       
-      © ${new Date().getFullYear()} EasyKonnect. All rights reserved.
-      Welcome to the EasyKonnect provider community!
+      © ${new Date().getFullYear()} ${config.platform.name}. All rights reserved.
+      Welcome to the ${config.platform.name} provider community!
     `,
   }),
 
@@ -298,12 +298,12 @@ const emailTemplates = {
             </ol>
             <p>If you believe this decision was made in error or have questions, please contact our support team.</p>
             <div style="text-align: center; margin: 25px 0;">
-              <a href="https://easykonect.com/provider/profile" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 30px; text-decoration: none; border-radius: 25px; font-weight: bold;">Update Profile</a>
+              <a href="${config.platform.frontendUrl}/provider/profile" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 30px; text-decoration: none; border-radius: 25px; font-weight: bold;">Update Profile</a>
             </div>
             <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
             <p style="color: #999; font-size: 12px; text-align: center;">
-              © ${new Date().getFullYear()} EasyKonnect. All rights reserved.<br>
-              Need help? Contact support@easykonect.com
+              © ${new Date().getFullYear()} ${config.platform.name}. All rights reserved.<br>
+              Need help? Contact ${config.platform.supportEmail}
             </p>
           </div>
         </body>
@@ -324,10 +324,10 @@ const emailTemplates = {
       
       If you believe this decision was made in error or have questions, please contact our support team.
       
-      Update Profile: https://easykonect.com/provider/profile
+      Update Profile: ${config.platform.frontendUrl}/provider/profile
       
-      © ${new Date().getFullYear()} EasyKonnect. All rights reserved.
-      Need help? Contact support@easykonect.com
+      © ${new Date().getFullYear()} ${config.platform.name}. All rights reserved.
+      Need help? Contact ${config.platform.supportEmail}
     `,
   }),
 
@@ -364,8 +364,8 @@ const emailTemplates = {
             <p>In the meantime, you can prepare your services so you're ready to publish as soon as you're approved!</p>
             <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
             <p style="color: #999; font-size: 12px; text-align: center;">
-              © ${new Date().getFullYear()} EasyKonnect. All rights reserved.<br>
-              Questions? Contact support@easykonect.com
+              © ${new Date().getFullYear()} ${config.platform.name}. All rights reserved.<br>
+              Questions? Contact ${config.platform.supportEmail}
             </p>
           </div>
         </body>
@@ -387,8 +387,8 @@ const emailTemplates = {
       
       In the meantime, you can prepare your services so you're ready to publish as soon as you're approved!
       
-      © ${new Date().getFullYear()} EasyKonnect. All rights reserved.
-      Questions? Contact support@easykonect.com
+      © ${new Date().getFullYear()} ${config.platform.name}. All rights reserved.
+      Questions? Contact ${config.platform.supportEmail}
     `,
   }),
 };

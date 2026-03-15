@@ -16,6 +16,7 @@
 import prisma from '@/lib/prisma';
 import { BookingStatus, UserRole, ServiceStatus } from '@/constants';
 import { GraphQLError } from 'graphql';
+import { config } from '@/config';
 
 // ==================
 // Types
@@ -51,8 +52,8 @@ interface PaginationInput {
   limit: number;
 }
 
-// Platform commission rate (10%)
-const COMMISSION_RATE = 0.10;
+// Platform commission rate from environment config
+const COMMISSION_RATE = config.platform.commissionRate;
 
 // ==================
 // Helper Functions
