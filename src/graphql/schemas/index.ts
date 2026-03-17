@@ -499,6 +499,8 @@ export const typeDefs = gql`
     email: String!
     firstName: String!
     lastName: String!
+    phone: String
+    profilePhoto: String
     role: UserRole!
     status: AccountStatus!
     lastLoginAt: String
@@ -647,6 +649,15 @@ export const typeDefs = gql`
     firstName: String
     lastName: String
     phone: String
+    profilePhoto: String
+  }
+
+  input RequestEmailChangeInput {
+    newEmail: String!
+  }
+
+  input ConfirmEmailChangeInput {
+    otp: String!
   }
 
   input ChangePasswordInput {
@@ -681,6 +692,7 @@ export const typeDefs = gql`
     country: String
     latitude: Float
     longitude: Float
+    profilePhoto: String
   }
 
   # ==================
@@ -1029,6 +1041,16 @@ export const typeDefs = gql`
   input UpdateAdminInput {
     firstName: String
     lastName: String
+    phone: String
+    profilePhoto: String
+  }
+
+  input AdminRequestEmailChangeInput {
+    newEmail: String!
+  }
+
+  input AdminConfirmEmailChangeInput {
+    otp: String!
   }
 
   input AdminForgotPasswordInput {
@@ -1302,6 +1324,8 @@ export const typeDefs = gql`
     
     # Update user profile
     updateProfile(input: UpdateProfileInput!): User!
+    requestEmailChange(input: RequestEmailChangeInput!): MessageResponse!
+    confirmEmailChange(input: ConfirmEmailChangeInput!): User!
     
     # Delete own account
     deleteAccount: MessageResponse!
@@ -1521,6 +1545,8 @@ export const typeDefs = gql`
     
     # Update own admin profile
     updateAdminProfile(input: UpdateAdminInput!): AdminUser!
+    adminRequestEmailChange(input: AdminRequestEmailChangeInput!): MessageResponse!
+    adminConfirmEmailChange(input: AdminConfirmEmailChangeInput!): AdminUser!
 
     # ==================
     # Admin Management (SUPER_ADMIN Only)

@@ -27,6 +27,8 @@ import {
   getUserById,
   getUsers,
   updateUserProfile,
+  requestEmailChange,
+  confirmEmailChange,
   deleteUser,
   deleteOwnAccount,
 } from '@/services/user.service';
@@ -53,6 +55,8 @@ import {
   adminRefreshToken,
   getCurrentAdmin,
   updateAdminProfile,
+  adminRequestEmailChange,
+  adminConfirmEmailChange,
   getAdmins,
   getAdminById,
   suspendAdmin,
@@ -989,12 +993,37 @@ export const resolvers = {
           firstName?: string;
           lastName?: string;
           phone?: string;
+          profilePhoto?: string;
         };
       },
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
       return updateUserProfile(user.userId, args.input);
+    },
+
+    /**
+     * Request email change — sends OTP to the new email
+     */
+    requestEmailChange: async (
+      _: unknown,
+      args: { input: { newEmail: string } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return requestEmailChange(user.userId, args.input.newEmail);
+    },
+
+    /**
+     * Confirm email change — verifies OTP and commits the new email
+     */
+    confirmEmailChange: async (
+      _: unknown,
+      args: { input: { otp: string } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return confirmEmailChange(user.userId, args.input.otp);
     },
 
     /**
@@ -1847,12 +1876,38 @@ export const resolvers = {
         input: {
           firstName?: string;
           lastName?: string;
+          phone?: string;
+          profilePhoto?: string;
         };
       },
       context: GraphQLContext
     ) => {
       const admin = requireAdminAuth(context);
       return updateAdminProfile(admin.userId, args.input);
+    },
+
+    /**
+     * Admin: Request email change — sends OTP to the new email
+     */
+    adminRequestEmailChange: async (
+      _: unknown,
+      args: { input: { newEmail: string } },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return adminRequestEmailChange(admin.userId, args.input.newEmail);
+    },
+
+    /**
+     * Admin: Confirm email change — verifies OTP and commits the new email
+     */
+    adminConfirmEmailChange: async (
+      _: unknown,
+      args: { input: { otp: string } },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return adminConfirmEmailChange(admin.userId, args.input.otp);
     },
 
     // ==================

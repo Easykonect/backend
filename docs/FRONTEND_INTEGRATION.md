@@ -790,9 +790,9 @@ query Me {
 
 ## 9. Update Profile
 
-**What this API does:** This API is used for updating the authenticated user's profile information (firstName, lastName, phone). It performs a partial update - only the fields you include will be changed. Email cannot be changed through this endpoint. The `updatedAt` timestamp is automatically updated.
+**What this API does:** Updates the authenticated user's (SERVICE_USER or SERVICE_PROVIDER) profile information. Supports `firstName`, `lastName`, `phone`, and `profilePhoto`. All fields are optional — only provided fields are changed. A profile-update notification email is sent automatically. **Email changes are handled separately via `requestEmailChange` + `confirmEmailChange`.**
 
-**What it returns:** Returns the updated `User` object containing the modified fields (id, email, firstName, lastName, phone, updatedAt) reflecting the new values.
+**What it returns:** Returns the updated `User` object with all current profile fields.
 
 ### Request
 
@@ -804,6 +804,10 @@ mutation UpdateProfile($input: UpdateProfileInput!) {
     firstName
     lastName
     phone
+    profilePhoto
+    role
+    status
+    isEmailVerified
     updatedAt
   }
 }
@@ -816,10 +820,13 @@ mutation UpdateProfile($input: UpdateProfileInput!) {
   "input": {
     "firstName": "Jonathan",
     "lastName": "Smith",
-    "phone": "+2348098765432"
+    "phone": "+2348098765432",
+    "profilePhoto": "https://res.cloudinary.com/dhhmhmitl/image/upload/v1/profiles/user_123.jpg"
   }
 }
 ```
+
+> **Note:** `profilePhoto` should be a Cloudinary URL. Upload the image to Cloudinary first, then pass the resulting URL here.
 
 ### Success Response (200)
 
@@ -832,9 +839,152 @@ mutation UpdateProfile($input: UpdateProfileInput!) {
       "firstName": "Jonathan",
       "lastName": "Smith",
       "phone": "+2348098765432",
-      "updatedAt": "2026-03-08T11:45:00.000Z"
+      "profilePhoto": "https://res.cloudinary.com/dhhmhmitl/image/upload/v1/profiles/user_123.jpg",
+      "role": "SERVICE_USER",
+      "status": "ACTIVE",
+      "isEmailVerified": true,
+      "updatedAt": "2026-03-15T11:45:00.000Z"
     }
   }
+}
+```
+
+---
+
+## 10. Request Email Change
+
+**What this API does:** Initiates an email address change for the authenticated user. Sends a **6-digit OTP to the new email address** to confirm ownership. The current email is NOT changed yet — call `confirmEmailChange` with the OTP to complete the change.
+
+**What it returns:** Returns a `MessageResponse` with `success: true` and a confirmation message.
+
+### Request
+
+```graphql
+mutation RequestEmailChange($input: RequestEmailChangeInput!) {
+  requestEmailChange(input: $input) {
+    success
+    message
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "newEmail": "newemail@example.com"
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "requestEmailChange": {
+      "success": true,
+      "message": "A confirmation code has been sent to newemail@example.com. It expires in 10 minutes."
+    }
+  }
+}
+```
+
+### Error Responses
+
+**Same email as current**
+```json
+{
+  "errors": [{ "message": "New email must be different from your current email", "extensions": { "code": "VALIDATION_ERROR" } }]
+}
+```
+
+**Email already taken**
+```json
+{
+  "errors": [{ "message": "This email address is already in use", "extensions": { "code": "USER_ALREADY_EXISTS" } }]
+}
+```
+
+---
+
+## 11. Confirm Email Change
+
+**What this API does:** Verifies the OTP sent to the new email address and commits the email change. After this call, the user's email is permanently updated and a notification is sent to the **old** email address. The OTP expires after 10 minutes.
+
+**What it returns:** Returns the updated `User` object with the new email address.
+
+### Request
+
+```graphql
+mutation ConfirmEmailChange($input: ConfirmEmailChangeInput!) {
+  confirmEmailChange(input: $input) {
+    id
+    email
+    firstName
+    lastName
+    phone
+    profilePhoto
+    role
+    status
+    isEmailVerified
+    updatedAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "otp": "847291"
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "confirmEmailChange": {
+      "id": "507f1f77bcf86cd799439011",
+      "email": "newemail@example.com",
+      "firstName": "Jonathan",
+      "lastName": "Smith",
+      "phone": "+2348098765432",
+      "profilePhoto": null,
+      "role": "SERVICE_USER",
+      "status": "ACTIVE",
+      "isEmailVerified": true,
+      "updatedAt": "2026-03-15T12:00:00.000Z"
+    }
+  }
+}
+```
+
+### Error Responses
+
+**No pending email change**
+```json
+{
+  "errors": [{ "message": "No pending email change found. Please request a new one.", "extensions": { "code": "INVALID_REQUEST" } }]
+}
+```
+
+**OTP expired**
+```json
+{
+  "errors": [{ "message": "Confirmation code has expired. Please request a new one.", "extensions": { "code": "OTP_EXPIRED" } }]
+}
+```
+
+**Wrong OTP**
+```json
+{
+  "errors": [{ "message": "Invalid confirmation code.", "extensions": { "code": "INVALID_OTP" } }]
 }
 ```
 
@@ -843,6 +993,206 @@ mutation UpdateProfile($input: UpdateProfileInput!) {
 # Admin APIs (Admin Role Required)
 
 These APIs require an admin access token (ADMIN or SUPER_ADMIN role). They provide platform management capabilities for administrators.
+
+---
+
+## Admin Profile: Update Admin Profile
+
+**What this API does:** Updates the currently authenticated admin's (ADMIN or SUPER_ADMIN) own profile. Supports `firstName`, `lastName`, `phone`, and `profilePhoto`. All fields are optional — only provided fields are updated. A profile-update notification email is sent automatically. **Email changes are handled via `adminRequestEmailChange` + `adminConfirmEmailChange`.**
+
+**What it returns:** Returns the updated `AdminUser` object.
+
+### Request
+
+```graphql
+mutation UpdateAdminProfile($input: UpdateAdminInput!) {
+  updateAdminProfile(input: $input) {
+    id
+    email
+    firstName
+    lastName
+    phone
+    profilePhoto
+    role
+    status
+    lastLoginAt
+    updatedAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "firstName": "Jane",
+    "lastName": "Administrator",
+    "phone": "+2348011223344",
+    "profilePhoto": "https://res.cloudinary.com/dhhmhmitl/image/upload/v1/admins/admin_123.jpg"
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "updateAdminProfile": {
+      "id": "507f1f77bcf86cd799439099",
+      "email": "admin@easykonect.com",
+      "firstName": "Jane",
+      "lastName": "Administrator",
+      "phone": "+2348011223344",
+      "profilePhoto": "https://res.cloudinary.com/dhhmhmitl/image/upload/v1/admins/admin_123.jpg",
+      "role": "ADMIN",
+      "status": "ACTIVE",
+      "lastLoginAt": "2026-03-15T09:00:00.000Z",
+      "updatedAt": "2026-03-15T11:45:00.000Z"
+    }
+  }
+}
+```
+
+---
+
+## Admin Profile: Request Email Change
+
+**What this API does:** Initiates an email address change for the currently logged-in admin. Sends a **6-digit OTP to the new email address** to confirm ownership. The current email remains active until `adminConfirmEmailChange` is called with the valid OTP.
+
+**What it returns:** Returns a `MessageResponse` with `success: true` and a confirmation message.
+
+### Request
+
+```graphql
+mutation AdminRequestEmailChange($input: AdminRequestEmailChangeInput!) {
+  adminRequestEmailChange(input: $input) {
+    success
+    message
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "newEmail": "newadmin@easykonect.com"
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "adminRequestEmailChange": {
+      "success": true,
+      "message": "A confirmation code has been sent to newadmin@easykonect.com. It expires in 10 minutes."
+    }
+  }
+}
+```
+
+### Error Responses
+
+**Same email as current**
+```json
+{
+  "errors": [{ "message": "New email must be different from your current email", "extensions": { "code": "VALIDATION_ERROR" } }]
+}
+```
+
+**Email already in use**
+```json
+{
+  "errors": [{ "message": "This email address is already in use", "extensions": { "code": "USER_ALREADY_EXISTS" } }]
+}
+```
+
+---
+
+## Admin Profile: Confirm Email Change
+
+**What this API does:** Verifies the OTP sent to the new admin email and commits the email change. After this call the admin's email is permanently updated and a notification is sent to the **old** email address. The OTP expires after 10 minutes.
+
+**What it returns:** Returns the updated `AdminUser` object with the new email address.
+
+### Request
+
+```graphql
+mutation AdminConfirmEmailChange($input: AdminConfirmEmailChangeInput!) {
+  adminConfirmEmailChange(input: $input) {
+    id
+    email
+    firstName
+    lastName
+    phone
+    profilePhoto
+    role
+    status
+    lastLoginAt
+    updatedAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "otp": "739201"
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "adminConfirmEmailChange": {
+      "id": "507f1f77bcf86cd799439099",
+      "email": "newadmin@easykonect.com",
+      "firstName": "Jane",
+      "lastName": "Administrator",
+      "phone": "+2348011223344",
+      "profilePhoto": null,
+      "role": "ADMIN",
+      "status": "ACTIVE",
+      "lastLoginAt": "2026-03-15T09:00:00.000Z",
+      "updatedAt": "2026-03-15T12:00:00.000Z"
+    }
+  }
+}
+```
+
+### Error Responses
+
+**No pending email change**
+```json
+{
+  "errors": [{ "message": "No pending email change found. Please request a new one.", "extensions": { "code": "INVALID_REQUEST" } }]
+}
+```
+
+**OTP expired**
+```json
+{
+  "errors": [{ "message": "Confirmation code has expired. Please request a new one.", "extensions": { "code": "OTP_EXPIRED" } }]
+}
+```
+
+**Wrong OTP**
+```json
+{
+  "errors": [{ "message": "Invalid confirmation code.", "extensions": { "code": "INVALID_OTP" } }]
+}
+```
 
 ---
 

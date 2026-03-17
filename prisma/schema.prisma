@@ -97,6 +97,7 @@ model User {
   isEmailVerified   Boolean   @default(false)
   emailVerifyToken  String?   // Hashed OTP
   emailVerifyExpiry DateTime? // OTP expiry time
+  pendingEmail      String?   // Staged new email awaiting OTP confirmation
   
   // Security fields
   failedLoginAttempts Int       @default(0)

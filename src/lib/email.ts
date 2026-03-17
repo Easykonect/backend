@@ -391,6 +391,91 @@ const emailTemplates = {
       Questions? Contact ${config.platform.supportEmail}
     `,
   }),
+
+  /**
+   * Profile updated notification
+   */
+  profileUpdated: (firstName: string, changedFields: string[]): { subject: string; html: string; text: string } => ({
+    subject: `Your ${config.platform.name} Profile Has Been Updated`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+        <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+            <h1 style="color: white; margin: 0;">${config.platform.name}</h1>
+          </div>
+          <div style="background: #ffffff; padding: 30px; border: 1px solid #e0e0e0; border-top: none; border-radius: 0 0 10px 10px;">
+            <h2 style="color: #333; margin-top: 0;">Hello ${firstName},</h2>
+            <p>Your profile was updated successfully. The following fields were changed:</p>
+            <ul style="color: #555;">
+              ${changedFields.map(f => `<li><strong>${f}</strong></li>`).join('')}
+            </ul>
+            <p style="color: #e74c3c; font-size: 14px;"><strong>⚠️ Not you?</strong> Contact support immediately at ${config.platform.supportEmail}.</p>
+            <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+            <p style="color: #999; font-size: 12px; text-align: center;">
+              © ${new Date().getFullYear()} ${config.platform.name}. All rights reserved.
+            </p>
+          </div>
+        </body>
+      </html>
+    `,
+    text: `
+      Hello ${firstName},
+
+      Your profile was updated successfully. The following fields were changed:
+      ${changedFields.map(f => `- ${f}`).join('\n')}
+
+      ⚠️ Not you? Contact support immediately at ${config.platform.supportEmail}.
+
+      © ${new Date().getFullYear()} ${config.platform.name}. All rights reserved.
+    `,
+  }),
+
+  /**
+   * Email change OTP
+   */
+  emailChangeOtp: (firstName: string, newEmail: string, otp: string): { subject: string; html: string; text: string } => ({
+    subject: `Confirm Your New Email Address — ${config.platform.name}`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+        <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+            <h1 style="color: white; margin: 0;">${config.platform.name}</h1>
+          </div>
+          <div style="background: #ffffff; padding: 30px; border: 1px solid #e0e0e0; border-top: none; border-radius: 0 0 10px 10px;">
+            <h2 style="color: #333; margin-top: 0;">Hello ${firstName},</h2>
+            <p>We received a request to change your account email to <strong>${newEmail}</strong>.</p>
+            <p>Use the code below to confirm this change:</p>
+            <div style="background: #f5f5f5; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;">
+              <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #667eea;">${otp}</span>
+            </div>
+            <p style="color: #666; font-size: 14px;">This code expires in <strong>10 minutes</strong>.</p>
+            <p style="color: #e74c3c; font-size: 14px;"><strong>⚠️ Not you?</strong> Your current email address is still active. Contact support at ${config.platform.supportEmail} immediately.</p>
+            <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+            <p style="color: #999; font-size: 12px; text-align: center;">
+              © ${new Date().getFullYear()} ${config.platform.name}. All rights reserved.
+            </p>
+          </div>
+        </body>
+      </html>
+    `,
+    text: `
+      Hello ${firstName},
+
+      We received a request to change your account email to ${newEmail}.
+
+      Your confirmation code: ${otp}
+
+      This code expires in 10 minutes.
+
+      ⚠️ Not you? Your current email is still active. Contact support at ${config.platform.supportEmail} immediately.
+
+      © ${new Date().getFullYear()} ${config.platform.name}. All rights reserved.
+    `,
+  }),
 };
 
 /**
@@ -527,6 +612,36 @@ export const sendProviderSubmissionEmail = async (
   });
 };
 
+/**
+ * Send profile updated notification email
+ */
+export const sendProfileUpdatedEmail = async (
+  email: string,
+  firstName: string,
+  changedFields: string[]
+): Promise<boolean> => {
+  const template = emailTemplates.profileUpdated(firstName, changedFields);
+  return sendEmail({
+    to: email,
+    ...template,
+  });
+};
+
+/**
+ * Send email change OTP to the NEW email address
+ */
+export const sendEmailChangeOtpEmail = async (
+  newEmail: string,
+  firstName: string,
+  otp: string
+): Promise<boolean> => {
+  const template = emailTemplates.emailChangeOtp(firstName, newEmail, otp);
+  return sendEmail({
+    to: newEmail,
+    ...template,
+  });
+};
+
 export default {
   sendEmail,
   sendVerificationEmail,
@@ -535,4 +650,6 @@ export default {
   sendProviderApprovedEmail,
   sendProviderRejectedEmail,
   sendProviderSubmissionEmail,
+  sendProfileUpdatedEmail,
+  sendEmailChangeOtpEmail,
 };

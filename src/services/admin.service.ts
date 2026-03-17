@@ -26,7 +26,7 @@ import {
   getOtpExpiry,
   isOtpExpired,
 } from '@/lib/otp';
-import { sendPasswordResetEmail } from '@/lib/email';
+import { sendPasswordResetEmail, sendProfileUpdatedEmail, sendEmailChangeOtpEmail } from '@/lib/email';
 import { config } from '@/config';
 import { ErrorCode, ErrorMessage, UserRole, AccountStatus } from '@/constants';
 import { passwordSchema } from '@/utils/validation';
@@ -51,6 +51,8 @@ interface CreateAdminInput {
 interface UpdateAdminInput {
   firstName?: string;
   lastName?: string;
+  phone?: string;
+  profilePhoto?: string;
 }
 
 interface AdminForgotPasswordInput {
@@ -95,6 +97,8 @@ const formatAdminUser = (user: {
   email: string;
   firstName: string;
   lastName: string;
+  phone?: string | null;
+  profilePhoto?: string | null;
   role: string;
   status: string;
   lastLoginAt: Date | null;
@@ -105,6 +109,8 @@ const formatAdminUser = (user: {
   email: user.email,
   firstName: user.firstName,
   lastName: user.lastName,
+  phone: user.phone ?? null,
+  profilePhoto: user.profilePhoto ?? null,
   role: user.role,
   status: user.status,
   lastLoginAt: user.lastLoginAt?.toISOString() || null,
@@ -511,6 +517,8 @@ export const getCurrentAdmin = async (adminId: string) => {
 
 /**
  * Update Admin Profile
+ * Supports: firstName, lastName, phone, profilePhoto
+ * Email changes are handled separately via adminRequestEmailChange / adminConfirmEmailChange
  */
 export const updateAdminProfile = async (adminId: string, input: UpdateAdminInput) => {
   const admin = await prisma.user.findUnique({
@@ -523,13 +531,142 @@ export const updateAdminProfile = async (adminId: string, input: UpdateAdminInpu
     });
   }
 
+  // Track which fields are actually changing for the notification email
+  const changedFields: string[] = [];
+  if (input.firstName && input.firstName !== admin.firstName) changedFields.push('First Name');
+  if (input.lastName && input.lastName !== admin.lastName) changedFields.push('Last Name');
+  if (input.phone !== undefined && input.phone !== admin.phone) changedFields.push('Phone Number');
+  if (input.profilePhoto !== undefined && input.profilePhoto !== admin.profilePhoto) changedFields.push('Profile Photo');
+
+  if (changedFields.length === 0) {
+    return formatAdminUser(admin);
+  }
+
   const updatedAdmin = await prisma.user.update({
     where: { id: adminId },
     data: {
       ...(input.firstName && { firstName: input.firstName }),
       ...(input.lastName && { lastName: input.lastName }),
+      ...(input.phone !== undefined && { phone: input.phone }),
+      ...(input.profilePhoto !== undefined && { profilePhoto: input.profilePhoto }),
     },
   });
+
+  // Send profile update notification email (non-blocking)
+  sendProfileUpdatedEmail(admin.email, admin.firstName, changedFields).catch(() => {});
+
+  return formatAdminUser(updatedAdmin);
+};
+
+/**
+ * Admin Request Email Change
+ * Sends an OTP to the NEW email address to confirm ownership
+ */
+export const adminRequestEmailChange = async (adminId: string, newEmail: string) => {
+  const normalizedEmail = newEmail.toLowerCase().trim();
+
+  const admin = await prisma.user.findUnique({
+    where: { id: adminId },
+  });
+
+  if (!admin || !isAdminRole(admin.role)) {
+    throw new GraphQLError('Admin not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+
+  // Cannot set the same email
+  if (normalizedEmail === admin.email) {
+    throw new GraphQLError('New email must be different from your current email', {
+      extensions: { code: 'VALIDATION_ERROR' },
+    });
+  }
+
+  // Check the new email is not already in use
+  const existing = await prisma.user.findUnique({
+    where: { email: normalizedEmail },
+  });
+
+  if (existing) {
+    throw new GraphQLError('This email address is already in use', {
+      extensions: { code: 'USER_ALREADY_EXISTS' },
+    });
+  }
+
+  // Generate OTP and store it alongside the pending new email
+  const otp = generateOtp();
+  const hashedOtp = hashOtp(otp);
+  const otpExpiry = getOtpExpiry();
+
+  await prisma.user.update({
+    where: { id: adminId },
+    data: {
+      emailVerifyToken: hashedOtp,
+      emailVerifyExpiry: otpExpiry,
+      // Store the pending new email in passwordResetToken field temporarily
+      // (reusing an available nullable field to avoid a schema migration)
+      pendingEmail: normalizedEmail,
+    },
+  });
+
+  // Send OTP to the NEW email address
+  await sendEmailChangeOtpEmail(normalizedEmail, admin.firstName, otp);
+
+  return {
+    success: true,
+    message: `A confirmation code has been sent to ${normalizedEmail}. It expires in 10 minutes.`,
+  };
+};
+
+/**
+ * Admin Confirm Email Change
+ * Verifies the OTP and commits the new email
+ */
+export const adminConfirmEmailChange = async (adminId: string, otp: string) => {
+  const admin = await prisma.user.findUnique({
+    where: { id: adminId },
+  });
+
+  if (!admin || !isAdminRole(admin.role)) {
+    throw new GraphQLError('Admin not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+
+  if (!admin.pendingEmail || !admin.emailVerifyToken) {
+    throw new GraphQLError('No pending email change found. Please request a new one.', {
+      extensions: { code: 'INVALID_REQUEST' },
+    });
+  }
+
+  if (isOtpExpired(admin.emailVerifyExpiry)) {
+    throw new GraphQLError('Confirmation code has expired. Please request a new one.', {
+      extensions: { code: 'OTP_EXPIRED' },
+    });
+  }
+
+  if (!verifyOtp(otp, admin.emailVerifyToken)) {
+    throw new GraphQLError('Invalid confirmation code.', {
+      extensions: { code: 'INVALID_OTP' },
+    });
+  }
+
+  const oldEmail = admin.email;
+  const newEmail = admin.pendingEmail;
+
+  // Commit the email change
+  const updatedAdmin = await prisma.user.update({
+    where: { id: adminId },
+    data: {
+      email: newEmail,
+      pendingEmail: null,
+      emailVerifyToken: null,
+      emailVerifyExpiry: null,
+    },
+  });
+
+  // Notify old email about the change
+  sendProfileUpdatedEmail(oldEmail, admin.firstName, ['Email Address']).catch(() => {});
 
   return formatAdminUser(updatedAdmin);
 };

@@ -74,13 +74,36 @@ const validateQueryDepth = async (request: NextRequest): Promise<string | null> 
 };
 
 // CORS headers for GraphQL endpoint
-const corsHeaders = {
-  'Access-Control-Allow-Origin': config.cors.allowedOrigins.length > 0 
-    ? config.cors.allowedOrigins.join(',') 
-    : '*',
+// Note: Access-Control-Allow-Origin cannot be a comma-separated list.
+// Use '*' for development or dynamically set from request origin for production.
+const baseCorsHeaders = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
   'Access-Control-Max-Age': '86400',
+  'Access-Control-Allow-Credentials': 'true',
+};
+
+/**
+ * Get CORS headers with the correct Access-Control-Allow-Origin
+ * For production: echo the request origin if it's in the allowlist
+ * For development: use wildcard '*'
+ */
+const getCorsHeaders = (requestOrigin: string | null): Record<string, string> => {
+  // In production, validate origin against allowlist
+  if (config.isProduction && config.cors.allowedOrigins.length > 0) {
+    const isAllowed = requestOrigin && config.cors.allowedOrigins.includes(requestOrigin);
+    return {
+      ...baseCorsHeaders,
+      'Access-Control-Allow-Origin': isAllowed ? requestOrigin : config.cors.allowedOrigins[0],
+    };
+  }
+  
+  // In development, allow all origins
+  return {
+    ...baseCorsHeaders,
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Credentials': 'false', // Cannot use 'true' with '*'
+  };
 };
 
 // Create Apollo Server instance with production security
@@ -121,7 +144,9 @@ const handler = startServerAndCreateNextHandler<NextRequest, GraphQLContext>(ser
 });
 
 // Export OPTIONS handler for CORS preflight
-export async function OPTIONS() {
+export async function OPTIONS(request: NextRequest) {
+  const origin = request.headers.get('origin');
+  const corsHeaders = getCorsHeaders(origin);
   return new NextResponse(null, {
     status: 204,
     headers: corsHeaders,
@@ -130,6 +155,8 @@ export async function OPTIONS() {
 
 // Export route handlers for Next.js App Router
 export async function GET(request: NextRequest) {
+  const origin = request.headers.get('origin');
+  const corsHeaders = getCorsHeaders(origin);
   // Add CORS headers
   const response = await handler(request);
   Object.entries(corsHeaders).forEach(([key, value]) => {
@@ -139,6 +166,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const origin = request.headers.get('origin');
+  const corsHeaders = getCorsHeaders(origin);
+  
   // Check if IP is blocked
   const clientIp = getClientIp(request);
   if (await isBlockedIp(clientIp)) {
