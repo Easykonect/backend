@@ -40,13 +40,13 @@ This API uses **GraphQL** over HTTP POST requests. All requests go to a single e
 | **Admin Panel** | ✅ Complete | User/Provider/Service Management |
 | **Rate Limiting** | ✅ Complete | Per-user/IP limits |
 | **Security** | ✅ Complete | JWT, OTP hashing, Account Lockout |
+| **Push Notifications** | ✅ Complete | OneSignal integration (iOS + Android) |
 
 ### 🔜 Coming Soon
 
 | Feature | Status |
 |---------|--------|
 | Payment Integration (Paystack) | 🔜 In Progress |
-| Push Notifications (FCM) | 🔜 Planned |
 | Geolocation Search | 🔜 Planned |
 
 ---
@@ -2956,13 +2956,161 @@ const pollUnreadCounts = () => {
 };
 ```
 
-## React Native / Mobile Push Notifications
+## Push Notifications (OneSignal)
 
-Notifications are stored in the database. For push notifications, integrate with:
-- **Firebase Cloud Messaging (FCM)** for Android
-- **Apple Push Notification Service (APNS)** for iOS
+Push notifications are implemented using **OneSignal**. The backend provides APIs to register devices and the server sends push notifications automatically for key events.
 
-The `isPushed` and `pushedAt` fields track push notification delivery status.
+### Setup (React Native / Expo)
+
+```bash
+# Install OneSignal SDK
+npx expo install onesignal-expo-plugin react-native-onesignal
+```
+
+### Initialize OneSignal
+
+```typescript
+// App.tsx or app entry point
+import OneSignal from 'react-native-onesignal';
+
+// Initialize with your OneSignal App ID
+OneSignal.setAppId('YOUR_ONESIGNAL_APP_ID');
+
+// Request push notification permission (iOS)
+OneSignal.promptForPushNotificationsWithUserResponse();
+
+// Get player ID when available
+OneSignal.addSubscriptionObserver(event => {
+  if (event.to.userId) {
+    // Register with backend
+    registerPushToken(event.to.userId);
+  }
+});
+
+// Handle notification opened
+OneSignal.setNotificationOpenedHandler(notification => {
+  const data = notification.notification.additionalData;
+  
+  switch (data?.type) {
+    case 'BOOKING':
+      navigation.navigate('BookingDetails', { id: data.bookingId });
+      break;
+    case 'MESSAGE':
+      navigation.navigate('Chat', { conversationId: data.conversationId });
+      break;
+    case 'REVIEW':
+      navigation.navigate('Reviews');
+      break;
+    case 'VERIFICATION':
+      navigation.navigate('ProviderProfile');
+      break;
+  }
+});
+```
+
+### Register Device with Backend
+
+```graphql
+mutation RegisterPushToken($playerId: String!) {
+  registerPushToken(playerId: $playerId) {
+    success
+    message
+    pushEnabled
+  }
+}
+```
+
+```typescript
+// Call after user logs in and OneSignal provides playerId
+const registerPushToken = async (playerId: string) => {
+  try {
+    await client.mutate({
+      mutation: REGISTER_PUSH_TOKEN,
+      variables: { playerId }
+    });
+  } catch (error) {
+    console.error('Failed to register push token:', error);
+  }
+};
+```
+
+### Unregister on Logout
+
+```graphql
+mutation UnregisterPushToken {
+  unregisterPushToken {
+    success
+    message
+    pushEnabled
+  }
+}
+```
+
+```typescript
+const logout = async () => {
+  // Unregister push token
+  await client.mutate({ mutation: UNREGISTER_PUSH_TOKEN });
+  
+  // Clear tokens
+  await AsyncStorage.multiRemove(['accessToken', 'refreshToken']);
+  
+  // Navigate to login
+  navigation.reset({ routes: [{ name: 'Login' }] });
+};
+```
+
+### Toggle Push Notifications (Settings)
+
+```graphql
+mutation UpdatePushPreference($enabled: Boolean!) {
+  updatePushPreference(enabled: $enabled) {
+    success
+    message
+    pushEnabled
+  }
+}
+```
+
+```typescript
+// Settings screen toggle
+const PushNotificationToggle = () => {
+  const [enabled, setEnabled] = useState(true);
+
+  const togglePush = async (value: boolean) => {
+    await client.mutate({
+      mutation: UPDATE_PUSH_PREFERENCE,
+      variables: { enabled: value }
+    });
+    setEnabled(value);
+  };
+
+  return (
+    <Switch value={enabled} onValueChange={togglePush} />
+  );
+};
+```
+
+### Automatic Push Events
+
+The backend automatically sends push notifications for:
+
+| Event | Title | When |
+|-------|-------|------|
+| New Booking | "New Booking Request" | Provider receives booking |
+| Booking Accepted | "Booking Accepted! 🎉" | User's booking is accepted |
+| Booking Rejected | "Booking Update" | User's booking is rejected |
+| Booking Completed | "Booking Completed" | Service is marked complete |
+| Booking Cancelled | "Booking Cancelled" | Booking is cancelled |
+| New Message | "New message from {name}" | User receives a message |
+| New Review | "New Review Received ⭐" | Provider gets a review |
+| Verification Approved | "Verification Approved! 🎉" | Provider is verified |
+| Verification Rejected | "Verification Update" | Provider verification failed |
+
+### iOS Badge Management
+
+The backend supports iOS badge count updates:
+- Badge is updated with `ios_badgeType` and `ios_badgeCount`
+- Silent pushes can update badge without showing notification
 
 ---
 
@@ -3518,18 +3666,51 @@ The WebSocket server uses Redis Pub/Sub for horizontal scaling. This means you c
 
 ---
 
-## Mobile Push Notifications
+## Mobile Push Notifications (OneSignal)
 
-While WebSocket handles in-app real-time updates, for offline users you'll want push notifications:
+Push notifications are fully integrated using **OneSignal**. The system handles both online (WebSocket) and offline (push) scenarios:
 
-1. **Store device tokens** in your database (via a separate API)
-2. **Background workers** check for offline users when sending notifications
-3. **Send push via** Firebase Cloud Messaging (FCM) or Apple Push Notification Service (APNS)
+### How It Works
 
-The notification system automatically:
-- Sends WebSocket notification if user is online
-- Creates database notification if user is offline
-- Future: Triggers push notification for offline users
+1. **User logs in** → App registers OneSignal player ID with backend (`registerPushToken`)
+2. **Event occurs** (new booking, message, etc.) → Backend sends push via OneSignal
+3. **User taps notification** → App handles deep link to relevant screen
+
+### Push + WebSocket Integration
+
+| User State | Notification Delivery |
+|------------|----------------------|
+| App in foreground | WebSocket real-time event |
+| App in background | Push notification |
+| App closed | Push notification |
+| Push disabled | Database notification only (shown on next app open) |
+
+### Silent/Background Push (iOS)
+
+For background data sync without user-visible notification:
+
+```typescript
+// Backend sends silent push with content_available: true
+// App receives in background handler
+OneSignal.setNotificationWillShowInForegroundHandler(event => {
+  const notification = event.getNotification();
+  
+  if (notification.additionalData?.silent) {
+    // Handle silently - sync data without showing
+    event.complete(null);
+    syncDataInBackground();
+  } else {
+    // Show notification normally
+    event.complete(notification);
+  }
+});
+```
+
+### iOS Badge Count
+
+Badge count is automatically managed by the backend:
+- New notifications increment the badge
+- User can clear badge by marking notifications as read
 
 ---
 
@@ -3559,6 +3740,14 @@ socket.on('error', (err) => {
 
 ## Changelog
 
+### v2.1.0 (March 22, 2026)
+- ✅ OneSignal push notifications (iOS + Android)
+- ✅ Device registration API (`registerPushToken`, `unregisterPushToken`)
+- ✅ Push preference toggle (`updatePushPreference`)
+- ✅ iOS-specific features (badge, silent push, content-available)
+- ✅ Android-specific features (channels, sounds, visibility)
+- ✅ Automatic push for bookings, messages, reviews, verification
+
 ### v2.0.0 (March 2026)
 - ✅ Added comprehensive rate limiting (per-user/IP)
 - ✅ Enhanced security (token invalidation, query depth limiting)
@@ -3580,6 +3769,6 @@ socket.on('error', (err) => {
 
 ---
 
-**API Version**: 2.0.0  
-**Last Updated**: March 14, 2026  
+**API Version**: 2.1.0  
+**Last Updated**: March 22, 2026  
 **Documentation**: https://backend-ehtm.onrender.com/docs

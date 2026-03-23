@@ -99,6 +99,10 @@ model User {
   emailVerifyExpiry DateTime? // OTP expiry time
   pendingEmail      String?   // Staged new email awaiting OTP confirmation
   
+  // Push Notifications (OneSignal)
+  oneSignalPlayerId String?   // OneSignal Player ID for push notifications
+  pushEnabled       Boolean   @default(true) // User preference for push notifications
+  
   // Security fields
   failedLoginAttempts Int       @default(0)
   lockoutUntil        DateTime?

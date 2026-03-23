@@ -1,6 +1,6 @@
 # EasyKonnect Backend - Implementation Status Report
 
-**Last Updated:** March 14, 2026  
+**Last Updated:** March 22, 2026  
 **Project:** EasyKonnect Service Marketplace Platform  
 **Backend Repository:** https://github.com/Easykonect/backend  
 **Deployed API:** https://backend-ehtm.onrender.com/api/graphql  
@@ -149,13 +149,26 @@
 ### ⏳ What's Pending
 - **Payment Integration** - Paystack/Stripe integration for transactions
 - **Geolocation Features** - Location-based provider search
-- **Push Notifications** - Firebase/APNs for mobile push notifications
+
+### ⚠️ Partially Complete (Awaiting External Configuration)
+- **Push Notifications (OneSignal)** - ✅ Server integration complete (March 22, 2026)
+  - `registerPushToken(playerId)` - Register device for push
+  - `unregisterPushToken` - Unregister device
+  - `updatePushPreference(enabled)` - Toggle push on/off
+  - `sendPushToUser`, `sendPushToUsers`, `sendPushToAll` - Send notifications
+  - `sendSilentPush`, `sendSilentPushToUser` - iOS background/content-available push
+  - `updateBadgeCount` - iOS badge management
+  - Helper functions: `sendBookingPush`, `sendMessagePush`, `sendReviewPush`, `sendVerificationPush`
+  - iOS-specific payload fields: `content_available`, `ios_badgeType`, `ios_badgeCount`, `ios_sound`, `ios_category`, `mutable_content`, `thread_id`
+  - Android-specific payload fields: `android_channel_id`, `android_sound`, `android_visibility`, `android_group`
+  - **⏳ Pending**: APNs authentication key (.p8) upload to OneSignal dashboard (requires Apple Developer account)
+  - **⏳ Pending**: FCM credentials for Android (if needed beyond OneSignal defaults)
 
 ---
 
 ## Frontend-Backend Alignment
 
-> **Last Synced:** March 14, 2026  
+> **Last Synced:** March 22, 2026  
 > **Frontend Status Report Reviewed:** EasyKonnet App Development Progress Report
 
 ### ✅ APIs Ready for Integration (Frontend shows as ❓)
@@ -180,7 +193,6 @@ These APIs exist in the backend but may not have been documented to frontend:
 | Verify Payment | `verifyPayment(reference)` | HIGH | Payment webhook handler needed |
 | Request Refund | `requestRefund(bookingId, reason)` | MEDIUM | Part of payment system |
 | Payment History | `myPayments`, `allPayments` | MEDIUM | Part of payment system |
-| Register Push Token | `registerPushToken(token)` | MEDIUM | Expo push token storage |
 
 ### ✅ APIs Now Built (Previously Pending)
 
@@ -194,6 +206,9 @@ These APIs exist in the backend but may not have been documented to frontend:
 | Mark Notification Read | `markNotificationAsRead(id)` | ✅ Built | Single & bulk operations |
 | Upload Profile Photo | `uploadProfilePhoto` | ✅ Built | Cloudinary integration |
 | Upload Service Images | `uploadServiceImages` | ✅ Built | Cloudinary integration |
+| Register Push Token | `registerPushToken(playerId)` | ✅ Built | OneSignal player ID storage |
+| Unregister Push Token | `unregisterPushToken` | ✅ Built | Remove device from push |
+| Update Push Settings | `updatePushPreference(enabled)` | ✅ Built | Toggle push on/off |
 
 ### ✅ Admin APIs Already Built
 
@@ -1019,7 +1034,7 @@ const { user } = await becomeProvider({
 - ❌ No request rate limiting (basic rate limiting in Redis available but not enforced on API)
 - ❌ No API caching (Redis available but caching not implemented on GraphQL)
 - ❌ No comprehensive error logging (Sentry, LogRocket)
-- ❌ No push notifications (Firebase/APNs) - only in-app notifications
+ - ⚠️ OneSignal server integration in place (payloads, silent pushes, badge updates). APNs/FCM credentials and dashboard configuration are pending.
 - ❌ No automated testing suite
 
 ### Recommended Improvements

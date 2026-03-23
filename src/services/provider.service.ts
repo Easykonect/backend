@@ -56,6 +56,7 @@ const formatUserWithProvider = (user: any, provider: any = null) => ({
   firstName: user.firstName,
   lastName: user.lastName,
   phone: user.phone,
+  profilePhoto: user.profilePhoto || null,
   role: user.role,
   activeRole: user.activeRole || user.role, // Default to role if not set
   status: user.status,

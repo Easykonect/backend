@@ -983,6 +983,13 @@ export const typeDefs = gql`
     byType: String  # JSON string of type counts
   }
 
+  # Push notification registration result
+  type PushTokenResult {
+    success: Boolean!
+    message: String!
+    pushEnabled: Boolean!
+  }
+
   # ==================
   # Input Types - Messaging
   # ==================
@@ -1516,6 +1523,19 @@ export const typeDefs = gql`
 
     # Send system announcement (Admin only)
     sendSystemAnnouncement(input: SendAnnouncementInput!): MessageResponse!
+
+    # ==================
+    # Push Notification Mutations
+    # ==================
+
+    # Register device for push notifications (OneSignal Player ID)
+    registerPushToken(playerId: String!): PushTokenResult!
+
+    # Unregister device from push notifications
+    unregisterPushToken: PushTokenResult!
+
+    # Update push notification preference
+    updatePushPreference(enabled: Boolean!): PushTokenResult!
 
     # ==================
     # Admin Auth (Separate - Different Endpoints)

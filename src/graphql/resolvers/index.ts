@@ -181,6 +181,12 @@ import {
   sendSystemAnnouncement,
 } from '@/services/notification.service';
 
+import {
+  registerPushToken,
+  unregisterPushToken,
+  updatePushPreference,
+} from '@/services/push.service';
+
 import { requireAuth, requireRole, requireAnyRole, type GraphQLContext } from '@/middleware';
 import { UserRole, ServiceStatus, type ServiceStatusType } from '@/constants';
 
@@ -1788,6 +1794,46 @@ export const resolvers = {
         success: true,
         message: 'Announcement sent successfully',
       };
+    },
+
+    // ==================
+    // Push Notifications
+    // ==================
+
+    /**
+     * Register push token for notifications
+     */
+    registerPushToken: async (
+      _: unknown,
+      args: { playerId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return registerPushToken(user.userId, args.playerId);
+    },
+
+    /**
+     * Unregister push token
+     */
+    unregisterPushToken: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return unregisterPushToken(user.userId);
+    },
+
+    /**
+     * Update push notification settings
+     */
+    updatePushPreference: async (
+      _: unknown,
+      args: { enabled: boolean },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return updatePushPreference(user.userId, args.enabled);
     },
 
     // ==================
