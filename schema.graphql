@@ -1,2530 +1,1978 @@
-# ===========================================# ===========================================# ===========================================
 
-# EasyKonnect GraphQL Schema
-
-# Generated for Documentation# EasyKonnect GraphQL Schema# EasyKonnect GraphQL Schema
-
-# ===========================================
-
-# Generated for Documentation# Generated for Documentation
-
-# ==================
-
-# Enums# ===========================================# ===========================================
-
-# ==================
-
-
-
-"User roles in the platform. Determines access level and permissions."
-
-enum UserRole {# ==================# ==================
-
-  "Regular user who can browse and book services"
-
-  SERVICE_USER# Enums# Enums
-
-  "User who offers services on the platform"
-
-  SERVICE_PROVIDER# ==================# ==================
-
-  "Platform administrator with elevated privileges"
-
-  ADMIN
-
-  "Super administrator with full system access"
-
-  SUPER_ADMIN""""""
-
-}
-
-User roles in the platform. Determines access level and permissions.User roles in the platform. Determines access level and permissions.
-
-"Current status of a user's account."
-
-enum AccountStatus {""""""
-
-  "Account created but email not yet verified"
-
-  PENDINGenum UserRole {enum UserRole {
-
-  "Account is active and can access all features"
-
-  ACTIVE  """Regular user who can browse and book services"""  """Regular user who can browse and book services"""
-
-  "Account temporarily suspended by admin"
-
-  SUSPENDED  SERVICE_USER  SERVICE_USER
-
-  "Account has been deactivated"
-
-  DEACTIVATED  """User who offers services on the platform"""  """User who offers services on the platform"""
-
-}
-
-  SERVICE_PROVIDER  SERVICE_PROVIDER
-
-"Verification status for service providers."
-
-enum VerificationStatus {  """Platform administrator with elevated privileges"""  """Platform administrator with elevated privileges"""
-
-  "Provider has not submitted verification documents"
-
-  UNVERIFIED  ADMIN  ADMIN
-
-  "Verification documents submitted and under review"
-
-  PENDING  """Super administrator with full system access"""  """Super administrator with full system access"""
-
-  "Provider identity and credentials verified"
-
-  VERIFIED  SUPER_ADMIN  SUPER_ADMIN
-
-  "Verification rejected - provider needs to resubmit"
-
-  REJECTED}}
-
-}
-
-
-
-"Current status of a service booking."
-
-enum BookingStatus {""""""
-
-  "Booking request submitted, awaiting provider response"
-
-  PENDINGCurrent status of a user's account.Current status of a user's account.
-
-  "Provider accepted the booking"
-
-  ACCEPTED""""""
-
-  "Provider rejected the booking"
-
-  REJECTEDenum AccountStatus {enum AccountStatus {
-
-  "Service is currently being performed"
-
-  IN_PROGRESS  """Account created but email not yet verified"""  """Account created but email not yet verified"""
-
-  "Service has been completed"
-
-  COMPLETED  PENDING  PENDING
-
-  "Booking was cancelled by user or provider"
-
-  CANCELLED  """Account is active and can access all features"""  """Account is active and can access all features"""
-
-  "There is a dispute regarding this booking"
-
-  DISPUTED  ACTIVE  ACTIVE
-
-}
-
-  """Account temporarily suspended by admin"""  """Account temporarily suspended by admin"""
-
-"Current status of a payment transaction."
-
-enum PaymentStatus {  SUSPENDED  SUSPENDED
-
-  "Payment initiated but not yet processed"
-
-  PENDING  """Account has been deactivated"""  """Account has been deactivated"""
-
-  "Payment is being processed"
-
-  PROCESSING  DEACTIVATED  DEACTIVATED
-
-  "Payment successful"
-
-  COMPLETED}}
-
-  "Payment failed"
-
-  FAILED
-
-  "Payment has been refunded"
-
-  REFUNDED""""""
-
-}
-
-Verification status for service providers.Verification status for service providers.
-
-"Status of a service listing."
-
-enum ServiceStatus {""""""
-
-  "Service is in draft mode, not visible to users"
-
-  DRAFTenum VerificationStatus {enum VerificationStatus {
-
-  "Service submitted for admin approval"
-
-  PENDING_APPROVAL  """Provider has not submitted verification documents"""  """Provider has not submitted verification documents"""
-
-  "Service is active and visible to users"
-
-  ACTIVE  UNVERIFIED  UNVERIFIED
-
-  "Service is temporarily inactive"
-
-  INACTIVE  """Verification documents submitted and under review"""  """Verification documents submitted and under review"""
-
-  "Service has been suspended by admin"
-
-  SUSPENDED  PENDING  PENDING
-
-}
-
-  """Provider identity and credentials verified"""  """Provider identity and credentials verified"""
-
-"Admin role subset for creation."
-
-enum AdminRole {  VERIFIED  VERIFIED
-
-  "Platform administrator"
-
-  ADMIN  """Verification rejected - provider needs to resubmit"""  """Verification rejected - provider needs to resubmit"""
-
-  "Super administrator with full access"
-
-  SUPER_ADMIN  REJECTED  REJECTED
-
-}
-
-}}
-
-# ==================
-
-# Core Types
-
-# ==================
-
-""""""
-
-"Service Provider Profile - Business details for SERVICE_PROVIDER users."
-
-type ServiceProviderProfile {Current status of a service booking.Current status of a service booking.
-
-  "Unique identifier for the provider profile"
-
-  id: ID!""""""
-
-  "Business or company name"
-
-  businessName: String!enum BookingStatus {enum BookingStatus {
-
-  "Description of the business and services offered"
-
-  businessDescription: String  """Booking request submitted, awaiting provider response"""  """Booking request submitted, awaiting provider response"""
-
-  "Verification status of the provider"
-
-  verificationStatus: VerificationStatus!  PENDING  PENDING
-
-  "Business street address"
-
-  address: String!  """Provider accepted the booking"""  """Provider accepted the booking"""
-
-  "City where business operates"
-
-  city: String!  ACCEPTED  ACCEPTED
-
-  "State or province"
-
-  state: String!  """Provider rejected the booking"""  """Provider rejected the booking"""
-
-  "Country"
-
-  country: String!  REJECTED  REJECTED
-
-  "GPS latitude for location-based services"
-
-  latitude: Float  """Service is currently being performed"""  """Service is currently being performed"""
-
-  "GPS longitude for location-based services"
-
-  longitude: Float  IN_PROGRESS  IN_PROGRESS
-
-  "List of verification documents uploaded"
-
-  documents: [String!]!  """Service has been completed"""  """Service has been completed"""
-
-  "When the profile was created"
-
-  createdAt: String!  COMPLETED  COMPLETED
-
-  "When the profile was last updated"
-
-  updatedAt: String!  """Booking was cancelled by user or provider"""  """Booking was cancelled by user or provider"""
-
-}
-
-  CANCELLED  CANCELLED
-
-"Service Category - Categories for organizing services."
-
-type ServiceCategory {  """There is a dispute regarding this booking"""  """There is a dispute regarding this booking"""
-
-  "Unique identifier for the category"
-
-  id: ID!  DISPUTED  DISPUTED
-
-  "Display name of the category"
-
-  name: String!}}
-
-  "URL-friendly slug"
-
-  slug: String!
-
-  "Description of the category"
-
-  description: String""""""
-
-  "Icon identifier or URL"
-
-  icon: StringCurrent status of a payment transaction.Current status of a payment transaction.
-
-  "Whether the category is active and visible"
-
-  isActive: Boolean!""""""
-
-  "When the category was created"
-
-  createdAt: String!enum PaymentStatus {enum PaymentStatus {
-
-  "When the category was last updated"
-
-  updatedAt: String!  """Payment initiated but not yet processed"""  """Payment initiated but not yet processed"""
-
-}
-
-  PENDING  PENDING
-
-"Service - A service offering by a provider."
-
-type Service {  """Payment is being processed"""  """Payment is being processed"""
-
-  "Unique identifier for the service"
-
-  id: ID!  PROCESSING  PROCESSING
-
-  "The provider offering this service"
-
-  provider: ServiceProviderProfile!  """Payment successful"""  """Payment successful"""
-
-  "Category the service belongs to"
-
-  category: ServiceCategory!  COMPLETED  COMPLETED
-
-  "Service name"
-
-  name: String!  """Payment failed"""  """Payment failed"""
-
-  "URL-friendly slug"
-
-  slug: String!  FAILED  FAILED
-
-  "Detailed description of the service"
-
-  description: String!  """Payment has been refunded"""  """Payment has been refunded"""
-
-  "Price in the platform's currency"
-
-  price: Float!  REFUNDED  REFUNDED
-
-  "Estimated duration in minutes"
-
-  duration: Int!}}
-
-  "Current status of the service listing"
-
-  status: ServiceStatus!
-
-  "Service images/photos"
-
-  images: [String!]!"""# ==================
-
-  "When the service was created"
-
-  createdAt: String!Status of a service listing.# Types
-
-  "When the service was last updated"
-
-  updatedAt: String!"""# ==================
-
-}
-
-enum ServiceStatus {
-
-"User - Represents both SERVICE_USER and SERVICE_PROVIDER. The unified user type supports both roles with optional provider profile."
-
-type User {  """Service is in draft mode, not visible to users""""""
-
-  "Unique identifier for the user (MongoDB ObjectId)"
-
-  id: ID!  DRAFTRepresents a user in the EasyKonnect platform. Users can be service users (customers) or service providers.
-
-  "User's email address. Used for authentication and notifications."
-
-  email: String!  """Service submitted for admin approval""""""
-
-  "User's first name"
-
-  firstName: String!  PENDING_APPROVALtype User {
-
-  "User's last name"
-
-  lastName: String!  """Service is active and visible to users"""  """Unique identifier for the user (MongoDB ObjectId)"""
-
-  "Phone number for contact"
-
-  phone: String  ACTIVE  id: ID!
-
-  "User's role determining permissions"
-
-  role: UserRole!  """Service is temporarily inactive"""  """User's email address. Used for authentication and notifications."""
-
-  "Current account status"
-
-  status: AccountStatus!  INACTIVE  email: String!
-
-  "Whether email has been verified"
-
-  isEmailVerified: Boolean!  """Service has been suspended by admin"""  """User's first name"""
-
-  "Provider profile - only populated when role is SERVICE_PROVIDER"
-
-  providerProfile: ServiceProviderProfile  SUSPENDED  firstName: String!
-
-  "When the account was created"
-
-  createdAt: String!}  """User's last name"""
-
-  "When the account was last updated"
-
-  updatedAt: String!  lastName: String!
-
-}
-
-"""  """User's phone number (optional). Format: +234XXXXXXXXXX"""
-
-"Admin User - Separate type for admin users (ADMIN, SUPER_ADMIN). Admins have a separate authentication flow."
-
-type AdminUser {Admin role subset for creation (cannot create SUPER_ADMIN via API).  phone: String
-
-  "Unique identifier for the admin"
-
-  id: ID!"""  """User's role in the platform. Determines access permissions."""
-
-  "Admin's email address"
-
-  email: String!enum AdminRole {  role: UserRole!
-
-  "Admin's first name"
-
-  firstName: String!  """Platform administrator"""  """Current account status. PENDING accounts require email verification."""
-
-  "Admin's last name"
-
-  lastName: String!  ADMIN  status: AccountStatus!
-
-  "Admin role (ADMIN or SUPER_ADMIN)"
-
-  role: UserRole!  """Super administrator with full access"""  """Whether the user has verified their email address"""
-
-  "Current account status"
-
-  status: AccountStatus!  SUPER_ADMIN  isEmailVerified: Boolean!
-
-  "Last login timestamp"
-
-  lastLoginAt: String}  """Timestamp when the account was created (ISO 8601 format)"""
-
-  "When the admin account was created"
-
-  createdAt: String!  createdAt: String!
-
-  "When the admin account was last updated"
-
-  updatedAt: String!# ==================  """Timestamp when the account was last updated (ISO 8601 format)"""
-
-}
-
-# Core Types  updatedAt: String!
-
-# ==================
-
-# Response Types# ==================}
-
-# ==================
-
-
-
-"Authentication response for user/provider login."
-
-type AuthResponse {""""""
-
-  "The authenticated user"
-
-  user: User!Service Provider Profile - Business details for SERVICE_PROVIDER users.Response returned after successful login. Contains user data and authentication tokens.
-
-  "JWT access token (short-lived)"
-
-  accessToken: String!Only populated when user role is SERVICE_PROVIDER."""
-
-  "Refresh token for obtaining new access tokens"
-
-  refreshToken: String!"""type AuthResponse {
-
-}
-
-type ServiceProviderProfile {  """The authenticated user's profile information"""
-
-"Authentication response for admin login."
-
-type AdminAuthResponse {  """Unique identifier for the provider profile"""  user: User!
-
-  "The authenticated admin"
-
-  admin: AdminUser!  id: ID!  """JWT access token for API authentication. Include in Authorization header as 'Bearer <token>'. Expires in 7 days."""
-
-  "JWT access token (short-lived)"
-
-  accessToken: String!  """Business or company name"""  accessToken: String!
-
-  "Refresh token for obtaining new access tokens"
-
-  refreshToken: String!  businessName: String!  """JWT refresh token for obtaining new access tokens. Expires in 30 days."""
-
-}
-
-  """Description of the business and services offered"""  refreshToken: String!
-
-"Response for user registration."
-
-type RegistrationResponse {  businessDescription: String}
-
-  "Whether registration was successful"
-
-  success: Boolean!  """Verification status of the provider"""
-
-  "Human-readable message"
-
-  message: String!  verificationStatus: VerificationStatus!"""
-
-  "Whether email verification is required before login"
-
-  requiresVerification: Boolean!  """Business street address"""Response returned after user registration. Indicates email verification is required.
-
-}
-
-  address: String!"""
-
-"Response for email verification."
-
-type VerifyEmailResponse {  """City where business operates"""type RegistrationResponse {
-
-  "Whether verification was successful"
-
-  success: Boolean!  city: String!  """Whether the registration was successful"""
-
-  "Human-readable message"
-
-  message: String!  """State or province"""  success: Boolean!
-
-  "The verified user (if auto-login enabled)"
-
-  user: User  state: String!  """Human-readable message about the registration status"""
-
-  "Access token (if auto-login enabled)"
-
-  accessToken: String  """Country"""  message: String!
-
-  "Refresh token (if auto-login enabled)"
-
-  refreshToken: String  country: String!  """Always true - indicates user must verify their email before logging in"""
-
-}
-
-  """GPS latitude for location-based services"""  requiresVerification: Boolean!
-
-"Generic success/failure response with message."
-
-type MessageResponse {  latitude: Float}
-
-  "Whether the operation was successful"
-
-  success: Boolean!  """GPS longitude for location-based services"""
-
-  "Human-readable message"
-
-  message: String!  longitude: Float"""
-
-}
-
-  """List of verification documents uploaded"""Response returned after email verification. On success, includes authentication tokens.
-
-"Response for refreshing access token (user/provider)."
-
-type RefreshTokenResponse {  documents: [String!]!"""
-
-  "New access token"
-
-  accessToken: String!  """When the profile was created"""type VerifyEmailResponse {
-
-  "The user associated with the token"
-
-  user: User!  createdAt: String!  """Whether the verification was successful"""
-
-}
-
-  """When the profile was last updated"""  success: Boolean!
-
-"Response for refreshing admin access token."
-
-type AdminRefreshTokenResponse {  updatedAt: String!  """Human-readable status message"""
-
-  "New access token"
-
-  accessToken: String!}  message: String!
-
-  "The admin associated with the token"
-
-  admin: AdminUser!  """User profile (only present on successful verification)"""
-
-}
-
-"""  user: User
-
-"Paginated list of users."
-
-type PaginatedUsers {Service Category - Categories for organizing services.  """JWT access token (only present on successful verification)"""
-
-  "List of users for this page"
-
-  items: [User!]!"""  accessToken: String
-
-  "Total number of users matching query"
-
-  total: Int!type ServiceCategory {  """JWT refresh token (only present on successful verification)"""
-
-  "Current page number"
-
-  page: Int!  """Unique identifier for the category"""  refreshToken: String
-
-  "Number of items per page"
-
-  limit: Int!  id: ID!}
-
-  "Total number of pages"
-
-  totalPages: Int!  """Display name of the category"""
-
-  "Whether there's a next page"
-
-  hasNextPage: Boolean!  name: String!"""
-
-  "Whether there's a previous page"
-
-  hasPreviousPage: Boolean!  """URL-friendly slug"""Generic response for operations that don't return specific data.
-
-}
-
-  slug: String!"""
-
-"Paginated list of admins."
-
-type PaginatedAdmins {  """Description of the category"""type MessageResponse {
-
-  "List of admins for this page"
-
-  items: [AdminUser!]!  description: String  """Whether the operation was successful"""
-
-  "Total number of admins"
-
-  total: Int!  """Icon identifier or URL"""  success: Boolean!
-
-  "Current page number"
-
-  page: Int!  icon: String  """Human-readable status message"""
-
-  "Number of items per page"
-
-  limit: Int!  """Whether the category is active and visible"""  message: String!
-
-  "Total number of pages"
-
-  totalPages: Int!  isActive: Boolean!}
-
-  "Whether there's a next page"
-
-  hasNextPage: Boolean!  """When the category was created"""
-
-  "Whether there's a previous page"
-
-  hasPreviousPage: Boolean!  createdAt: String!"""
-
-}
-
-  """When the category was last updated"""Response returned when refreshing an access token.
-
-"Paginated list of services."
-
-type PaginatedServices {  updatedAt: String!"""
-
-  "List of services for this page"
-
-  items: [Service!]!}type RefreshTokenResponse {
-
-  "Total number of services matching filters"
-
-  total: Int!  """New JWT access token"""
-
-  "Current page number"
-
-  page: Int!"""  accessToken: String!
-
-  "Number of items per page"
-
-  limit: Int!Service - A service offering by a provider.  """Current user profile information"""
-
-  "Total number of pages"
-
-  totalPages: Int!"""  user: User!
-
-  "Whether there's a next page"
-
-  hasNextPage: Boolean!type Service {}
-
-  "Whether there's a previous page"
-
-  hasPreviousPage: Boolean!  """Unique identifier for the service"""
-
-}
-
-  id: ID!"""
-
-"Paginated list of categories."
-
-type PaginatedCategories {  """The provider offering this service"""Paginated list of users. Used for admin user management.
-
-  "List of categories for this page"
-
-  items: [ServiceCategory!]!  provider: ServiceProviderProfile!"""
-
-  "Total number of categories"
-
-  total: Int!  """Category the service belongs to"""type PaginatedUsers {
-
-  "Current page number"
-
-  page: Int!  category: ServiceCategory!  """Array of users for the current page"""
-
-  "Number of items per page"
-
-  limit: Int!  """Service name"""  items: [User!]!
-
-  "Total number of pages"
-
-  totalPages: Int!  name: String!  """Total number of users matching the query"""
-
-  "Whether there's a next page"
-
-  hasNextPage: Boolean!  """URL-friendly slug"""  total: Int!
-
-  "Whether there's a previous page"
-
-  hasPreviousPage: Boolean!  slug: String!  """Current page number (1-indexed)"""
-
-}
-
-  """Detailed description of the service"""  page: Int!
-
-# ==================
-
-# Input Types - User & Provider (Unified Auth)  description: String!  """Number of items per page"""
-
-# ==================
-
-  """Price in the platform's currency"""  limit: Int!
-
-"Input for user/provider login. Same endpoint for both roles."
-
-input LoginInput {  price: Float!  """Total number of pages available"""
-
-  "User's email address"
-
-  email: String!  """Estimated duration in minutes"""  totalPages: Int!
-
-  "User's password"
-
-  password: String!  duration: Int!  """Whether there are more pages after this one"""
-
-}
-
-  """Current status of the service listing"""  hasNextPage: Boolean!
-
-"Input for new user registration. Creates SERVICE_USER by default."
-
-input RegisterUserInput {  status: ServiceStatus!  """Whether there are pages before this one"""
-
-  "Email address (must be unique)"
-
-  email: String!  """Service images/photos"""  hasPreviousPage: Boolean!
-
-  "Password (min 8 chars, must include uppercase, lowercase, number)"
-
-  password: String!  images: [String!]!}
-
-  "First name"
-
-  firstName: String!  """When the service was created"""
-
-  "Last name"
-
-  lastName: String!  createdAt: String!# ==================
-
-  "Phone number (optional)"
-
-  phone: String  """When the service was last updated"""# Inputs
-
-}
-
-  updatedAt: String!# ==================
-
-"Input for email verification via OTP."
-
-input VerifyEmailInput {}
-
-  "Email address to verify"
-
-  email: String!"""
-
-  "6-digit OTP code sent to email"
-
-  otp: String!"""Input for user authentication.
-
-}
-
-User - Represents both SERVICE_USER and SERVICE_PROVIDER."""
-
-"Input for resending verification OTP."
-
-input ResendOtpInput {The unified user type supports both roles with optional provider profile.input LoginInput {
-
-  "Email address to resend OTP to"
-
-  email: String!"""  """Registered email address. Example: john.doe@example.com"""
-
-}
-
-type User {  email: String!
-
-"Input for requesting password reset."
-
-input ForgotPasswordInput {  """Unique identifier for the user (MongoDB ObjectId)"""  """Account password. Example: SecurePass123"""
-
-  "Email address associated with the account"
-
-  email: String!  id: ID!  password: String!
-
-}
-
-  """User's email address. Used for authentication and notifications."""}
-
-"Input for resetting password with OTP."
-
-input ResetPasswordInput {  email: String!
-
-  "Email address"
-
-  email: String!  """User's first name""""""
-
-  "OTP code received via email"
-
-  otp: String!  firstName: String!Input for creating a new user account.
-
-  "New password"
-
-  newPassword: String!  """User's last name""""""
-
-}
-
-  lastName: String!input RegisterUserInput {
-
-"Input for updating user profile."
-
-input UpdateProfileInput {  """Phone number for contact"""  """Valid email address. Will receive verification OTP. Example: john.doe@example.com"""
-
-  "First name"
-
-  firstName: String  phone: String  email: String!
-
-  "Last name"
-
-  lastName: String  """User's role determining permissions"""  """Password (minimum 8 characters, must include uppercase, lowercase, and number). Example: SecurePass123"""
-
-  "Phone number"
-
-  phone: String  role: UserRole!  password: String!
-
-}
-
-  """Current account status"""  """User's first name (2-50 characters). Example: John"""
-
-"Input for changing password (authenticated users)."
-
-input ChangePasswordInput {  status: AccountStatus!  firstName: String!
-
-  "Current password for verification"
-
-  currentPassword: String!  """Whether email has been verified"""  """User's last name (2-50 characters). Example: Doe"""
-
-  "New password"
-
-  newPassword: String!  isEmailVerified: Boolean!  lastName: String!
-
-}
-
-  """Provider profile - only populated when role is SERVICE_PROVIDER"""  """Phone number (optional, Nigerian format recommended). Example: +2348012345678"""
-
-"Input for pagination parameters."
-
-input PaginationInput {  providerProfile: ServiceProviderProfile  phone: String
-
-  "Page number (1-based)"
-
-  page: Int  """When the account was created"""}
-
-  "Items per page (default: 10, max: 100)"
-
-  limit: Int  createdAt: String!
-
-}
-
-  """When the account was last updated""""""
-
-"Input for upgrading SERVICE_USER to SERVICE_PROVIDER."
-
-input BecomeProviderInput {  updatedAt: String!Input for verifying email with OTP code.
-
-  "Business or company name"
-
-  businessName: String!}"""
-
-  "Description of services offered"
-
-  businessDescription: Stringinput VerifyEmailInput {
-
-  "Business address"
-
-  address: String!"""  """Email address that received the OTP. Example: john.doe@example.com"""
-
-  "City"
-
-  city: String!Admin User - Separate type for admin users (ADMIN, SUPER_ADMIN).  email: String!
-
-  "State or province"
-
-  state: String!Admins have a separate authentication flow and management system.  """6-digit verification code sent to email. Example: 123456"""
-
-  "Country"
-
-  country: String!"""  otp: String!
-
-  "GPS latitude (optional)"
-
-  latitude: Floattype AdminUser {}
-
-  "GPS longitude (optional)"
-
-  longitude: Float  """Unique identifier for the admin"""
-
-}
-
-  id: ID!"""
-
-"Input for updating provider profile information."
-
-input UpdateProviderProfileInput {  """Admin's email address"""Input for requesting a new verification OTP.
-
-  "Business name"
-
-  businessName: String  email: String!"""
-
-  "Business description"
-
-  businessDescription: String  """Admin's first name"""input ResendOtpInput {
-
-  "Street address"
-
-  address: String  firstName: String!  """Email address to send the new OTP to. Example: john.doe@example.com"""
-
-  "City"
-
-  city: String  """Admin's last name"""  email: String!
-
-  "State or province"
-
-  state: String  lastName: String!}
-
-  "Country"
-
-  country: String  """Admin role (ADMIN or SUPER_ADMIN)"""
-
-  "GPS latitude"
-
-  latitude: Float  role: UserRole!"""
-
-  "GPS longitude"
-
-  longitude: Float  """Current account status"""Input for requesting a password reset.
-
-}
-
-  status: AccountStatus!"""
-
-# ==================
-
-# Input Types - Service Management  """Last login timestamp"""input ForgotPasswordInput {
-
-# ==================
-
-  lastLoginAt: String  """Email address of the account to reset. Example: john.doe@example.com"""
-
-"Input for creating a new service (Provider only)."
-
-input CreateServiceInput {  """When the admin account was created"""  email: String!
-
-  "Category ID the service belongs to"
-
-  categoryId: ID!  createdAt: String!}
-
-  "Service name"
-
-  name: String!  """When the admin account was last updated"""
-
-  "Detailed service description"
-
-  description: String!  updatedAt: String!"""
-
-  "Price in platform currency"
-
-  price: Float!}Input for resetting password with OTP verification.
-
-  "Estimated duration in minutes"
-
-  duration: Int!"""
-
-  "Array of image URLs"
-
-  images: [String!]# ==================input ResetPasswordInput {
-
-}
-
-# Response Types  """Email address of the account. Example: john.doe@example.com"""
-
-"Input for updating an existing service."
-
-input UpdateServiceInput {# ==================  email: String!
-
-  "Category ID"
-
-  categoryId: ID  """6-digit reset code sent to email. Example: 654321"""
-
-  "Service name"
-
-  name: String"""  otp: String!
-
-  "Service description"
-
-  description: StringAuthentication response for user/provider login.  """New password (minimum 8 characters, must include uppercase, lowercase, and number). Example: NewSecurePass456"""
-
-  "Price"
-
-  price: Float"""  newPassword: String!
-
-  "Duration in minutes"
-
-  duration: Inttype AuthResponse {}
-
-  "Service images"
-
-  images: [String!]  """The authenticated user"""
-
-  "Service status"
-
-  status: ServiceStatus  user: User!"""
-
-}
-
-  """JWT access token (short-lived)"""Input for updating user profile. All fields are optional.
-
-"Input for filtering services."
-
-input ServiceFiltersInput {  accessToken: String!"""
-
-  "Filter by category"
-
-  categoryId: ID  """Refresh token for obtaining new access tokens"""input UpdateProfileInput {
-
-  "Filter by provider"
-
-  providerId: ID  refreshToken: String!  """New first name. Example: Jonathan"""
-
-  "Filter by status"
-
-  status: ServiceStatus}  firstName: String
-
-  "Minimum price"
-
-  minPrice: Float  """New last name. Example: Smith"""
-
-  "Maximum price"
-
-  maxPrice: Float"""  lastName: String
-
-  "Search term (searches name and description)"
-
-  search: StringAuthentication response for admin login.  """New phone number. Example: +2348098765432"""
-
-}
-
-"""  phone: String
-
-# ==================
-
-# Input Types - Admin (Separate Auth System)type AdminAuthResponse {}
-
-# ==================
-
-  """The authenticated admin"""
-
-"Input for admin login. Validates that user has ADMIN or SUPER_ADMIN role."
-
-input AdminLoginInput {  admin: AdminUser!"""
-
-  "Admin email address"
-
-  email: String!  """JWT access token (short-lived)"""Input for paginated queries.
-
-  "Admin password"
-
-  password: String!  accessToken: String!"""
-
-}
-
-  """Refresh token for obtaining new access tokens"""input PaginationInput {
-
-"Input for creating a new admin (SUPER_ADMIN only)."
-
-input CreateAdminInput {  refreshToken: String!  """Page number to retrieve (default: 1). Example: 1"""
-
-  "Email address for the new admin"
-
-  email: String!}  page: Int
-
-  "Temporary password"
-
-  password: String!  """Number of items per page (default: 10, max: 100). Example: 10"""
-
-  "First name"
-
-  firstName: String!"""  limit: Int
-
-  "Last name"
-
-  lastName: String!Response for user registration.}
-
-  "Admin role to assign"
-
-  role: AdminRole!"""
-
-}
-
-type RegistrationResponse {# ==================
-
-"Input for updating admin profile."
-
-input UpdateAdminInput {  """Whether registration was successful"""# Queries
-
-  "First name"
-
-  firstName: String  success: Boolean!# ==================
-
-  "Last name"
-
-  lastName: String  """Human-readable message"""
-
-}
-
-  message: String!type Query {
-
-"Input for admin password reset request."
-
-input AdminForgotPasswordInput {  """Whether email verification is required before login"""  """
-
-  "Admin email address"
-
-  email: String!  requiresVerification: Boolean!  Get the currently authenticated user's profile.
-
-}
-
-}  
-
-"Input for admin password reset with OTP."
-
-input AdminResetPasswordInput {  **Authentication Required:** Yes
-
-  "Admin email address"
-
-  email: String!"""  
-
-  "OTP code"
-
-  otp: String!Response for email verification.  **Example:**
-
-  "New password"
-
-  newPassword: String!"""  ```graphql
-
-}
-
-type VerifyEmailResponse {  query {
-
-"Input for admin changing their password."
-
-input AdminChangePasswordInput {  """Whether verification was successful"""    me {
-
-  "Current password"
-
-  currentPassword: String!  success: Boolean!      id
-
-  "New password"
-
-  newPassword: String!  """Human-readable message"""      email
-
-}
-
-  message: String!      firstName
-
-# ==================
-
-# Input Types - Categories (Admin Only)  """The verified user (if auto-login enabled)"""      lastName
-
-# ==================
-
-  user: User      role
-
-"Input for creating a service category (Admin only)."
-
-input CreateCategoryInput {  """Access token (if auto-login enabled)"""      status
-
-  "Category name"
-
-  name: String!  accessToken: String    }
-
-  "Category description"
-
-  description: String  """Refresh token (if auto-login enabled)"""  }
-
-  "Icon identifier or URL"
-
-  icon: String  refreshToken: String  ```
-
-}
-
-}  """
-
-"Input for updating a category."
-
-input UpdateCategoryInput {  me: User
-
-  "Category name"
-
-  name: String"""
-
-  "Category description"
-
-  description: StringGeneric success/failure response with message.  """
-
-  "Icon identifier or URL"
-
-  icon: String"""  Get a specific user by their ID.
-
-  "Whether category is active"
-
-  isActive: Booleantype MessageResponse {  
-
-}
-
-  """Whether the operation was successful"""  **Authentication Required:** Yes
-
-# ==================
-
-# Queries  success: Boolean!  
-
-# ==================
-
-  """Human-readable message"""  **Arguments:**
-
-type Query {
-
-  "Get current authenticated user. Works for both SERVICE_USER and SERVICE_PROVIDER."  message: String!  - `id`: The unique ID of the user to retrieve
-
-  me: User
-
-  }  
-
-  "Get user by ID. Admin only."
-
-  user(id: ID!): User  **Example:**
-
+  # ==================
+  # Enums
+  # ==================
+  enum UserRole {
+    SERVICE_USER
+    SERVICE_PROVIDER
+    ADMIN
+    SUPER_ADMIN
+  }
+
+  enum AccountStatus {
+    PENDING
+    ACTIVE
+    SUSPENDED
+    DEACTIVATED
+  }
+
+  enum VerificationStatus {
+    UNVERIFIED
+    PENDING
+    VERIFIED
+    REJECTED
+  }
+
+  enum BookingStatus {
+    PENDING
+    ACCEPTED
+    REJECTED
+    IN_PROGRESS
+    COMPLETED
+    CANCELLED
+    DISPUTED
+  }
+
+  enum PaymentStatus {
+    PENDING
+    PROCESSING
+    COMPLETED
+    FAILED
+    REFUNDED
+  }
+
+  enum ServiceStatus {
+    DRAFT
+    PENDING_APPROVAL
+    ACTIVE
+    INACTIVE
+    SUSPENDED
+  }
+
+  enum DisputeStatus {
+    OPEN
+    UNDER_REVIEW
+    RESOLVED
+    CLOSED
+  }
+
+  enum DisputeResolution {
+    REFUND_FULL
+    REFUND_PARTIAL
+    NO_REFUND
+    REDO_SERVICE
+    MUTUAL_AGREEMENT
+    DISMISSED
+  }
+
+  enum ConversationType {
+    USER_PROVIDER
+    USER_ADMIN
+    ADMIN_SUPERADMIN
+    BOOKING_RELATED
+  }
+
+  enum MessageStatus {
+    SENT
+    DELIVERED
+    READ
+  }
+
+  enum NotificationType {
+    BOOKING_CREATED
+    BOOKING_ACCEPTED
+    BOOKING_REJECTED
+    BOOKING_CANCELLED
+    BOOKING_STARTED
+    BOOKING_COMPLETED
+    PAYMENT_RECEIVED
+    PAYMENT_FAILED
+    REFUND_PROCESSED
+    REVIEW_RECEIVED
+    REVIEW_RESPONSE
+    VERIFICATION_APPROVED
+    VERIFICATION_REJECTED
+    SERVICE_APPROVED
+    SERVICE_REJECTED
+    SERVICE_SUSPENDED
+    DISPUTE_OPENED
+    DISPUTE_UPDATED
+    DISPUTE_RESOLVED
+    NEW_MESSAGE
+    ACCOUNT_SUSPENDED
+    ACCOUNT_ACTIVATED
+    SYSTEM_ANNOUNCEMENT
+  }
+
+  # Admin role enum (subset for creation)
+  enum AdminRole {
+    ADMIN
+    SUPER_ADMIN
+  }
+
+  # ==================
+  # Types
+  # ==================
   
-
-  "List all users with pagination. Admin only.""""  ```graphql
-
-  users(pagination: PaginationInput): PaginatedUsers!
-
-Response for refreshing access token (user/provider).  query {
-
-  "Get all service categories. Public endpoint."
-
-  categories(pagination: PaginationInput): PaginatedCategories!"""    user(id: "507f1f77bcf86cd799439011") {
-
-  
-
-  "Get category by ID. Public endpoint."type RefreshTokenResponse {      id
-
-  category(id: ID!): ServiceCategory
-
-    """New access token"""      email
-
-  "Get all services with optional filters. Public endpoint."
-
-  services(filters: ServiceFiltersInput, pagination: PaginationInput): PaginatedServices!  accessToken: String!      firstName
-
-  
-
-  "Get service by ID. Public endpoint."  """The user associated with the token"""      lastName
-
-  service(id: ID!): Service
-
-    user: User!    }
-
-  "Get current provider's services. Provider only."
-
-  myServices(pagination: PaginationInput): PaginatedServices!}  }
-
-
-
-  "Get current authenticated admin. Admin only."  ```
-
-  adminMe: AdminUser
-
-  """  """
-
-  "List all admins. SUPER_ADMIN only."
-
-  admins(pagination: PaginationInput): PaginatedAdmins!Response for refreshing admin access token.  user(id: ID!): User
-
-  
-
-  "Get admin by ID. SUPER_ADMIN only.""""
-
-  admin(id: ID!): AdminUser
-
-type AdminRefreshTokenResponse {  """
-
-  "Get providers pending verification. Admin only."
-
-  pendingProviders(pagination: PaginationInput): PaginatedUsers!  """New access token"""  Get a paginated list of all users.
-
-  
-
-  "Get services pending approval. Admin only."  accessToken: String!  
-
-  pendingServices(pagination: PaginationInput): PaginatedServices!
-
-}  """The admin associated with the token"""  **Authentication Required:** Yes (ADMIN role required)
-
-
-
-# ==================  admin: AdminUser!  
-
-# Mutations
-
-# ==================}  **Arguments:**
-
-
-
-type Mutation {  - `pagination`: Optional pagination parameters
-
-  "Register a new user. Creates account with SERVICE_USER role."
-
-  register(input: RegisterUserInput!): RegistrationResponse!"""  
-
-  
-
-  "Verify email address using OTP code."Paginated list of users.  **Example:**
-
-  verifyEmail(input: VerifyEmailInput!): VerifyEmailResponse!
-
-  """  ```graphql
-
-  "Resend verification OTP to email."
-
-  resendVerificationOtp(input: ResendOtpInput!): MessageResponse!type PaginatedUsers {  query {
-
-  
-
-  "Login with email and password. Works for SERVICE_USER and SERVICE_PROVIDER."  """List of users for this page"""    users(pagination: { page: 1, limit: 10 }) {
-
-  login(input: LoginInput!): AuthResponse!
-
-    items: [User!]!      items {
-
-  "Refresh access token using refresh token."
-
-  refreshToken(refreshToken: String!): RefreshTokenResponse!  """Total number of users matching query"""        id
-
-  
-
-  "Request password reset. Sends OTP to email."  total: Int!        email
-
-  forgotPassword(input: ForgotPasswordInput!): MessageResponse!
-
-    """Current page number"""        firstName
-
-  "Reset password using OTP received via email."
-
-  resetPassword(input: ResetPasswordInput!): MessageResponse!  page: Int!        role
-
-  
-
-  "Change password while authenticated."  """Number of items per page"""      }
-
-  changePassword(input: ChangePasswordInput!): MessageResponse!
-
-    limit: Int!      total
-
-  "Logout and invalidate refresh token."
-
-  logout: MessageResponse!  """Total number of pages"""      totalPages
-
-
-
-  "Update authenticated user's profile."  totalPages: Int!      hasNextPage
-
-  updateProfile(input: UpdateProfileInput!): User!
-
-    """Whether there's a next page"""    }
-
-  "Delete own account. Cannot be undone."
-
-  deleteAccount: MessageResponse!  hasNextPage: Boolean!  }
-
-
-
-  "Upgrade from SERVICE_USER to SERVICE_PROVIDER."  """Whether there's a previous page"""  ```
-
-  becomeProvider(input: BecomeProviderInput!): User!
-
-    hasPreviousPage: Boolean!  """
-
-  "Update provider profile/business information."
-
-  updateProviderProfile(input: UpdateProviderProfileInput!): User!}  users(pagination: PaginationInput): PaginatedUsers!
-
-
-
-  "Create a new service listing. Provider only."}
-
-  createService(input: CreateServiceInput!): Service!
-
-  """
-
-  "Update an existing service."
-
-  updateService(id: ID!, input: UpdateServiceInput!): Service!Paginated list of admins.# ==================
-
-  
-
-  "Delete a service.""""# Mutations
-
-  deleteService(id: ID!): MessageResponse!
-
-  type PaginatedAdmins {# ==================
-
-  "Submit service for admin approval."
-
-  submitServiceForApproval(id: ID!): Service!  """List of admins for this page"""
-
-
-
-  "Admin login. Validates user has ADMIN or SUPER_ADMIN role."  items: [AdminUser!]!type Mutation {
-
-  adminLogin(input: AdminLoginInput!): AdminAuthResponse!
-
-    """Total number of admins"""  # ==================
-
-  "Refresh admin access token."
-
-  adminRefreshToken(refreshToken: String!): AdminRefreshTokenResponse!  total: Int!  # Auth - Registration & Verification
-
-  
-
-  "Request admin password reset."  """Current page number"""  # ==================
-
-  adminForgotPassword(input: AdminForgotPasswordInput!): MessageResponse!
-
+  # Service Provider Profile (embedded in User when role is SERVICE_PROVIDER)
+  type ServiceProviderProfile {
+    id: ID!
+    businessName: String!
+    businessDescription: String
+    verificationStatus: VerificationStatus!
+    address: String!
+    city: String!
+    state: String!
+    country: String!
+    latitude: Float
+    longitude: Float
+    documents: [String!]!
+    images: [String!]!
+    averageRating: Float
+    totalReviews: Int
+    likeCount: Int
+    isLiked: Boolean
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Service Category
+  type ServiceCategory {
+    id: ID!
+    name: String!
+    slug: String!
+    description: String
+    icon: String
+    isActive: Boolean!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Service
+  type Service {
+    id: ID!
+    provider: ServiceProviderProfile!
+    category: ServiceCategory!
+    name: String!
+    slug: String!
+    description: String!
+    price: Float!
+    duration: Int!
+    status: ServiceStatus!
+    images: [String!]!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Booking
+  type Booking {
+    id: ID!
+    user: User!
+    provider: ServiceProviderProfile!
+    service: Service!
+    status: BookingStatus!
+    scheduledDate: String!
+    scheduledTime: String!
+    address: String!
+    city: String!
+    state: String!
+    notes: String
+    servicePrice: Float!
+    commission: Float!
+    totalAmount: Float!
+    payment: Payment
+    review: Review
+    completedAt: String
+    cancelledAt: String
+    cancellationReason: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Payment
+  type Payment {
+    id: ID!
+    bookingId: ID!
+    amount: Float!
+    commission: Float!
+    providerPayout: Float!
+    status: PaymentStatus!
+    paymentMethod: String
+    transactionRef: String
+    paidAt: String
+    refundedAt: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Review
+  type Review {
+    id: ID!
+    rating: Int!
+    comment: String
+    response: String
+    respondedAt: String
+    createdAt: String!
+    updatedAt: String!
+    user: ReviewUser
+    provider: ReviewProvider
+    booking: ReviewBooking
+  }
+
+  type ReviewUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    email: String!
+  }
+
+  type ReviewProvider {
+    id: ID!
+    businessName: String!
+    user: ReviewProviderUser
+  }
+
+  type ReviewProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+  }
+
+  type ReviewBooking {
+    id: ID!
+    scheduledDate: String!
+    service: ReviewService
+  }
+
+  type ReviewService {
+    id: ID!
+    title: String!
+  }
+
+  # Paginated Reviews
+  type PaginatedReviews {
+    reviews: [Review!]!
+    total: Int!
     page: Int!
-
-  "Reset admin password with OTP."
-
-  adminResetPassword(input: AdminResetPasswordInput!): MessageResponse!  """Number of items per page"""  """
-
-  
-
-  "Change admin password while authenticated."  limit: Int!  Register a new user account.
-
-  adminChangePassword(input: AdminChangePasswordInput!): MessageResponse!
-
-    """Total number of pages"""  
-
-  "Admin logout and invalidate refresh token."
-
-  adminLogout: MessageResponse!  totalPages: Int!  A 6-digit verification code will be sent to the provided email address.
-
-
-
-  "Update own admin profile."  """Whether there's a next page"""  The user must verify their email before they can log in.
-
-  updateAdminProfile(input: UpdateAdminInput!): AdminUser!
-
-  hasNextPage: Boolean!  
-
-  "Create new admin account. SUPER_ADMIN only."
-
-  createAdmin(input: CreateAdminInput!): RegistrationResponse!  """Whether there's a previous page"""  **Authentication Required:** No
-
-  
-
-  "Suspend an admin account. SUPER_ADMIN only."  hasPreviousPage: Boolean!  
-
-  suspendAdmin(adminId: ID!, reason: String!): MessageResponse!
-
-  }  **Example:**
-
-  "Reactivate a suspended admin. SUPER_ADMIN only."
-
-  activateAdmin(adminId: ID!): MessageResponse!  ```graphql
-
-  
-
-  "Update admin role. SUPER_ADMIN only.""""  mutation {
-
-  updateAdminRole(adminId: ID!, role: AdminRole!): AdminUser!
-
-  Paginated list of services.    register(input: {
-
-  "Delete an admin account. SUPER_ADMIN only."
-
-  deleteAdmin(adminId: ID!): MessageResponse!"""      email: "john.doe@example.com"
-
-
-
-  "Suspend a user account. Admin only."type PaginatedServices {      password: "SecurePass123"
-
-  suspendUser(userId: ID!, reason: String!): MessageResponse!
-
-    """List of services for this page"""      firstName: "John"
-
-  "Reactivate a suspended user. Admin only."
-
-  activateUser(userId: ID!): MessageResponse!  items: [Service!]!      lastName: "Doe"
-
-  
-
-  "Delete a user account. Admin only."  """Total number of services matching filters"""      phone: "+2348012345678"
-
-  deleteUser(id: ID!): MessageResponse!
-
-  total: Int!    }) {
-
-  "Approve a provider's verification request. Admin only."
-
-  approveProvider(providerId: ID!): User!  """Current page number"""      success
-
-  
-
-  "Reject a provider's verification request. Admin only."  page: Int!      message
-
-  rejectProvider(providerId: ID!, reason: String!): User!
-
-  """Number of items per page"""      requiresVerification
-
-  "Approve a service listing. Admin only."
-
-  approveService(serviceId: ID!): Service!  limit: Int!    }
-
-  
-
-  "Reject a service listing. Admin only."  """Total number of pages"""  }
-
-  rejectService(serviceId: ID!, reason: String!): Service!
-
-    totalPages: Int!  ```
-
-  "Suspend an active service. Admin only."
-
-  suspendService(serviceId: ID!, reason: String!): Service!  """Whether there's a next page"""  
-
-
-
-  "Create a new service category. Admin only."  hasNextPage: Boolean!  **Possible Errors:**
-
-  createCategory(input: CreateCategoryInput!): ServiceCategory!
-
-    """Whether there's a previous page"""  - `USER_ALREADY_EXISTS`: Email is already registered
-
-  "Update a category. Admin only."
-
-  updateCategory(id: ID!, input: UpdateCategoryInput!): ServiceCategory!  hasPreviousPage: Boolean!  """
-
-  
-
-  "Delete a category. Admin only."}  register(input: RegisterUserInput!): RegistrationResponse!
-
-  deleteCategory(id: ID!): MessageResponse!
-
-}
-
-
-"""  """
-
-Paginated list of categories.  Verify email address using the 6-digit OTP code sent during registration.
-
-"""  
-
-type PaginatedCategories {  On success, returns authentication tokens so the user is automatically logged in.
-
-  """List of categories for this page"""  
-
-  items: [ServiceCategory!]!  **Authentication Required:** No
-
-  """Total number of categories"""  
-
-  total: Int!  **Example:**
-
-  """Current page number"""  ```graphql
-
-  page: Int!  mutation {
-
-  """Number of items per page"""    verifyEmail(input: {
-
-  limit: Int!      email: "john.doe@example.com"
-
-  """Total number of pages"""      otp: "123456"
-
-  totalPages: Int!    }) {
-
-  """Whether there's a next page"""      success
-
-  hasNextPage: Boolean!      message
-
-  """Whether there's a previous page"""      user {
-
-  hasPreviousPage: Boolean!        id
-
-}        email
-
-      }
-
-# ==================      accessToken
-
-# Input Types - User & Provider (Unified Auth)      refreshToken
-
-# ==================    }
-
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
   }
 
-"""  ```
-
-Input for user/provider login. Same endpoint for both roles.  
-
-"""  **Possible Errors:**
-
-input LoginInput {  - `USER_NOT_FOUND`: No account with this email
-
-  """User's email address"""  - `ALREADY_VERIFIED`: Email already verified
-
-  email: String!  - `OTP_NOT_FOUND`: No verification code found
-
-  """User's password"""  - `OTP_EXPIRED`: Code has expired (10 minutes)
-
-  password: String!  - `INVALID_OTP`: Incorrect verification code
-
-}  """
-
-  verifyEmail(input: VerifyEmailInput!): VerifyEmailResponse!
-
-"""
-
-Input for new user registration. Creates SERVICE_USER by default.  """
-
-To become a SERVICE_PROVIDER, use the becomeProvider mutation after registration.  Request a new verification OTP code.
-
-"""  
-
-input RegisterUserInput {  Use this if the original code expired (codes expire after 10 minutes) or was not received.
-
-  """Email address (must be unique)"""  
-
-  email: String!  **Authentication Required:** No
-
-  """Password (min 8 chars, must include uppercase, lowercase, number)"""  
-
-  password: String!  **Example:**
-
-  """First name"""  ```graphql
-
-  firstName: String!  mutation {
-
-  """Last name"""    resendVerificationOtp(input: {
-
-  lastName: String!      email: "john.doe@example.com"
-
-  """Phone number (optional)"""    }) {
-
-  phone: String      success
-
-}      message
-
-    }
-
-"""  }
-
-Input for email verification via OTP.  ```
-
-"""  
-
-input VerifyEmailInput {  **Possible Errors:**
-
-  """Email address to verify"""  - `ALREADY_VERIFIED`: Email already verified
-
-  email: String!  """
-
-  """6-digit OTP code sent to email"""  resendVerificationOtp(input: ResendOtpInput!): MessageResponse!
-
-  otp: String!
-
-}  # ==================
-
-  # Auth - Login & Sessions
-
-"""  # ==================
-
-Input for resending verification OTP.
-
-"""  """
-
-input ResendOtpInput {  Authenticate a user and receive access tokens.
-
-  """Email address to resend OTP to"""  
-
-  email: String!  The user's email must be verified before login is allowed.
-
-}  Failed login attempts are tracked - after 5 failed attempts, the account is locked for 30 minutes.
-
-  
-
-"""  **Authentication Required:** No
-
-Input for requesting password reset.  
-
-"""  **Example:**
-
-input ForgotPasswordInput {  ```graphql
-
-  """Email address associated with the account"""  mutation {
-
-  email: String!    login(input: {
-
-}      email: "john.doe@example.com"
-
-      password: "SecurePass123"
-
-"""    }) {
-
-Input for resetting password with OTP.      user {
-
-"""        id
-
-input ResetPasswordInput {        email
-
-  """Email address"""        firstName
-
-  email: String!        role
-
-  """OTP code received via email"""      }
-
-  otp: String!      accessToken
-
-  """New password"""      refreshToken
-
-  newPassword: String!    }
-
-}  }
-
-  ```
-
-"""  
-
-Input for updating user profile.  **Possible Errors:**
-
-"""  - `INVALID_CREDENTIALS`: Wrong email or password
-
-input UpdateProfileInput {  - `EMAIL_NOT_VERIFIED`: Email verification required
-
-  """First name"""  - `ACCOUNT_LOCKED`: Too many failed attempts
-
-  firstName: String  - `USER_SUSPENDED`: Account suspended
-
-  """Last name"""  - `ACCOUNT_DEACTIVATED`: Account deactivated
-
-  lastName: String  """
-
-  """Phone number"""  login(input: LoginInput!): AuthResponse!
-
-  phone: String
-
-}  """
-
-  Get a new access token using a valid refresh token.
-
-"""  
-
-Input for changing password (authenticated users).  Use this when the access token has expired but you still have a valid refresh token.
-
-"""  
-
-input ChangePasswordInput {  **Authentication Required:** No
-
-  """Current password for verification"""  
-
-  currentPassword: String!  **Arguments:**
-
-  """New password"""  - `refreshToken`: The refresh token received during login or email verification
-
-  newPassword: String!  
-
-}  **Example:**
-
-  ```graphql
-
-"""  mutation {
-
-Input for pagination parameters.    refreshToken(refreshToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...") {
-
-"""      accessToken
-
-input PaginationInput {      user {
-
-  """Page number (1-based)"""        id
-
-  page: Int        email
-
-  """Items per page (default: 10, max: 100)"""      }
-
-  limit: Int    }
-
-}  }
-
-  ```
-
-"""  
-
-Input for upgrading SERVICE_USER to SERVICE_PROVIDER.  **Possible Errors:**
-
-This mutation adds provider capabilities to an existing user account.  - `INVALID_REFRESH_TOKEN`: Token is invalid or expired
-
-"""  """
-
-input BecomeProviderInput {  refreshToken(refreshToken: String!): RefreshTokenResponse!
-
-  """Business or company name"""
-
-  businessName: String!  # ==================
-
-  """Description of services offered"""  # Auth - Password Management
-
-  businessDescription: String  # ==================
-
-  """Business address"""
-
-  address: String!  """
-
-  """City"""  Request a password reset.
-
-  city: String!  
-
-  """State or province"""  A 6-digit reset code will be sent to the email if an account exists.
-
-  state: String!  For security, this always returns success even if the email is not registered.
-
-  """Country"""  
-
-  country: String!  **Authentication Required:** No
-
-  """GPS latitude (optional)"""  
-
-  latitude: Float  **Example:**
-
-  """GPS longitude (optional)"""  ```graphql
-
-  longitude: Float  mutation {
-
-}    forgotPassword(input: {
-
-      email: "john.doe@example.com"
-
-"""    }) {
-
-Input for updating provider profile information.      success
-
-"""      message
-
-input UpdateProviderProfileInput {    }
-
-  """Business name"""  }
-
-  businessName: String  ```
-
-  """Business description"""  """
-
-  businessDescription: String  forgotPassword(input: ForgotPasswordInput!): MessageResponse!
-
-  """Street address"""
-
-  address: String  """
-
-  """City"""  Reset password using the 6-digit code sent via forgotPassword.
-
-  city: String  
-
-  """State or province"""  The code expires after 10 minutes.
-
-  state: String  
-
-  """Country"""  **Authentication Required:** No
-
-  country: String  
-
-  """GPS latitude"""  **Example:**
-
-  latitude: Float  ```graphql
-
-  """GPS longitude"""  mutation {
-
-  longitude: Float    resetPassword(input: {
-
-}      email: "john.doe@example.com"
-
-      otp: "654321"
-
-# ==================      newPassword: "NewSecurePass456"
-
-# Input Types - Service Management    }) {
-
-# ==================      success
-
-      message
-
-"""    }
-
-Input for creating a new service (Provider only).  }
-
-"""  ```
-
-input CreateServiceInput {  
-
-  """Category ID the service belongs to"""  **Possible Errors:**
-
-  categoryId: ID!  - `USER_NOT_FOUND`: No account with this email
-
-  """Service name"""  - `RESET_NOT_FOUND`: No reset request found
-
-  name: String!  - `RESET_EXPIRED`: Reset code has expired
-
-  """Detailed service description"""  - `INVALID_RESET_CODE`: Incorrect reset code
-
-  description: String!  """
-
-  """Price in platform currency"""  resetPassword(input: ResetPasswordInput!): MessageResponse!
-
-  price: Float!
-
-  """Estimated duration in minutes"""  # ==================
-
-  duration: Int!  # Users
-
-  """Array of image URLs"""  # ==================
-
-  images: [String!]
-
-}  """
-
-  Update the authenticated user's profile information.
-
-"""  
-
-Input for updating an existing service.  Only provided fields will be updated.
-
-"""  
-
-input UpdateServiceInput {  **Authentication Required:** Yes
-
-  """Category ID"""  
-
-  categoryId: ID  **Example:**
-
-  """Service name"""  ```graphql
-
-  name: String  mutation {
-
-  """Service description"""    updateProfile(input: {
-
-  description: String      firstName: "Jonathan"
-
-  """Price"""      lastName: "Smith"
-
-  price: Float      phone: "+2348098765432"
-
-  """Duration in minutes"""    }) {
-
-  duration: Int      id
-
-  """Service images"""      firstName
-
-  images: [String!]      lastName
-
-  """Service status"""      phone
-
-  status: ServiceStatus      updatedAt
-
-}    }
-
+  # Provider Rating Stats
+  type ProviderRatingStats {
+    averageRating: Float!
+    totalReviews: Int!
+    fiveStars: Int!
+    fourStars: Int!
+    threeStars: Int!
+    twoStars: Int!
+    oneStar: Int!
   }
 
-"""  ```
-
-Input for filtering services.  """
-
-"""  updateProfile(input: UpdateProfileInput!): User!
-
-input ServiceFiltersInput {
-
-  """Filter by category"""  """
-
-  categoryId: ID  Delete a user account.
-
-  """Filter by provider"""  
-
-  providerId: ID  **Authentication Required:** Yes (ADMIN role required)
-
-  """Filter by status"""  
-
-  status: ServiceStatus  **Warning:** This action cannot be undone.
-
-  """Minimum price"""  
-
-  minPrice: Float  **Arguments:**
-
-  """Maximum price"""  - `id`: ID of the user to delete
-
-  maxPrice: Float  
-
-  """Search term (searches name and description)"""  **Example:**
-
-  search: String  ```graphql
-
-}  mutation {
-
-    deleteUser(id: "507f1f77bcf86cd799439011") {
-
-# ==================      success
-
-# Input Types - Admin (Separate Auth System)      message
-
-# ==================    }
-
+  # Can Review Response
+  type CanReviewResponse {
+    canReview: Boolean!
+    reason: String
   }
 
-"""  ```
-
-Input for admin login. Validates that user has ADMIN or SUPER_ADMIN role.  
-
-"""  **Possible Errors:**
-
-input AdminLoginInput {  - `UNAUTHORIZED`: Not an admin
-
-  """Admin email address"""  - `USER_NOT_FOUND`: User does not exist
-
-  email: String!  """
-
-  """Admin password"""  deleteUser(id: ID!): MessageResponse!
-
-  password: String!}
-
-}
-
-"""
-Input for creating a new admin (SUPER_ADMIN only).
-Admins cannot self-register - they must be invited.
-"""
-input CreateAdminInput {
-  """Email address for the new admin"""
-  email: String!
-  """Temporary password (admin should change on first login)"""
-  password: String!
-  """First name"""
-  firstName: String!
-  """Last name"""
-  lastName: String!
-  """Admin role to assign"""
-  role: AdminRole!
-}
-
-"""
-Input for updating admin profile.
-"""
-input UpdateAdminInput {
-  """First name"""
-  firstName: String
-  """Last name"""
-  lastName: String
-}
-
-"""
-Input for admin password reset request.
-"""
-input AdminForgotPasswordInput {
-  """Admin email address"""
-  email: String!
-}
-
-"""
-Input for admin password reset with OTP.
-"""
-input AdminResetPasswordInput {
-  """Admin email address"""
-  email: String!
-  """OTP code"""
-  otp: String!
-  """New password"""
-  newPassword: String!
-}
-
-"""
-Input for admin changing their password.
-"""
-input AdminChangePasswordInput {
-  """Current password"""
-  currentPassword: String!
-  """New password"""
-  newPassword: String!
-}
-
-# ==================
-# Input Types - Categories (Admin Only)
-# ==================
-
-"""
-Input for creating a service category (Admin only).
-"""
-input CreateCategoryInput {
-  """Category name"""
-  name: String!
-  """Category description"""
-  description: String
-  """Icon identifier or URL"""
-  icon: String
-}
-
-"""
-Input for updating a category.
-"""
-input UpdateCategoryInput {
-  """Category name"""
-  name: String
-  """Category description"""
-  description: String
-  """Icon identifier or URL"""
-  icon: String
-  """Whether category is active"""
-  isActive: Boolean
-}
-
-# ==================
-# Queries
-# ==================
-
-type Query {
   # ==================
-  # User & Provider Queries (Unified)
+  # Favourite Types
   # ==================
-  
-  """
-  Get current authenticated user. Works for both SERVICE_USER and SERVICE_PROVIDER.
-  Returns null if not authenticated.
-  """
-  me: User
-  
-  """
-  Get user by ID. Admin only.
-  """
-  user(id: ID!): User
-  
-  """
-  List all users with pagination. Admin only.
-  """
-  users(pagination: PaginationInput): PaginatedUsers!
+
+  # Favourite
+  type Favourite {
+    id: ID!
+    createdAt: String!
+    service: FavouriteService
+  }
+
+  # Service details in favourite
+  type FavouriteService {
+    id: ID!
+    name: String!
+    slug: String!
+    description: String!
+    price: Float!
+    duration: Int!
+    status: ServiceStatus!
+    images: [String!]!
+    createdAt: String!
+    updatedAt: String!
+    category: FavouriteCategory
+    provider: FavouriteProvider
+  }
+
+  type FavouriteCategory {
+    id: ID!
+    name: String!
+    slug: String!
+    icon: String
+  }
+
+  type FavouriteProvider {
+    id: ID!
+    businessName: String!
+    verificationStatus: VerificationStatus!
+    city: String!
+    state: String!
+    user: FavouriteProviderUser
+  }
+
+  type FavouriteProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+  }
+
+  # Paginated Favourites
+  type PaginatedFavourites {
+    favourites: [Favourite!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Is Favourited Response
+  type IsFavouritedResponse {
+    isFavourited: Boolean!
+    favouriteId: ID
+  }
+
+  # Toggle Favourite Response
+  type ToggleFavouriteResponse {
+    isFavourited: Boolean!
+    message: String!
+  }
+
+  # Service Favourite Count Response
+  type ServiceFavouriteCountResponse {
+    count: Int!
+  }
 
   # ==================
-  # Service Queries (Public & Provider)
+  # Provider Like Types
   # ==================
-  
-  """
-  Get all service categories. Public endpoint.
-  """
-  categories(pagination: PaginationInput): PaginatedCategories!
-  
-  """
-  Get category by ID. Public endpoint.
-  """
-  category(id: ID!): ServiceCategory
-  
-  """
-  Get all services with optional filters. Public endpoint.
-  Only shows ACTIVE services to non-admin users.
-  """
-  services(filters: ServiceFiltersInput, pagination: PaginationInput): PaginatedServices!
-  
-  """
-  Get service by ID. Public endpoint.
-  """
-  service(id: ID!): Service
-  
-  """
-  Get current provider's services. Provider only.
-  """
-  myServices(pagination: PaginationInput): PaginatedServices!
+
+  # Provider Like Response
+  type ProviderLikeResponse {
+    success: Boolean!
+    message: String!
+    likeCount: Int!
+  }
+
+  # Toggle Provider Like Response
+  type ToggleProviderLikeResponse {
+    success: Boolean!
+    message: String!
+    isLiked: Boolean!
+    likeCount: Int!
+  }
+
+  # Is Provider Liked Response
+  type IsProviderLikedResponse {
+    isLiked: Boolean!
+    likeCount: Int!
+  }
+
+  # Liked Provider Item
+  type LikedProviderItem {
+    id: ID!
+    likedAt: String!
+    provider: LikedProviderDetails!
+  }
+
+  # Liked Provider Details
+  type LikedProviderDetails {
+    id: ID!
+    businessName: String!
+    businessDescription: String
+    verificationStatus: VerificationStatus!
+    city: String!
+    state: String!
+    images: [String!]!
+    user: LikedProviderUser
+    reviewCount: Int!
+    likeCount: Int!
+  }
+
+  # Liked Provider User
+  type LikedProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    profilePhoto: String
+  }
+
+  # Paginated Liked Providers
+  type PaginatedLikedProviders {
+    items: [LikedProviderItem!]!
+    pagination: PaginationInfo!
+  }
 
   # ==================
-  # Admin Queries (Separate)
+  # Browse / Discovery Types
   # ==================
-  
-  """
-  Get current authenticated admin. Admin only.
-  """
-  adminMe: AdminUser
-  
-  """
-  List all admins. SUPER_ADMIN only.
-  """
-  admins(pagination: PaginationInput): PaginatedAdmins!
-  
-  """
-  Get admin by ID. SUPER_ADMIN only.
-  """
-  admin(id: ID!): AdminUser
 
-  """
-  Get providers pending verification. Admin only.
-  """
-  pendingProviders(pagination: PaginationInput): PaginatedUsers!
-  
-  """
-  Get services pending approval. Admin only.
-  """
-  pendingServices(pagination: PaginationInput): PaginatedServices!
-}
+  # A single provider card returned by browse/nearby queries
+  type BrowseProviderItem {
+    id: ID!
+    businessName: String!
+    businessDescription: String
+    verificationStatus: VerificationStatus!
+    address: String
+    city: String!
+    state: String!
+    country: String!
+    latitude: Float
+    longitude: Float
+    images: [String!]!
+    averageRating: Float!
+    totalReviews: Int!
+    likeCount: Int!
+    distanceKm: Float
+    categories: [String!]!
+    user: BrowseProviderUser
+    createdAt: String!
+    updatedAt: String!
+  }
 
-# ==================
-# Mutations
-# ==================
+  type BrowseProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    profilePhoto: String
+  }
 
-type Mutation {
-  # ==================
-  # User & Provider Auth (Unified)
-  # These mutations work for both SERVICE_USER and SERVICE_PROVIDER roles.
-  # ==================
-  
-  """
-  Register a new user. Creates account with SERVICE_USER role.
-  To become a provider, use becomeProvider mutation after registration.
-  Sends verification email with OTP.
-  """
-  register(input: RegisterUserInput!): RegistrationResponse!
-  
-  """
-  Verify email address using OTP code.
-  Must be completed before login is allowed.
-  """
-  verifyEmail(input: VerifyEmailInput!): VerifyEmailResponse!
-  
-  """
-  Resend verification OTP to email.
-  Rate limited to prevent abuse.
-  """
-  resendVerificationOtp(input: ResendOtpInput!): MessageResponse!
-  
-  """
-  Login with email and password.
-  Works for SERVICE_USER and SERVICE_PROVIDER roles.
-  For admin login, use adminLogin mutation.
-  """
-  login(input: LoginInput!): AuthResponse!
-  
-  """
-  Refresh access token using refresh token.
-  Access tokens are short-lived (15 minutes).
-  """
-  refreshToken(refreshToken: String!): RefreshTokenResponse!
-  
-  """
-  Request password reset. Sends OTP to email.
-  """
-  forgotPassword(input: ForgotPasswordInput!): MessageResponse!
-  
-  """
-  Reset password using OTP received via email.
-  """
-  resetPassword(input: ResetPasswordInput!): MessageResponse!
-  
-  """
-  Change password while authenticated.
-  Requires current password for verification.
-  """
-  changePassword(input: ChangePasswordInput!): MessageResponse!
-  
-  """
-  Logout and invalidate refresh token.
-  """
-  logout: MessageResponse!
+  # Active service shown on a provider's full public profile
+  type ProviderActiveService {
+    id: ID!
+    name: String!
+    price: Float!
+    duration: Int!
+    images: [String!]!
+    category: ServiceCategory
+  }
+
+  # Full public profile of a provider (for the detail page)
+  type PublicProviderProfile {
+    id: ID!
+    businessName: String!
+    businessDescription: String
+    verificationStatus: VerificationStatus!
+    address: String
+    city: String!
+    state: String!
+    country: String!
+    latitude: Float
+    longitude: Float
+    images: [String!]!
+    averageRating: Float!
+    totalReviews: Int!
+    likeCount: Int!
+    distanceKm: Float
+    categories: [String!]!
+    user: BrowseProviderUser
+    activeServices: [ProviderActiveService!]!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Paginated browse results
+  type PaginatedBrowseProviders {
+    items: [BrowseProviderItem!]!
+    pagination: PaginationInfo!
+  }
+
+  # Paginated nearby results (includes search metadata)
+  type PaginatedNearbyProviders {
+    items: [BrowseProviderItem!]!
+    pagination: PaginationInfo!
+    radiusKm: Float!
+    searchLocation: SearchLocation!
+  }
+
+  type SearchLocation {
+    latitude: Float!
+    longitude: Float!
+  }
 
   # ==================
-  # User Profile (Unified)
+  # Dispute Types
   # ==================
-  
-  """
-  Update authenticated user's profile.
-  """
-  updateProfile(input: UpdateProfileInput!): User!
-  
-  """
-  Delete own account. Cannot be undone.
-  Fails if provider has active bookings.
-  """
-  deleteAccount: MessageResponse!
+
+  # Dispute
+  type Dispute {
+    id: ID!
+    reason: String!
+    description: String!
+    evidence: [String!]!
+    status: DisputeStatus!
+    raisedByRole: UserRole!
+    resolution: DisputeResolution
+    resolutionNotes: String
+    refundAmount: Float
+    resolvedAt: String
+    createdAt: String!
+    updatedAt: String!
+    booking: DisputeBooking
+  }
+
+  type DisputeBooking {
+    id: ID!
+    status: BookingStatus!
+    scheduledDate: String!
+    scheduledTime: String!
+    servicePrice: Float!
+    totalAmount: Float!
+    user: DisputeUser
+    provider: DisputeProvider
+    service: DisputeService
+  }
+
+  type DisputeUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    email: String!
+  }
+
+  type DisputeProvider {
+    id: ID!
+    businessName: String!
+    user: DisputeProviderUser
+  }
+
+  type DisputeProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    email: String!
+  }
+
+  type DisputeService {
+    id: ID!
+    name: String!
+    price: Float!
+  }
+
+  # Paginated Disputes
+  type PaginatedDisputes {
+    disputes: [Dispute!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Open Disputes Count Response
+  type OpenDisputesCountResponse {
+    count: Int!
+  }
+
+  # Dispute Statistics
+  type DisputeStats {
+    total: Int!
+    open: Int!
+    underReview: Int!
+    resolved: Int!
+    closed: Int!
+    pending: Int!
+    resolutions: DisputeResolutionBreakdown
+  }
+
+  type DisputeResolutionBreakdown {
+    REFUND_FULL: Int
+    REFUND_PARTIAL: Int
+    NO_REFUND: Int
+    REDO_SERVICE: Int
+    MUTUAL_AGREEMENT: Int
+    DISMISSED: Int
+  }
+
+  # Booking Statistics
+  type BookingStats {
+    totalBookings: Int!
+    pendingBookings: Int!
+    completedBookings: Int!
+    cancelledBookings: Int!
+    totalRevenue: Float
+    totalSpent: Float
+    completionRate: Float
+  }
+
+  # User - unified for SERVICE_USER and SERVICE_PROVIDER
+  type User {
+    id: ID!
+    email: String!
+    firstName: String!
+    lastName: String!
+    phone: String
+    profilePhoto: String
+    role: UserRole!
+    activeRole: UserRole!  # Current active mode (for role switching)
+    status: AccountStatus!
+    isEmailVerified: Boolean!
+    pushEnabled: Boolean!   # Whether push notifications are enabled
+    lastLoginAt: String     # ISO timestamp of last login
+    # Provider profile is only populated when role is SERVICE_PROVIDER
+    providerProfile: ServiceProviderProfile
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Active Role Status
+  type ActiveRoleStatus {
+    currentRole: UserRole!
+    activeRole: UserRole!
+    canSwitch: Boolean!
+    hasProviderProfile: Boolean!
+    message: String!
+  }
+
+  # Admin User - separate type for clarity
+  type AdminUser {
+    id: ID!
+    email: String!
+    firstName: String!
+    lastName: String!
+    phone: String
+    profilePhoto: String
+    role: UserRole!
+    status: AccountStatus!
+    lastLoginAt: String
+    createdAt: String!
+    updatedAt: String!
+  }
 
   # ==================
-  # Service Provider (Upgrade & Management)
+  # Response Types
   # ==================
-  
-  """
-  Upgrade from SERVICE_USER to SERVICE_PROVIDER.
-  Requires business information. Provider will need verification.
-  """
-  becomeProvider(input: BecomeProviderInput!): User!
-  
-  """
-  Update provider profile/business information.
-  Provider only.
-  """
-  updateProviderProfile(input: UpdateProviderProfileInput!): User!
+
+  type AuthResponse {
+    user: User!
+    accessToken: String!
+    refreshToken: String!
+  }
+
+  type BecomeProviderResponse {
+    user: User!
+    accessToken: String!
+    refreshToken: String!
+  }
+
+  type AdminAuthResponse {
+    admin: AdminUser!
+    accessToken: String!
+    refreshToken: String!
+  }
+
+  type RegistrationResponse {
+    success: Boolean!
+    message: String!
+    requiresVerification: Boolean!
+  }
+
+  type VerifyEmailResponse {
+    success: Boolean!
+    message: String!
+    user: User
+    accessToken: String
+    refreshToken: String
+  }
+
+  type MessageResponse {
+    success: Boolean!
+    message: String!
+  }
+
+  type VerificationStatusResponse {
+    status: VerificationStatus!
+    canSubmit: Boolean!
+    message: String!
+  }
+
+  type RefreshTokenResponse {
+    accessToken: String!
+    user: User!
+  }
+
+  type AdminRefreshTokenResponse {
+    accessToken: String!
+    admin: AdminUser!
+  }
+
+  type PaginatedUsers {
+    items: [User!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  type PaginatedAdmins {
+    items: [AdminUser!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  type PaginatedServices {
+    items: [Service!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  type PaginatedCategories {
+    items: [ServiceCategory!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  type PaginatedBookings {
+    items: [Booking!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
 
   # ==================
-  # Service Management (Provider Only)
+  # Input Types - User & Provider (Unified)
   # ==================
-  
-  """
-  Create a new service listing.
-  Provider only. Service starts in DRAFT status.
-  """
-  createService(input: CreateServiceInput!): Service!
-  
-  """
-  Update an existing service.
-  Provider can only update their own services.
-  """
-  updateService(id: ID!, input: UpdateServiceInput!): Service!
-  
-  """
-  Delete a service.
-  Provider can only delete their own services.
-  """
-  deleteService(id: ID!): MessageResponse!
-  
-  """
-  Submit service for admin approval.
-  Changes status from DRAFT to PENDING_APPROVAL.
-  """
-  submitServiceForApproval(id: ID!): Service!
+
+  input LoginInput {
+    email: String!
+    password: String!
+  }
+
+  input RegisterUserInput {
+    email: String!
+    password: String!
+    firstName: String!
+    lastName: String!
+    phone: String
+  }
+
+  input VerifyEmailInput {
+    email: String!
+    otp: String!
+  }
+
+  input ResendOtpInput {
+    email: String!
+  }
+
+  input ForgotPasswordInput {
+    email: String!
+  }
+
+  input ResetPasswordInput {
+    email: String!
+    otp: String!
+    newPassword: String!
+  }
+
+  input UpdateProfileInput {
+    firstName: String
+    lastName: String
+    phone: String
+    profilePhoto: String
+  }
+
+  input RequestEmailChangeInput {
+    newEmail: String!
+  }
+
+  input ConfirmEmailChangeInput {
+    otp: String!
+  }
+
+  input ChangePasswordInput {
+    currentPassword: String!
+    newPassword: String!
+  }
+
+  input PaginationInput {
+    page: Int
+    limit: Int
+  }
+
+  # Input for upgrading a SERVICE_USER to SERVICE_PROVIDER
+  input BecomeProviderInput {
+    businessName: String!
+    businessDescription: String
+    address: String!
+    city: String!
+    state: String!
+    country: String!
+    latitude: Float
+    longitude: Float
+  }
+
+  # Input for updating provider profile
+  input UpdateProviderProfileInput {
+    businessName: String
+    businessDescription: String
+    address: String
+    city: String
+    state: String
+    country: String
+    latitude: Float
+    longitude: Float
+    profilePhoto: String
+  }
 
   # ==================
-  # Admin Auth (Separate - Different Endpoints)
-  # Admins have their own authentication system for security.
+  # Input Types - Service Management
   # ==================
-  
-  """
-  Admin login. Validates user has ADMIN or SUPER_ADMIN role.
-  Regular users cannot use this endpoint.
-  """
-  adminLogin(input: AdminLoginInput!): AdminAuthResponse!
-  
-  """
-  Refresh admin access token.
-  """
-  adminRefreshToken(refreshToken: String!): AdminRefreshTokenResponse!
-  
-  """
-  Request admin password reset.
-  """
-  adminForgotPassword(input: AdminForgotPasswordInput!): MessageResponse!
-  
-  """
-  Reset admin password with OTP.
-  """
-  adminResetPassword(input: AdminResetPasswordInput!): MessageResponse!
-  
-  """
-  Change admin password while authenticated.
-  """
-  adminChangePassword(input: AdminChangePasswordInput!): MessageResponse!
-  
-  """
-  Admin logout and invalidate refresh token.
-  """
-  adminLogout: MessageResponse!
+
+  input CreateServiceInput {
+    categoryId: ID!
+    name: String!
+    description: String!
+    price: Float!
+    duration: Int!
+    images: [String!]
+  }
+
+  input UpdateServiceInput {
+    categoryId: ID
+    name: String
+    description: String
+    price: Float
+    duration: Int
+    images: [String!]
+    status: ServiceStatus
+  }
+
+  input ServiceFiltersInput {
+    categoryId: ID
+    providerId: ID
+    status: ServiceStatus
+    minPrice: Float
+    maxPrice: Float
+    search: String
+  }
 
   # ==================
-  # Admin Profile Management
+  # Input Types - Browse / Discovery
   # ==================
-  
-  """
-  Update own admin profile.
-  """
-  updateAdminProfile(input: UpdateAdminInput!): AdminUser!
+
+  enum ProviderSortBy {
+    RATING_DESC
+    POPULARITY_DESC
+    NEWEST
+    NAME_ASC
+  }
+
+  input ProviderFiltersInput {
+    city: String
+    state: String
+    country: String
+    categoryId: ID
+    verifiedOnly: Boolean
+    minRating: Float
+  }
+
+  input BrowseProvidersInput {
+    filters: ProviderFiltersInput
+    sortBy: ProviderSortBy
+    pagination: PaginationInput
+  }
+
+  input NearbyProvidersInput {
+    latitude: Float!
+    longitude: Float!
+    radiusKm: Float
+    filters: ProviderFiltersInput
+    sortBy: ProviderSortBy
+    pagination: PaginationInput
+  }
 
   # ==================
-  # Admin Management (SUPER_ADMIN Only)
+  # Input Types - Booking Management
   # ==================
-  
-  """
-  Create new admin account. SUPER_ADMIN only.
-  Admins cannot self-register - must be invited.
-  """
-  createAdmin(input: CreateAdminInput!): RegistrationResponse!
-  
-  """
-  Suspend an admin account. SUPER_ADMIN only.
-  """
-  suspendAdmin(adminId: ID!, reason: String!): MessageResponse!
-  
-  """
-  Reactivate a suspended admin. SUPER_ADMIN only.
-  """
-  activateAdmin(adminId: ID!): MessageResponse!
-  
-  """
-  Update admin role. SUPER_ADMIN only.
-  """
-  updateAdminRole(adminId: ID!, role: AdminRole!): AdminUser!
-  
-  """
-  Delete an admin account. SUPER_ADMIN only.
-  """
-  deleteAdmin(adminId: ID!): MessageResponse!
+
+  input CreateBookingInput {
+    serviceId: ID!
+    scheduledDate: String!
+    scheduledTime: String!
+    address: String!
+    city: String!
+    state: String!
+    notes: String
+  }
+
+  input UpdateBookingInput {
+    scheduledDate: String
+    scheduledTime: String
+    address: String
+    city: String
+    state: String
+    notes: String
+  }
+
+  input BookingFiltersInput {
+    status: BookingStatus
+    startDate: String
+    endDate: String
+  }
 
   # ==================
-  # User Management (Admin)
+  # Input Types - Reviews
   # ==================
-  
-  """
-  Suspend a user account. Admin only.
-  """
-  suspendUser(userId: ID!, reason: String!): MessageResponse!
-  
-  """
-  Reactivate a suspended user. Admin only.
-  """
-  activateUser(userId: ID!): MessageResponse!
-  
-  """
-  Delete a user account. Admin only.
-  """
-  deleteUser(id: ID!): MessageResponse!
+
+  input CreateReviewInput {
+    bookingId: ID!
+    rating: Int!
+    comment: String
+  }
+
+  input UpdateReviewInput {
+    rating: Int
+    comment: String
+  }
+
+  input ReviewFiltersInput {
+    rating: Int
+    hasResponse: Boolean
+  }
 
   # ==================
-  # Provider Verification (Admin)
+  # Input Types - Disputes
   # ==================
-  
-  """
-  Approve a provider's verification request. Admin only.
-  Changes verification status to VERIFIED.
-  """
-  approveProvider(providerId: ID!): User!
-  
-  """
-  Reject a provider's verification request. Admin only.
-  Changes verification status to REJECTED.
-  """
-  rejectProvider(providerId: ID!, reason: String!): User!
+
+  input CreateDisputeInput {
+    bookingId: ID!
+    reason: String!
+    description: String!
+    evidence: [String!]
+  }
+
+  input ResolveDisputeInput {
+    resolution: DisputeResolution!
+    resolutionNotes: String!
+    refundAmount: Float
+  }
+
+  input DisputeFiltersInput {
+    status: DisputeStatus
+    raisedByRole: UserRole
+  }
 
   # ==================
-  # Service Moderation (Admin)
+  # Input Types - File Uploads
   # ==================
-  
-  """
-  Approve a service listing. Admin only.
-  Changes status from PENDING_APPROVAL to ACTIVE.
-  """
-  approveService(serviceId: ID!): Service!
-  
-  """
-  Reject a service listing. Admin only.
-  Changes status back to DRAFT.
-  """
-  rejectService(serviceId: ID!, reason: String!): Service!
-  
-  """
-  Suspend an active service. Admin only.
-  """
-  suspendService(serviceId: ID!, reason: String!): Service!
+
+  input FileUploadInput {
+    base64Data: String!
+    filename: String!
+  }
 
   # ==================
-  # Category Management (Admin)
+  # Upload Types
   # ==================
-  
-  """
-  Create a new service category. Admin only.
-  """
-  createCategory(input: CreateCategoryInput!): ServiceCategory!
-  
-  """
-  Update a category. Admin only.
-  """
-  updateCategory(id: ID!, input: UpdateCategoryInput!): ServiceCategory!
-  
-  """
-  Delete a category. Admin only.
-  Fails if category has services.
-  """
-  deleteCategory(id: ID!): MessageResponse!
-}
+
+  # Upload result
+  type UploadResult {
+    url: String!
+    publicId: String!
+    format: String!
+    width: Int
+    height: Int
+    bytes: Int!
+    resourceType: String!
+  }
+
+  # Profile photo upload response
+  type ProfilePhotoResponse {
+    success: Boolean!
+    url: String!
+    publicId: String!
+    message: String!
+  }
+
+  # Multiple upload response
+  type MultipleUploadResponse {
+    success: Boolean!
+    urls: [String!]!
+    message: String!
+  }
+
+  # Signed upload parameters (for client-side uploads)
+  type SignedUploadParams {
+    signature: String!
+    timestamp: Int!
+    cloudName: String!
+    apiKey: String!
+    folder: String!
+  }
+
+  # Upload statistics (Admin)
+  type UploadStats {
+    totalProfiles: Int!
+    totalServiceImages: Int!
+    totalDocuments: Int!
+  }
+
+  # ==================
+  # Messaging Types
+  # ==================
+
+  # Conversation participant info
+  type ConversationParticipant {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    profilePhoto: String
+    role: UserRole!
+    businessName: String
+  }
+
+  # Conversation
+  type Conversation {
+    id: ID!
+    type: ConversationType!
+    participantIds: [ID!]!
+    bookingId: ID
+    subject: String
+    isActive: Boolean!
+    lastMessageAt: String
+    lastMessageText: String
+    createdAt: String!
+    updatedAt: String!
+    otherParticipant: ConversationParticipant
+    unreadCount: Int
+  }
+
+  # Paginated Conversations
+  type PaginatedConversations {
+    conversations: [Conversation!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Message sender info
+  type MessageSender {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    profilePhoto: String
+    role: UserRole!
+    businessName: String
+  }
+
+  # Message
+  type Message {
+    id: ID!
+    conversationId: ID!
+    senderId: ID!
+    senderRole: UserRole!
+    content: String!
+    attachments: [String!]!
+    status: MessageStatus!
+    readBy: [ID!]!
+    readAt: String
+    replyToId: ID
+    isDeleted: Boolean!
+    createdAt: String!
+    updatedAt: String!
+    sender: MessageSender
+  }
+
+  # Paginated Messages
+  type PaginatedMessages {
+    messages: [Message!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Unread message count
+  type UnreadMessageCount {
+    count: Int!
+  }
+
+  # ==================
+  # Notification Types
+  # ==================
+
+  # Notification
+  type Notification {
+    id: ID!
+    userId: ID!
+    type: NotificationType!
+    title: String!
+    message: String!
+    entityType: String
+    entityId: ID
+    metadata: String
+    isRead: Boolean!
+    readAt: String
+    isPushed: Boolean!
+    pushedAt: String
+    createdAt: String!
+  }
+
+  # Paginated Notifications
+  type PaginatedNotifications {
+    notifications: [Notification!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  # Unread notification count
+  type UnreadNotificationCount {
+    count: Int!
+  }
+
+  # Notification statistics
+  type NotificationStats {
+    total: Int!
+    unread: Int!
+    read: Int!
+    byType: String  # JSON string of type counts
+  }
+
+  # Push notification registration result
+  type PushTokenResult {
+    success: Boolean!
+    message: String!
+    pushEnabled: Boolean!
+  }
+
+  # Push status query result
+  type PushStatus {
+    pushEnabled: Boolean!
+    hasDeviceRegistered: Boolean!
+    playerId: String
+  }
+
+  # ==================
+  # Settings Types
+  # ==================
+
+  type UserSettings {
+    id: ID!
+    # In-app / push notification toggles
+    notifyBookingUpdates: Boolean!
+    notifyMessages: Boolean!
+    notifyReviews: Boolean!
+    notifyPromotions: Boolean!
+    notifyDisputeUpdates: Boolean!
+    notifyProviderVerification: Boolean!
+    # Email notification toggles
+    emailBookingUpdates: Boolean!
+    emailMessages: Boolean!
+    emailReviews: Boolean!
+    emailPromotions: Boolean!
+    emailNewsletters: Boolean!
+    # Locale & display
+    language: String!
+    timezone: String!
+    currency: String!
+    # Privacy
+    showProfileToPublic: Boolean!
+    showPhoneToProviders: Boolean!
+    updatedAt: String!
+  }
+
+  type UpdateSettingsResponse {
+    success: Boolean!
+    message: String!
+    settings: UserSettings!
+  }
+
+  # ==================
+  # Input Types - Messaging
+  # ==================
+
+  input StartConversationInput {
+    participantId: ID!
+    subject: String
+    bookingId: ID
+    initialMessage: String
+  }
+
+  input SendMessageInput {
+    conversationId: ID!
+    content: String!
+    attachments: [String!]
+    replyToId: ID
+  }
+
+  input StartSupportChatInput {
+    subject: String!
+    initialMessage: String!
+  }
+
+  # ==================
+  # Input Types - Notifications
+  # ==================
+
+  input NotificationFiltersInput {
+    type: NotificationType
+    isRead: Boolean
+  }
+
+  input SendAnnouncementInput {
+    title: String!
+    message: String!
+    targetRoles: [UserRole!]
+  }
+
+  # ==================
+  # Input Types - Settings
+  # ==================
+
+  input UpdateSettingsInput {
+    # In-app / push notification preferences
+    notifyBookingUpdates: Boolean
+    notifyMessages: Boolean
+    notifyReviews: Boolean
+    notifyPromotions: Boolean
+    notifyDisputeUpdates: Boolean
+    notifyProviderVerification: Boolean
+    # Email notification preferences
+    emailBookingUpdates: Boolean
+    emailMessages: Boolean
+    emailReviews: Boolean
+    emailPromotions: Boolean
+    emailNewsletters: Boolean
+    # Locale & display
+    language: String
+    timezone: String
+    currency: String
+    # Privacy
+    showProfileToPublic: Boolean
+    showPhoneToProviders: Boolean
+  }
+
+  # ==================
+  # Input Types - Admin (Separate)
+  # ==================
+
+  input AdminLoginInput {
+    email: String!
+    password: String!
+  }
+
+  input CreateAdminInput {
+    email: String!
+    password: String!
+    firstName: String!
+    lastName: String!
+    role: AdminRole!
+  }
+
+  input UpdateAdminInput {
+    firstName: String
+    lastName: String
+    phone: String
+    profilePhoto: String
+  }
+
+  input AdminRequestEmailChangeInput {
+    newEmail: String!
+  }
+
+  input AdminConfirmEmailChangeInput {
+    otp: String!
+  }
+
+  input AdminForgotPasswordInput {
+    email: String!
+  }
+
+  input AdminResetPasswordInput {
+    email: String!
+    otp: String!
+    newPassword: String!
+  }
+
+  input AdminChangePasswordInput {
+    currentPassword: String!
+    newPassword: String!
+  }
+
+  # ==================
+  # Input Types - Categories (Admin)
+  # ==================
+
+  input CreateCategoryInput {
+    name: String!
+    description: String
+    icon: String
+  }
+
+  input UpdateCategoryInput {
+    name: String
+    description: String
+    icon: String
+    isActive: Boolean
+  }
+
+  # ==================
+  # Queries
+  # ==================
+  type Query {
+    # ==================
+    # User & Provider Queries (Unified)
+    # ==================
+    
+    # Get current authenticated user (works for both USER and PROVIDER)
+    me: User
+    
+    # Get user by ID
+    user(id: ID!): User
+    
+    # List users with pagination (Admin only)
+    users(pagination: PaginationInput): PaginatedUsers!
+
+    # ==================
+    # Service Queries (Public & Provider)
+    # ==================
+    
+    # Get all service categories
+    categories(pagination: PaginationInput): PaginatedCategories!
+    
+    # Get category by ID
+    category(id: ID!): ServiceCategory
+    
+    # Get all services with filters
+    services(filters: ServiceFiltersInput, pagination: PaginationInput): PaginatedServices!
+    
+    # Get service by ID
+    service(id: ID!): Service
+    
+    # Get services by provider (for provider's own services)
+    myServices(pagination: PaginationInput): PaginatedServices!
+    
+    # Get provider verification status
+    myVerificationStatus: VerificationStatusResponse!
+
+    # Get own provider profile (for SERVICE_PROVIDER role) - includes full services list
+    myProviderProfile: User!
+
+    # Get current active role status (for role switching)
+    myActiveRole: ActiveRoleStatus!
+
+    # ==================
+    # Review Queries
+    # ==================
+
+    # Get review by ID
+    review(id: ID!): Review
+
+    # Get reviews for a provider
+    providerReviews(providerId: ID!, filters: ReviewFiltersInput, pagination: PaginationInput): PaginatedReviews!
+
+    # Get reviews for a service
+    serviceReviews(serviceId: ID!, pagination: PaginationInput): PaginatedReviews!
+
+    # Get my reviews (reviews I've written)
+    myReviews(pagination: PaginationInput): PaginatedReviews!
+
+    # Get provider's rating statistics
+    providerRating(providerId: ID!): ProviderRatingStats!
+
+    # Check if user can review a booking
+    canReviewBooking(bookingId: ID!): CanReviewResponse!
+
+    # ==================
+    # Admin Queries (Separate)
+    # ==================
+    
+    # Get current authenticated admin
+    adminMe: AdminUser
+    
+    # List all admins (SUPER_ADMIN only)
+    admins(pagination: PaginationInput): PaginatedAdmins!
+    
+    # Get admin by ID (SUPER_ADMIN only)
+    admin(id: ID!): AdminUser
+
+    # Get providers pending verification (Admin)
+    pendingProviders(pagination: PaginationInput): PaginatedUsers!
+    
+    # Get services pending approval (Admin)
+    pendingServices(pagination: PaginationInput): PaginatedServices!
+
+    # ==================
+    # Booking Queries
+    # ==================
+    
+    # Get booking by ID
+    booking(id: ID!): Booking
+    
+    # Get user's bookings (as customer)
+    myBookings(filters: BookingFiltersInput, pagination: PaginationInput): PaginatedBookings!
+    
+    # Get provider's bookings
+    providerBookings(filters: BookingFiltersInput, pagination: PaginationInput): PaginatedBookings!
+    
+    # Get user's booking statistics
+    myBookingStats: BookingStats!
+    
+    # Get provider's booking statistics
+    providerBookingStats: BookingStats!
+    
+    # Get all bookings (Admin only)
+    allBookings(filters: BookingFiltersInput, pagination: PaginationInput): PaginatedBookings!
+
+    # ==================
+    # Favourite Queries
+    # ==================
+    
+    # Get user's favourites
+    myFavourites(pagination: PaginationInput): PaginatedFavourites!
+    
+    # Get a specific favourite by ID
+    favourite(id: ID!): Favourite
+    
+    # Check if a service is favourited
+    isFavourited(serviceId: ID!): IsFavouritedResponse!
+    
+    # Get favourite count for a service (public - useful for popularity)
+    serviceFavouriteCount(serviceId: ID!): ServiceFavouriteCountResponse!
+
+    # ==================
+    # Provider Like Queries
+    # ==================
+    
+    # Check if user has liked a provider
+    isProviderLiked(providerId: ID!): IsProviderLikedResponse!
+    
+    # Get user's liked providers
+    myLikedProviders(pagination: PaginationInput): PaginatedLikedProviders!
+    
+    # Get like count for a provider (public)
+    providerLikeCount(providerId: ID!): Int!
+
+    # ==================
+    # Browse / Discovery Queries (Public)
+    # ==================
+
+    # Browse all verified providers with optional filters and sorting
+    providers(input: BrowseProvidersInput): PaginatedBrowseProviders!
+
+    # Get a single provider's full public profile
+    providerProfile(providerId: ID!): PublicProviderProfile!
+
+    # Get nearby providers within a radius using geolocation
+    nearbyProviders(input: NearbyProvidersInput!): PaginatedNearbyProviders!
+
+    # ==================
+    # Dispute Queries
+    # ==================
+    
+    # Get dispute by ID
+    dispute(id: ID!): Dispute
+    
+    # Get dispute for a booking
+    bookingDispute(bookingId: ID!): Dispute
+    
+    # Get user's disputes (as user or provider)
+    myDisputes(filters: DisputeFiltersInput, pagination: PaginationInput): PaginatedDisputes!
+    
+    # Get all disputes (Admin only)
+    allDisputes(filters: DisputeFiltersInput, pagination: PaginationInput): PaginatedDisputes!
+    
+    # Get open disputes count (Admin dashboard)
+    openDisputesCount: OpenDisputesCountResponse!
+    
+    # Get dispute statistics (Admin dashboard)
+    disputeStats: DisputeStats!
+
+    # ==================
+    # Upload Queries
+    # ==================
+    
+    # Get signed upload parameters for client-side upload (Profile)
+    getProfileUploadParams: SignedUploadParams!
+    
+    # Get signed upload parameters for client-side upload (Service images)
+    getServiceUploadParams: SignedUploadParams!
+    
+    # Get signed upload parameters for client-side upload (Documents)
+    getDocumentUploadParams: SignedUploadParams!
+    
+    # Get signed upload parameters for client-side upload (Evidence)
+    getEvidenceUploadParams: SignedUploadParams!
+    
+    # Get upload statistics (Admin)
+    uploadStats: UploadStats!
+
+    # ==================
+    # Messaging Queries
+    # ==================
+
+    # Get user's conversations
+    myConversations(pagination: PaginationInput): PaginatedConversations!
+
+    # Get conversation by ID
+    conversation(id: ID!): Conversation
+
+    # Get messages in a conversation
+    conversationMessages(conversationId: ID!, pagination: PaginationInput): PaginatedMessages!
+
+    # Get unread message count
+    unreadMessageCount: UnreadMessageCount!
+
+    # Get booking conversation (creates if doesn't exist)
+    bookingConversation(bookingId: ID!): Conversation
+
+    # ==================
+    # Notification Queries
+    # ==================
+
+    # Get user's notifications
+    myNotifications(filters: NotificationFiltersInput, pagination: PaginationInput): PaginatedNotifications!
+
+    # Get notification by ID
+    notification(id: ID!): Notification
+
+    # Get unread notification count
+    unreadNotificationCount: UnreadNotificationCount!
+
+    # Get notification statistics
+    notificationStats: NotificationStats!
+
+    # ==================
+    # Push Notification Queries
+    # ==================
+
+    # Get current push notification status for the authenticated user
+    myPushStatus: PushStatus!
+
+    # ==================
+    # Settings Queries
+    # ==================
+
+    # Get the authenticated user's account settings
+    mySettings: UserSettings!
+  }
+
+  # ==================
+  # Mutations
+  # ==================
+  type Mutation {
+    # ==================
+    # User & Provider Auth (Unified)
+    # ==================
+    
+    # Register new user (creates SERVICE_USER by default)
+    register(input: RegisterUserInput!): RegistrationResponse!
+    
+    # Verify email with OTP
+    verifyEmail(input: VerifyEmailInput!): VerifyEmailResponse!
+    
+    # Resend verification OTP
+    resendVerificationOtp(input: ResendOtpInput!): MessageResponse!
+    
+    # Login (works for SERVICE_USER and SERVICE_PROVIDER)
+    login(input: LoginInput!): AuthResponse!
+    
+    # Refresh access token
+    refreshToken(refreshToken: String!): RefreshTokenResponse!
+    
+    # Request password reset
+    forgotPassword(input: ForgotPasswordInput!): MessageResponse!
+    
+    # Reset password with OTP
+    resetPassword(input: ResetPasswordInput!): MessageResponse!
+    
+    # Change password (authenticated)
+    changePassword(input: ChangePasswordInput!): MessageResponse!
+    
+    # Logout (invalidate refresh token)
+    logout(refreshToken: String): MessageResponse!
+
+    # ==================
+    # User Profile (Unified)
+    # ==================
+    
+    # Update user profile
+    updateProfile(input: UpdateProfileInput!): User!
+    requestEmailChange(input: RequestEmailChangeInput!): MessageResponse!
+    confirmEmailChange(input: ConfirmEmailChangeInput!): User!
+    
+    # Delete own account
+    deleteAccount: MessageResponse!
+
+    # ==================
+    # Service Provider (Upgrade & Management)
+    # ==================
+    
+    # Upgrade from SERVICE_USER to SERVICE_PROVIDER
+    becomeProvider(input: BecomeProviderInput!): BecomeProviderResponse!
+    
+    # Update provider profile
+    updateProviderProfile(input: UpdateProviderProfileInput!): User!
+    
+    # Submit provider profile for verification (can re-submit after rejection)
+    submitProviderForVerification: User!
+
+    # Switch between SERVICE_USER and SERVICE_PROVIDER mode (only for registered providers)
+    switchActiveRole(targetRole: UserRole!): User!
+
+    # ==================
+    # Service Management (Provider Only)
+    # ==================
+    
+    # Create a new service
+    createService(input: CreateServiceInput!): Service!
+    
+    # Update a service
+    updateService(id: ID!, input: UpdateServiceInput!): Service!
+    
+    # Delete a service
+    deleteService(id: ID!): MessageResponse!
+    
+    # Submit service for approval
+    submitServiceForApproval(id: ID!): Service!
+
+    # ==================
+    # Booking Management (User)
+    # ==================
+    
+    # Create a new booking (USER only)
+    createBooking(input: CreateBookingInput!): Booking!
+    
+    # Update a pending booking (USER only)
+    updateBooking(id: ID!, input: UpdateBookingInput!): Booking!
+    
+    # Cancel a booking (USER only)
+    cancelBooking(id: ID!, reason: String!): Booking!
+
+    # ==================
+    # Booking Management (Provider)
+    # ==================
+    
+    # Accept a booking (PROVIDER only)
+    acceptBooking(id: ID!): Booking!
+    
+    # Reject a booking (PROVIDER only)
+    rejectBooking(id: ID!, reason: String!): Booking!
+    
+    # Start service - marks booking as IN_PROGRESS (PROVIDER only)
+    startService(id: ID!): Booking!
+    
+    # Complete service - marks booking as COMPLETED (PROVIDER only)
+    completeService(id: ID!): Booking!
+
+    # ==================
+    # Booking Management (Admin)
+    # ==================
+    
+    # Admin cancel any booking
+    adminCancelBooking(id: ID!, reason: String!): Booking!
+
+    # ==================
+    # Review Management
+    # ==================
+
+    # Create a review for a completed booking (User)
+    createReview(input: CreateReviewInput!): Review!
+
+    # Update own review within 24 hours (User)
+    updateReview(id: ID!, input: UpdateReviewInput!): Review!
+
+    # Respond to a review (Provider)
+    respondToReview(reviewId: ID!, response: String!): Review!
+
+    # Delete a review (Admin)
+    deleteReview(id: ID!): MessageResponse!
+
+    # ==================
+    # Favourite Management (User)
+    # ==================
+
+    # Add a service to favourites
+    addFavourite(serviceId: ID!): Favourite!
+
+    # Remove a service from favourites
+    removeFavourite(serviceId: ID!): MessageResponse!
+
+    # Toggle favourite status (add if not favourited, remove if favourited)
+    toggleFavourite(serviceId: ID!): ToggleFavouriteResponse!
+
+    # ==================
+    # Provider Like Mutations
+    # ==================
+    
+    # Like a service provider
+    likeProvider(providerId: ID!): ProviderLikeResponse!
+    
+    # Unlike a service provider
+    unlikeProvider(providerId: ID!): ProviderLikeResponse!
+    
+    # Toggle like status on a provider
+    toggleProviderLike(providerId: ID!): ToggleProviderLikeResponse!
+
+    # ==================
+    # Dispute Management (User/Provider)
+    # ==================
+
+    # Create a dispute for a booking (User or Provider)
+    createDispute(input: CreateDisputeInput!): Dispute!
+
+    # Add evidence to an open dispute
+    addDisputeEvidence(disputeId: ID!, evidence: [String!]!): Dispute!
+
+    # ==================
+    # Dispute Management (Admin)
+    # ==================
+
+    # Take dispute under review
+    takeDisputeUnderReview(disputeId: ID!): Dispute!
+
+    # Resolve a dispute
+    resolveDispute(disputeId: ID!, input: ResolveDisputeInput!): Dispute!
+
+    # Close a dispute without resolution (for invalid disputes)
+    closeDispute(disputeId: ID!, reason: String!): Dispute!
+
+    # ==================
+    # File Upload Management (User)
+    # ==================
+
+    # Upload profile photo
+    uploadProfilePhoto(file: FileUploadInput!): ProfilePhotoResponse!
+
+    # Remove profile photo
+    removeProfilePhoto: MessageResponse!
+
+    # ==================
+    # File Upload Management (Provider)
+    # ==================
+
+    # Upload provider gallery images
+    uploadProviderImages(files: [FileUploadInput!]!): MultipleUploadResponse!
+
+    # Remove a provider gallery image
+    removeProviderImage(imageUrl: String!): MessageResponse!
+
+    # Upload service images
+    uploadServiceImages(serviceId: ID!, files: [FileUploadInput!]!): MultipleUploadResponse!
+
+    # Remove service image
+    removeServiceImage(serviceId: ID!, imageUrl: String!): MessageResponse!
+
+    # Upload provider documents
+    uploadProviderDocuments(files: [FileUploadInput!]!): MultipleUploadResponse!
+
+    # Remove provider document
+    removeProviderDocument(documentUrl: String!): MessageResponse!
+
+    # ==================
+    # Messaging Mutations
+    # ==================
+
+    # Start a new conversation or get existing
+    startConversation(input: StartConversationInput!): Conversation!
+
+    # Send a message
+    sendMessage(input: SendMessageInput!): Message!
+
+    # Mark messages as read
+    markMessagesAsRead(conversationId: ID!, messageIds: [ID!]): MessageResponse!
+
+    # Archive a conversation
+    archiveConversation(conversationId: ID!): MessageResponse!
+
+    # Delete a message (soft delete, own messages only)
+    deleteMessage(messageId: ID!): MessageResponse!
+
+    # Start a support chat with admin
+    startSupportChat(input: StartSupportChatInput!): Conversation!
+
+    # ==================
+    # Notification Mutations
+    # ==================
+
+    # Mark notification as read
+    markNotificationAsRead(notificationId: ID!): Notification!
+
+    # Mark all notifications as read
+    markAllNotificationsAsRead: MessageResponse!
+
+    # Delete a notification
+    deleteNotification(notificationId: ID!): MessageResponse!
+
+    # Delete all read notifications
+    deleteReadNotifications: MessageResponse!
+
+    # Send system announcement (Admin only)
+    sendSystemAnnouncement(input: SendAnnouncementInput!): MessageResponse!
+
+    # ==================
+    # Push Notification Mutations
+    # ==================
+
+    # Register device for push notifications (OneSignal Player ID)
+    registerPushToken(playerId: String!): PushTokenResult!
+
+    # Unregister device from push notifications
+    unregisterPushToken: PushTokenResult!
+
+    # Update push notification preference
+    updatePushPreference(enabled: Boolean!): PushTokenResult!
+
+    # Enable push notifications on a specific device (convenience wrapper)
+    enablePushNotifications(playerId: String!): PushTokenResult!
+
+    # Disable push notifications and remove device token
+    disablePushNotifications: PushTokenResult!
+
+    # Toggle push on/off without changing the registered device
+    togglePushNotifications(enabled: Boolean!): PushTokenResult!
+
+    # ==================
+    # Settings Mutations
+    # ==================
+
+    # Update account settings (notification prefs, locale, privacy)
+    updateMySettings(input: UpdateSettingsInput!): UpdateSettingsResponse!
+
+    # Reset all settings back to defaults
+    resetMySettings: UpdateSettingsResponse!
+
+    # Deactivate own account (soft-disable — keeps data, blocks login)
+    deactivateMyAccount(reason: String): MessageResponse!
+
+    # Reactivate a previously deactivated account
+    reactivateMyAccount: MessageResponse!
+
+    # ==================
+    # Admin Auth (Separate - Different Endpoints)
+    # ==================
+    
+    # Admin login (only for ADMIN and SUPER_ADMIN roles)
+    adminLogin(input: AdminLoginInput!): AdminAuthResponse!
+    
+    # Admin refresh token
+    adminRefreshToken(refreshToken: String!): AdminRefreshTokenResponse!
+    
+    # Admin password reset request
+    adminForgotPassword(input: AdminForgotPasswordInput!): MessageResponse!
+    
+    # Admin reset password with OTP
+    adminResetPassword(input: AdminResetPasswordInput!): MessageResponse!
+    
+    # Admin change password
+    adminChangePassword(input: AdminChangePasswordInput!): MessageResponse!
+    
+    # Admin logout (invalidate refresh token)
+    adminLogout(refreshToken: String): MessageResponse!
+
+    # ==================
+    # Admin Profile Management
+    # ==================
+    
+    # Update own admin profile
+    updateAdminProfile(input: UpdateAdminInput!): AdminUser!
+    adminRequestEmailChange(input: AdminRequestEmailChangeInput!): MessageResponse!
+    adminConfirmEmailChange(input: AdminConfirmEmailChangeInput!): AdminUser!
+
+    # ==================
+    # Admin Management (SUPER_ADMIN Only)
+    # ==================
+    
+    # Create new admin (invite-based, SUPER_ADMIN only)
+    createAdmin(input: CreateAdminInput!): RegistrationResponse!
+    
+    # Suspend admin
+    suspendAdmin(adminId: ID!, reason: String!): MessageResponse!
+    
+    # Activate admin
+    activateAdmin(adminId: ID!): MessageResponse!
+    
+    # Update admin role
+    updateAdminRole(adminId: ID!, role: AdminRole!): AdminUser!
+    
+    # Delete admin
+    deleteAdmin(adminId: ID!): MessageResponse!
+
+    # ==================
+    # User Management (Admin)
+    # ==================
+    
+    # Suspend user
+    suspendUser(userId: ID!, reason: String!): MessageResponse!
+    
+    # Activate user
+    activateUser(userId: ID!): MessageResponse!
+    
+    # Delete user (Admin)
+    deleteUser(id: ID!): MessageResponse!
+
+    # ==================
+    # Provider Verification (Admin)
+    # ==================
+    
+    # Approve provider
+    approveProvider(providerId: ID!): User!
+    
+    # Reject provider
+    rejectProvider(providerId: ID!, reason: String!): User!
+
+    # ==================
+    # Service Moderation (Admin)
+    # ==================
+    
+    # Approve service
+    approveService(serviceId: ID!): Service!
+    
+    # Reject service
+    rejectService(serviceId: ID!, reason: String!): Service!
+    
+    # Suspend service
+    suspendService(serviceId: ID!, reason: String!): Service!
+
+    # ==================
+    # Category Management (Admin)
+    # ==================
+    
+    # Create category
+    createCategory(input: CreateCategoryInput!): ServiceCategory!
+    
+    # Update category
+    updateCategory(id: ID!, input: UpdateCategoryInput!): ServiceCategory!
+    
+    # Delete category
+    deleteCategory(id: ID!): MessageResponse!
+  }

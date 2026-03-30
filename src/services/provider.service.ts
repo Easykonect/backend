@@ -11,6 +11,8 @@
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { UserRole, AccountStatus, VerificationStatus } from '@/constants';
+import { generateToken, generateRefreshToken } from '@/lib/auth';
+import { storeRefreshToken } from './token.service';
 import { 
   sendProviderApprovedEmail, 
   sendProviderRejectedEmail,
@@ -61,6 +63,8 @@ const formatUserWithProvider = (user: any, provider: any = null) => ({
   activeRole: user.activeRole || user.role, // Default to role if not set
   status: user.status,
   isEmailVerified: user.isEmailVerified,
+  pushEnabled: user.pushEnabled ?? true,
+  lastLoginAt: user.lastLoginAt ? user.lastLoginAt.toISOString() : null,
   providerProfile: provider ? {
     id: provider.id,
     businessName: provider.businessName,
@@ -166,7 +170,22 @@ export const becomeProvider = async (userId: string, input: BecomeProviderInput)
     return [updated, newProvider];
   });
 
-  return formatUserWithProvider(updatedUser, provider);
+  const tokenPayload = {
+    userId: updatedUser.id,
+    email: updatedUser.email,
+    role: updatedUser.role,
+  };
+
+  const accessToken = generateToken(tokenPayload);
+  const refreshToken = generateRefreshToken(tokenPayload);
+
+  await storeRefreshToken(updatedUser.id, refreshToken, { deviceInfo: 'web' });
+
+  return {
+    user: formatUserWithProvider(updatedUser, provider),
+    accessToken,
+    refreshToken,
+  };
 };
 
 /**

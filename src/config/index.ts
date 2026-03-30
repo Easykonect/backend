@@ -117,6 +117,12 @@ export const config = {
     apiUrl: process.env.ONESIGNAL_API_URL || 'https://onesignal.com/api/v1',
   },
 
+  // Geolocation Settings
+  geo: {
+    defaultRadiusKm: parseFloat(process.env.GEO_DEFAULT_RADIUS_KM || '25'),
+    maxRadiusKm: parseFloat(process.env.GEO_MAX_RADIUS_KM || '100'),
+  },
+
   // Platform Settings
   platform: {
     name: process.env.PLATFORM_NAME || '',

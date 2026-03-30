@@ -1,3 +1,4 @@
+import { uploadProviderImages, removeProviderImage } from '@/services/provider-image.service';
 /**
  * GraphQL Resolvers
  * Combined resolvers for the application
@@ -23,6 +24,7 @@ import {
   logout,
 } from '@/services/auth.service';
 
+
 import {
   getUserById,
   getUsers,
@@ -31,6 +33,12 @@ import {
   confirmEmailChange,
   deleteUser,
   deleteOwnAccount,
+  likeProvider,
+  unlikeProvider,
+  toggleProviderLike,
+  isProviderLiked,
+  getProviderLikeCount,
+  getMyLikedProviders,
 } from '@/services/user.service';
 
 import {
@@ -190,6 +198,24 @@ import {
 import { requireAuth, requireRole, requireAnyRole, type GraphQLContext } from '@/middleware';
 import { UserRole, ServiceStatus, type ServiceStatusType } from '@/constants';
 
+import {
+  browseProviders,
+  getNearbyProviders,
+  getProviderPublicProfile,
+} from '@/services/browse.service';
+
+import {
+  enablePushNotifications,
+  disablePushNotifications,
+  togglePushNotifications,
+  getPushStatus,
+  getMySettings,
+  updateMySettings,
+  resetMySettings,
+  deactivateMyAccount,
+  reactivateMyAccount,
+} from '@/services/settings.service';
+
 /**
  * Helper: Require admin authentication (ADMIN or SUPER_ADMIN)
  */
@@ -312,6 +338,19 @@ export const resolvers = {
       const user = requireAuth(context);
       requireRole(context, UserRole.SERVICE_PROVIDER);
       return getVerificationStatus(user.userId);
+    },
+
+    /**
+     * Get own provider profile with full provider details & services
+     * Only accessible to SERVICE_PROVIDER role
+     */
+    myProviderProfile: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      return getUserWithProvider(user.userId);
     },
 
     /**
@@ -608,6 +647,104 @@ export const resolvers = {
       return getServiceFavouriteCount(args.serviceId);
     },
 
+
+    // ==================
+    // Provider Like Queries
+    // ==================
+
+    /**
+     * Get providers liked by the user
+     */
+    myLikedProviders: async (
+      _: unknown,
+      args: { pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+  const { page = 1, limit = 10 } = args.pagination || {};
+  return getMyLikedProviders(user.userId, { page, limit });
+    },
+
+    /**
+     * Check if a provider is liked by the user
+     */
+    isProviderLiked: async (
+      _: unknown,
+      args: { providerId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      const liked = await isProviderLiked(user.userId, args.providerId);
+      const likeCount = await getProviderLikeCount(args.providerId);
+      return { isLiked: liked, likeCount };
+    },
+
+    /**
+     * Get like count for a provider (public)
+     */
+    providerLikeCount: async (
+      _: unknown,
+      args: { providerId: string }
+    ) => {
+      return getProviderLikeCount(args.providerId);
+    },
+
+    // ==================
+    // Browse / Discovery Queries (Public)
+    // ==================
+
+    /**
+     * Browse all verified providers with filters + sorting
+     */
+    providers: async (
+      _: unknown,
+      args: { input?: { filters?: any; sortBy?: string; pagination?: { page: number; limit: number } } }
+    ) => {
+      const { filters, sortBy, pagination } = args.input ?? {};
+      return browseProviders({
+        filters: filters ?? {},
+        sortBy: (sortBy as any) ?? 'NEWEST',
+        pagination: pagination ?? { page: 1, limit: 10 },
+      });
+    },
+
+    /**
+     * Get a provider's full public profile by ID
+     */
+    providerProfile: async (
+      _: unknown,
+      args: { providerId: string }
+    ) => {
+      return getProviderPublicProfile(args.providerId);
+    },
+
+    /**
+     * Get nearby providers using Haversine distance (geolocation)
+     */
+    nearbyProviders: async (
+      _: unknown,
+      args: {
+        input: {
+          latitude: number;
+          longitude: number;
+          radiusKm?: number;
+          filters?: any;
+          sortBy?: string;
+          pagination?: { page: number; limit: number };
+        };
+      }
+    ) => {
+      const { latitude, longitude, radiusKm, filters, sortBy, pagination } = args.input;
+      return getNearbyProviders({
+        latitude,
+        longitude,
+        radiusKm,
+        filters: filters ?? {},
+        sortBy: (sortBy as any) ?? 'RATING_DESC',
+        pagination: pagination ?? { page: 1, limit: 10 },
+      });
+    },
+
     // ==================
     // Dispute Queries
     // ==================
@@ -875,6 +1012,38 @@ export const resolvers = {
     ) => {
       const user = requireAuth(context);
       return getNotificationStats(user.userId);
+    },
+
+    // ==================
+    // Push Status Query
+    // ==================
+
+    /**
+     * Get current push notification status (enabled + device registered)
+     */
+    myPushStatus: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getPushStatus(user.userId);
+    },
+
+    // ==================
+    // Settings Query
+    // ==================
+
+    /**
+     * Get authenticated user's account settings
+     */
+    mySettings: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getMySettings(user.userId);
     },
   },
 
@@ -1432,6 +1601,47 @@ export const resolvers = {
       return toggleFavourite(user.userId, args.serviceId);
     },
 
+
+    // ==================
+    // Provider Like Management
+    // ==================
+
+    /**
+     * Like a provider
+     */
+    likeProvider: async (
+      _: unknown,
+      args: { providerId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return likeProvider(user.userId, args.providerId);
+    },
+
+    /**
+     * Unlike a provider
+     */
+    unlikeProvider: async (
+      _: unknown,
+      args: { providerId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return unlikeProvider(user.userId, args.providerId);
+    },
+
+    /**
+     * Toggle provider like status
+     */
+    toggleProviderLike: async (
+      _: unknown,
+      args: { providerId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return toggleProviderLike(user.userId, args.providerId);
+    },
+
     // ==================
     // Dispute Management
     // ==================
@@ -1555,6 +1765,36 @@ export const resolvers = {
     // ==================
     // File Upload Management (Provider)
     // ==================
+
+    /**
+     * Upload provider gallery images
+     */
+    uploadProviderImages: async (
+      _: unknown,
+      args: { files: Array<{ base64Data: string; filename: string }> },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const urls = await uploadProviderImages(user.userId, args.files);
+      return {
+        success: true,
+        urls,
+        message: `${urls.length} image(s) uploaded successfully`,
+      };
+    },
+
+    /**
+     * Remove a provider gallery image
+     */
+    removeProviderImage: async (
+      _: unknown,
+      args: { imageUrl: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      await removeProviderImage(user.userId, args.imageUrl);
+      return { message: 'Image removed successfully' };
+    },
 
     /**
      * Upload service images
@@ -1834,6 +2074,98 @@ export const resolvers = {
     ) => {
       const user = requireAuth(context);
       return updatePushPreference(user.userId, args.enabled);
+    },
+
+    // ==================
+    // Push Controls (convenience wrappers)
+    // ==================
+
+    /**
+     * Enable push notifications — registers the device player ID
+     */
+    enablePushNotifications: async (
+      _: unknown,
+      args: { playerId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return enablePushNotifications(user.userId, args.playerId);
+    },
+
+    /**
+     * Disable push notifications — removes device token
+     */
+    disablePushNotifications: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return disablePushNotifications(user.userId);
+    },
+
+    /**
+     * Toggle push on/off without touching the registered device
+     */
+    togglePushNotifications: async (
+      _: unknown,
+      args: { enabled: boolean },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return togglePushNotifications(user.userId, args.enabled);
+    },
+
+    // ==================
+    // Settings Mutations
+    // ==================
+
+    /**
+     * Update account settings
+     */
+    updateMySettings: async (
+      _: unknown,
+      args: { input: any },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return updateMySettings(user.userId, args.input);
+    },
+
+    /**
+     * Reset all settings to defaults
+     */
+    resetMySettings: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return resetMySettings(user.userId);
+    },
+
+    /**
+     * Deactivate own account (soft-disable)
+     */
+    deactivateMyAccount: async (
+      _: unknown,
+      args: { reason?: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return deactivateMyAccount(user.userId, args.reason);
+    },
+
+    /**
+     * Reactivate a deactivated account
+     */
+    reactivateMyAccount: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return reactivateMyAccount(user.userId);
     },
 
     // ==================

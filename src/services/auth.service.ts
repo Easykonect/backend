@@ -697,6 +697,8 @@ export const getCurrentUser = async (userId: string) => {
       activeRole: true,
       status: true,
       isEmailVerified: true,
+      pushEnabled: true,
+      lastLoginAt: true,
       createdAt: true,
       updatedAt: true,
     },
@@ -708,10 +710,12 @@ export const getCurrentUser = async (userId: string) => {
     });
   }
 
-  // Return with computed activeRole
+  // Return with computed fields
   return {
     ...user,
     activeRole: user.activeRole || user.role,
+    pushEnabled: user.pushEnabled ?? true,
+    lastLoginAt: user.lastLoginAt ? user.lastLoginAt.toISOString() : null,
   };
 };
 

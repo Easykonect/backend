@@ -389,7 +389,7 @@ if (admin.role === 'SUPER_ADMIN') {
 
 **To Become Provider (upgrade):**
 ```javascript
-const { user } = await becomeProvider({
+const { user, accessToken, refreshToken } = await becomeProvider({
   businessName: "John's Plumbing",
   businessDescription: "Professional plumbing services",
   address: "123 Main St",
@@ -398,8 +398,12 @@ const { user } = await becomeProvider({
   country: "Nigeria"
 });
 
+// ⚠️ CRITICAL: Replace tokens IMMEDIATELY before calling any provider endpoint
+storeTokens(accessToken, refreshToken);
+
 // user.role is now SERVICE_PROVIDER
 // user.providerProfile is now populated
+// You can now call uploadProviderDocuments, etc.
 ```
 
 ### 🔐 API Separation Summary

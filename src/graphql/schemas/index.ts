@@ -138,6 +138,11 @@ export const typeDefs = gql`
     latitude: Float
     longitude: Float
     documents: [String!]!
+    images: [String!]!
+    averageRating: Float
+    totalReviews: Int
+    likeCount: Int
+    isLiked: Boolean
     createdAt: String!
     updatedAt: String!
   }
@@ -361,6 +366,153 @@ export const typeDefs = gql`
   }
 
   # ==================
+  # Provider Like Types
+  # ==================
+
+  # Provider Like Response
+  type ProviderLikeResponse {
+    success: Boolean!
+    message: String!
+    likeCount: Int!
+  }
+
+  # Toggle Provider Like Response
+  type ToggleProviderLikeResponse {
+    success: Boolean!
+    message: String!
+    isLiked: Boolean!
+    likeCount: Int!
+  }
+
+  # Is Provider Liked Response
+  type IsProviderLikedResponse {
+    isLiked: Boolean!
+    likeCount: Int!
+  }
+
+  # Liked Provider Item
+  type LikedProviderItem {
+    id: ID!
+    likedAt: String!
+    provider: LikedProviderDetails!
+  }
+
+  # Liked Provider Details
+  type LikedProviderDetails {
+    id: ID!
+    businessName: String!
+    businessDescription: String
+    verificationStatus: VerificationStatus!
+    city: String!
+    state: String!
+    images: [String!]!
+    user: LikedProviderUser
+    reviewCount: Int!
+    likeCount: Int!
+  }
+
+  # Liked Provider User
+  type LikedProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    profilePhoto: String
+  }
+
+  # Paginated Liked Providers
+  type PaginatedLikedProviders {
+    items: [LikedProviderItem!]!
+    pagination: PaginationInfo!
+  }
+
+  # ==================
+  # Browse / Discovery Types
+  # ==================
+
+  # A single provider card returned by browse/nearby queries
+  type BrowseProviderItem {
+    id: ID!
+    businessName: String!
+    businessDescription: String
+    verificationStatus: VerificationStatus!
+    address: String
+    city: String!
+    state: String!
+    country: String!
+    latitude: Float
+    longitude: Float
+    images: [String!]!
+    averageRating: Float!
+    totalReviews: Int!
+    likeCount: Int!
+    distanceKm: Float
+    categories: [String!]!
+    user: BrowseProviderUser
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type BrowseProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    profilePhoto: String
+  }
+
+  # Active service shown on a provider's full public profile
+  type ProviderActiveService {
+    id: ID!
+    name: String!
+    price: Float!
+    duration: Int!
+    images: [String!]!
+    category: ServiceCategory
+  }
+
+  # Full public profile of a provider (for the detail page)
+  type PublicProviderProfile {
+    id: ID!
+    businessName: String!
+    businessDescription: String
+    verificationStatus: VerificationStatus!
+    address: String
+    city: String!
+    state: String!
+    country: String!
+    latitude: Float
+    longitude: Float
+    images: [String!]!
+    averageRating: Float!
+    totalReviews: Int!
+    likeCount: Int!
+    distanceKm: Float
+    categories: [String!]!
+    user: BrowseProviderUser
+    activeServices: [ProviderActiveService!]!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Paginated browse results
+  type PaginatedBrowseProviders {
+    items: [BrowseProviderItem!]!
+    pagination: PaginationInfo!
+  }
+
+  # Paginated nearby results (includes search metadata)
+  type PaginatedNearbyProviders {
+    items: [BrowseProviderItem!]!
+    pagination: PaginationInfo!
+    radiusKm: Float!
+    searchLocation: SearchLocation!
+  }
+
+  type SearchLocation {
+    latitude: Float!
+    longitude: Float!
+  }
+
+  # ==================
   # Dispute Types
   # ==================
 
@@ -478,6 +630,8 @@ export const typeDefs = gql`
     activeRole: UserRole!  # Current active mode (for role switching)
     status: AccountStatus!
     isEmailVerified: Boolean!
+    pushEnabled: Boolean!   # Whether push notifications are enabled
+    lastLoginAt: String     # ISO timestamp of last login
     # Provider profile is only populated when role is SERVICE_PROVIDER
     providerProfile: ServiceProviderProfile
     createdAt: String!
@@ -513,6 +667,12 @@ export const typeDefs = gql`
   # ==================
 
   type AuthResponse {
+    user: User!
+    accessToken: String!
+    refreshToken: String!
+  }
+
+  type BecomeProviderResponse {
     user: User!
     accessToken: String!
     refreshToken: String!
@@ -725,6 +885,41 @@ export const typeDefs = gql`
     minPrice: Float
     maxPrice: Float
     search: String
+  }
+
+  # ==================
+  # Input Types - Browse / Discovery
+  # ==================
+
+  enum ProviderSortBy {
+    RATING_DESC
+    POPULARITY_DESC
+    NEWEST
+    NAME_ASC
+  }
+
+  input ProviderFiltersInput {
+    city: String
+    state: String
+    country: String
+    categoryId: ID
+    verifiedOnly: Boolean
+    minRating: Float
+  }
+
+  input BrowseProvidersInput {
+    filters: ProviderFiltersInput
+    sortBy: ProviderSortBy
+    pagination: PaginationInput
+  }
+
+  input NearbyProvidersInput {
+    latitude: Float!
+    longitude: Float!
+    radiusKm: Float
+    filters: ProviderFiltersInput
+    sortBy: ProviderSortBy
+    pagination: PaginationInput
   }
 
   # ==================
@@ -990,6 +1185,48 @@ export const typeDefs = gql`
     pushEnabled: Boolean!
   }
 
+  # Push status query result
+  type PushStatus {
+    pushEnabled: Boolean!
+    hasDeviceRegistered: Boolean!
+    playerId: String
+  }
+
+  # ==================
+  # Settings Types
+  # ==================
+
+  type UserSettings {
+    id: ID!
+    # In-app / push notification toggles
+    notifyBookingUpdates: Boolean!
+    notifyMessages: Boolean!
+    notifyReviews: Boolean!
+    notifyPromotions: Boolean!
+    notifyDisputeUpdates: Boolean!
+    notifyProviderVerification: Boolean!
+    # Email notification toggles
+    emailBookingUpdates: Boolean!
+    emailMessages: Boolean!
+    emailReviews: Boolean!
+    emailPromotions: Boolean!
+    emailNewsletters: Boolean!
+    # Locale & display
+    language: String!
+    timezone: String!
+    currency: String!
+    # Privacy
+    showProfileToPublic: Boolean!
+    showPhoneToProviders: Boolean!
+    updatedAt: String!
+  }
+
+  type UpdateSettingsResponse {
+    success: Boolean!
+    message: String!
+    settings: UserSettings!
+  }
+
   # ==================
   # Input Types - Messaging
   # ==================
@@ -1026,6 +1263,33 @@ export const typeDefs = gql`
     title: String!
     message: String!
     targetRoles: [UserRole!]
+  }
+
+  # ==================
+  # Input Types - Settings
+  # ==================
+
+  input UpdateSettingsInput {
+    # In-app / push notification preferences
+    notifyBookingUpdates: Boolean
+    notifyMessages: Boolean
+    notifyReviews: Boolean
+    notifyPromotions: Boolean
+    notifyDisputeUpdates: Boolean
+    notifyProviderVerification: Boolean
+    # Email notification preferences
+    emailBookingUpdates: Boolean
+    emailMessages: Boolean
+    emailReviews: Boolean
+    emailPromotions: Boolean
+    emailNewsletters: Boolean
+    # Locale & display
+    language: String
+    timezone: String
+    currency: String
+    # Privacy
+    showProfileToPublic: Boolean
+    showPhoneToProviders: Boolean
   }
 
   # ==================
@@ -1131,6 +1395,9 @@ export const typeDefs = gql`
     # Get provider verification status
     myVerificationStatus: VerificationStatusResponse!
 
+    # Get own provider profile (for SERVICE_PROVIDER role) - includes full services list
+    myProviderProfile: User!
+
     # Get current active role status (for role switching)
     myActiveRole: ActiveRoleStatus!
 
@@ -1214,6 +1481,32 @@ export const typeDefs = gql`
     serviceFavouriteCount(serviceId: ID!): ServiceFavouriteCountResponse!
 
     # ==================
+    # Provider Like Queries
+    # ==================
+    
+    # Check if user has liked a provider
+    isProviderLiked(providerId: ID!): IsProviderLikedResponse!
+    
+    # Get user's liked providers
+    myLikedProviders(pagination: PaginationInput): PaginatedLikedProviders!
+    
+    # Get like count for a provider (public)
+    providerLikeCount(providerId: ID!): Int!
+
+    # ==================
+    # Browse / Discovery Queries (Public)
+    # ==================
+
+    # Browse all verified providers with optional filters and sorting
+    providers(input: BrowseProvidersInput): PaginatedBrowseProviders!
+
+    # Get a single provider's full public profile
+    providerProfile(providerId: ID!): PublicProviderProfile!
+
+    # Get nearby providers within a radius using geolocation
+    nearbyProviders(input: NearbyProvidersInput!): PaginatedNearbyProviders!
+
+    # ==================
     # Dispute Queries
     # ==================
     
@@ -1288,6 +1581,20 @@ export const typeDefs = gql`
 
     # Get notification statistics
     notificationStats: NotificationStats!
+
+    # ==================
+    # Push Notification Queries
+    # ==================
+
+    # Get current push notification status for the authenticated user
+    myPushStatus: PushStatus!
+
+    # ==================
+    # Settings Queries
+    # ==================
+
+    # Get the authenticated user's account settings
+    mySettings: UserSettings!
   }
 
   # ==================
@@ -1342,7 +1649,7 @@ export const typeDefs = gql`
     # ==================
     
     # Upgrade from SERVICE_USER to SERVICE_PROVIDER
-    becomeProvider(input: BecomeProviderInput!): User!
+    becomeProvider(input: BecomeProviderInput!): BecomeProviderResponse!
     
     # Update provider profile
     updateProviderProfile(input: UpdateProviderProfileInput!): User!
@@ -1435,6 +1742,19 @@ export const typeDefs = gql`
     toggleFavourite(serviceId: ID!): ToggleFavouriteResponse!
 
     # ==================
+    # Provider Like Mutations
+    # ==================
+    
+    # Like a service provider
+    likeProvider(providerId: ID!): ProviderLikeResponse!
+    
+    # Unlike a service provider
+    unlikeProvider(providerId: ID!): ProviderLikeResponse!
+    
+    # Toggle like status on a provider
+    toggleProviderLike(providerId: ID!): ToggleProviderLikeResponse!
+
+    # ==================
     # Dispute Management (User/Provider)
     # ==================
 
@@ -1470,6 +1790,12 @@ export const typeDefs = gql`
     # ==================
     # File Upload Management (Provider)
     # ==================
+
+    # Upload provider gallery images
+    uploadProviderImages(files: [FileUploadInput!]!): MultipleUploadResponse!
+
+    # Remove a provider gallery image
+    removeProviderImage(imageUrl: String!): MessageResponse!
 
     # Upload service images
     uploadServiceImages(serviceId: ID!, files: [FileUploadInput!]!): MultipleUploadResponse!
@@ -1536,6 +1862,31 @@ export const typeDefs = gql`
 
     # Update push notification preference
     updatePushPreference(enabled: Boolean!): PushTokenResult!
+
+    # Enable push notifications on a specific device (convenience wrapper)
+    enablePushNotifications(playerId: String!): PushTokenResult!
+
+    # Disable push notifications and remove device token
+    disablePushNotifications: PushTokenResult!
+
+    # Toggle push on/off without changing the registered device
+    togglePushNotifications(enabled: Boolean!): PushTokenResult!
+
+    # ==================
+    # Settings Mutations
+    # ==================
+
+    # Update account settings (notification prefs, locale, privacy)
+    updateMySettings(input: UpdateSettingsInput!): UpdateSettingsResponse!
+
+    # Reset all settings back to defaults
+    resetMySettings: UpdateSettingsResponse!
+
+    # Deactivate own account (soft-disable — keeps data, blocks login)
+    deactivateMyAccount(reason: String): MessageResponse!
+
+    # Reactivate a previously deactivated account
+    reactivateMyAccount: MessageResponse!
 
     # ==================
     # Admin Auth (Separate - Different Endpoints)

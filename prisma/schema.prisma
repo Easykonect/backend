@@ -120,6 +120,8 @@ model User {
   bookingsAsUser Booking[] @relation("UserBookings")
   reviews        Review[]  @relation("UserReviews")
   favourites     Favourite[] @relation("UserFavourites")
+  providerLikes  ProviderLike[] @relation("UserProviderLikes")
+  settings       UserSettings?
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -147,10 +149,14 @@ model ServiceProvider {
   // Documents for verification
   documents           String[]
   
+  // Portfolio/Gallery images
+  images              String[]
+  
   // Relations
   services            Service[]
   bookings            Booking[] @relation("ProviderBookings")
   reviews             Review[]  @relation("ProviderReviews")
+  likes               ProviderLike[] @relation("ProviderLikes")
   
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -308,6 +314,20 @@ model Favourite {
   // Ensure a user can only favourite a service once
   @@unique([userId, serviceId])
   @@map("favourites")
+}
+
+model ProviderLike {
+  id         String          @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String          @db.ObjectId
+  user       User            @relation("UserProviderLikes", fields: [userId], references: [id], onDelete: Cascade)
+  providerId String          @db.ObjectId
+  provider   ServiceProvider @relation("ProviderLikes", fields: [providerId], references: [id], onDelete: Cascade)
+  
+  createdAt  DateTime        @default(now())
+
+  // Ensure a user can only like a provider once
+  @@unique([userId, providerId])
+  @@map("provider_likes")
 }
 
 model Dispute {
@@ -492,6 +512,45 @@ model Notification {
   @@index([userId, isRead])
   @@index([userId, createdAt])
   @@map("notifications")
+}
+
+// ==================
+// User Settings
+// ==================
+
+model UserSettings {
+  id      String @id @default(auto()) @map("_id") @db.ObjectId
+  userId  String @unique @db.ObjectId
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Push / in-app notification preferences (per category)
+  notifyBookingUpdates    Boolean @default(true)   // Booking accepted/rejected/completed
+  notifyMessages          Boolean @default(true)   // New chat messages
+  notifyReviews           Boolean @default(true)   // New review on your service / response to your review
+  notifyPromotions        Boolean @default(false)  // Marketing & promotional emails
+  notifyDisputeUpdates    Boolean @default(true)   // Dispute status changes
+  notifyProviderVerification Boolean @default(true) // Verification approved/rejected
+
+  // Email notification preferences
+  emailBookingUpdates     Boolean @default(true)
+  emailMessages           Boolean @default(false)  // Digest only by default
+  emailReviews            Boolean @default(true)
+  emailPromotions         Boolean @default(false)
+  emailNewsletters        Boolean @default(false)
+
+  // Locale & display
+  language                String  @default("en")   // ISO 639-1 e.g. "en", "fr"
+  timezone                String  @default("Africa/Lagos") // IANA timezone
+  currency                String  @default("NGN")  // ISO 4217
+
+  // Privacy
+  showProfileToPublic     Boolean @default(true)
+  showPhoneToProviders    Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("user_settings")
 }
 
 

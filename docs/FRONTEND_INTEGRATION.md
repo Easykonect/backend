@@ -21,7 +21,7 @@ This API uses **GraphQL** over HTTP POST requests. All requests go to a single e
 
 ---
 
-## API Features (v2.0.0)
+## API Features (v2.2.0)
 
 ### ✅ Implemented Features
 
@@ -41,6 +41,9 @@ This API uses **GraphQL** over HTTP POST requests. All requests go to a single e
 | **Rate Limiting** | ✅ Complete | Per-user/IP limits |
 | **Security** | ✅ Complete | JWT, OTP hashing, Account Lockout |
 | **Push Notifications** | ✅ Complete | OneSignal integration (iOS + Android) |
+| **Provider Gallery Images** | ✅ Complete | Upload/Remove provider portfolio images |
+| **Provider Documents** | ✅ Complete | Upload/Remove verification documents |
+| **Provider Likes** | ✅ Complete | Like/Unlike/Toggle, like count, liked list |
 
 ### 🔜 Coming Soon
 
@@ -727,7 +730,7 @@ Authorization: Bearer YOUR_ACCESS_TOKEN
 
 **What this API does:** This API is used for retrieving the authenticated user's complete profile information. Call this after login to get the current user data, check session validity, or refresh user information displayed in the UI. It uses the access token to identify the user.
 
-**What it returns:** Returns a `User` object containing all profile fields: id, email, firstName, lastName, phone, role (SERVICE_USER or SERVICE_PROVIDER), status (ACTIVE, SUSPENDED, etc.), isEmailVerified boolean, and timestamps (createdAt, updatedAt).
+**What it returns:** Returns a `User` object containing all profile fields: id, email, firstName, lastName, phone, role, activeRole, status, isEmailVerified, **pushEnabled**, **lastLoginAt**, providerProfile (for providers), and timestamps.
 
 ### Request
 
@@ -740,8 +743,16 @@ query Me {
     lastName
     phone
     role
+    activeRole
     status
     isEmailVerified
+    pushEnabled
+    lastLoginAt
+    providerProfile {
+      id
+      businessName
+      verificationStatus
+    }
     createdAt
     updatedAt
   }
@@ -760,8 +771,12 @@ query Me {
       "lastName": "Doe",
       "phone": "+2348012345678",
       "role": "SERVICE_USER",
+      "activeRole": "SERVICE_USER",
       "status": "ACTIVE",
       "isEmailVerified": true,
+      "pushEnabled": true,
+      "lastLoginAt": "2026-03-15T09:00:00.000Z",
+      "providerProfile": null,
       "createdAt": "2026-03-08T10:30:00.000Z",
       "updatedAt": "2026-03-08T10:30:00.000Z"
     }
@@ -2020,6 +2035,847 @@ At any point before COMPLETED:
 
 ---
 
+# Provider Onboarding API
+
+This section covers the full provider onboarding flow: upgrading a `SERVICE_USER` to `SERVICE_PROVIDER`, then uploading documents for verification.
+
+---
+
+## Become a Provider
+
+**What this API does:** Upgrades a `SERVICE_USER` account to `SERVICE_PROVIDER` by creating a business profile in a single atomic transaction. The user's role in the DB changes to `SERVICE_PROVIDER` immediately.
+
+**Critical:** The response includes fresh `accessToken` and `refreshToken` with the new `SERVICE_PROVIDER` role baked in. **You must replace the stored tokens immediately** — the old token still says `SERVICE_USER` and will be rejected by all provider endpoints.
+
+### Request
+
+```graphql
+mutation BecomeProvider($input: BecomeProviderInput!) {
+  becomeProvider(input: $input) {
+    user {
+      id
+      email
+      firstName
+      lastName
+      role
+      activeRole
+      pushEnabled
+      providerProfile {
+        id
+        businessName
+        verificationStatus
+      }
+      createdAt
+      updatedAt
+    }
+    accessToken
+    refreshToken
+  }
+}
+```
+
+**Variables:**
+
+```json
+{
+  "input": {
+    "businessName": "CleanPro Services",
+    "businessDescription": "Professional cleaning services in Lagos",
+    "address": "12 Adeola Odeku Street",
+    "city": "Lagos",
+    "state": "Lagos",
+    "country": "Nigeria",
+    "latitude": 6.4281,
+    "longitude": 3.4219
+  }
+}
+```
+
+**Input fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `businessName` | `String!` | ✅ | Your business or trading name |
+| `businessDescription` | `String` | ❌ | Short description of your services |
+| `address` | `String!` | ✅ | Street address |
+| `city` | `String!` | ✅ | City |
+| `state` | `String!` | ✅ | State / province |
+| `country` | `String!` | ✅ | Country |
+| `latitude` | `Float` | ❌ | GPS latitude for proximity search |
+| `longitude` | `Float` | ❌ | GPS longitude for proximity search |
+
+**Authentication:** Required (`Authorization: Bearer <token>`)  
+**Role:** `SERVICE_USER` only — existing providers will receive `ALREADY_PROVIDER` error
+
+### Success Response
+
+```json
+{
+  "data": {
+    "becomeProvider": {
+      "user": {
+        "id": "507f1f77bcf86cd799439011",
+        "email": "user@example.com",
+        "firstName": "John",
+        "lastName": "Doe",
+        "role": "SERVICE_PROVIDER",
+        "activeRole": "SERVICE_PROVIDER",
+        "pushEnabled": true,
+        "providerProfile": {
+          "id": "provider_id_here",
+          "businessName": "CleanPro Services",
+          "verificationStatus": "UNVERIFIED"
+        },
+        "createdAt": "2026-03-08T10:30:00.000Z",
+        "updatedAt": "2026-03-30T12:00:00.000Z"
+      },
+      "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+      "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    }
+  }
+}
+```
+
+### Error Responses
+
+| Code | Message |
+|------|---------|
+| `ALREADY_PROVIDER` | You are already registered as a service provider |
+| `INVALID_ROLE` | Only service users can become providers |
+| `ACCOUNT_NOT_ACTIVE` | Your account must be active to become a provider |
+| `EMAIL_NOT_VERIFIED` | Please verify your email before becoming a provider |
+| `UNAUTHENTICATED` | Not logged in |
+
+### ⚠️ Critical Frontend Implementation
+
+```typescript
+const result = await client.mutate({ mutation: BECOME_PROVIDER, variables: { input } });
+const { user, accessToken, refreshToken } = result.data.becomeProvider;
+
+// MUST replace tokens immediately — old token has role SERVICE_USER
+storeAccessToken(accessToken);
+storeRefreshToken(refreshToken);
+updateAuthUser(user);
+
+// Now safe to call uploadProviderDocuments — token has SERVICE_PROVIDER role
+```
+
+**Provider onboarding flow:**
+1. Call `becomeProvider` → replace tokens immediately from the response
+2. Call `uploadProviderDocuments` using the **new** token
+3. Call `submitProviderForVerification` when ready
+4. Poll `myVerificationStatus` or listen for push notification for approval
+
+---
+
+# Provider Documents API
+
+These APIs allow a service provider to upload verification documents and manage them. Documents are required for the provider verification workflow.
+
+> 🔐 **All document APIs require `SERVICE_PROVIDER` role + valid access token.**
+
+---
+
+## 1. Upload Provider Documents
+
+**What this API does:** Uploads one or more verification documents (ID, business certificate, etc.) to Cloudinary and attaches them to the provider's profile. Maximum **5 documents** total. Accepted formats: `jpg`, `jpeg`, `png`, `pdf`, `doc`, `docx`. Max size per file: **15MB**.
+
+### Request
+
+```graphql
+mutation UploadProviderDocuments($files: [FileUploadInput!]!) {
+  uploadProviderDocuments(files: $files) {
+    success
+    urls
+    message
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "files": [
+    {
+      "base64Data": "data:application/pdf;base64,JVBERi0xLjQK...",
+      "filename": "national_id.pdf"
+    },
+    {
+      "base64Data": "data:image/jpeg;base64,/9j/4AAQSkZJRgAB...",
+      "filename": "business_cert.jpg"
+    }
+  ]
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "uploadProviderDocuments": {
+      "success": true,
+      "urls": [
+        "https://res.cloudinary.com/dhhmhmitl/raw/upload/v1710000000/easykonect/documents/userId_1710000000.pdf",
+        "https://res.cloudinary.com/dhhmhmitl/image/upload/v1710000001/easykonect/documents/userId_1710000001.jpg"
+      ],
+      "message": "2 document(s) uploaded successfully"
+    }
+  }
+}
+```
+
+### Error Responses
+
+```json
+{
+  "errors": [{
+    "message": "Provider profile not found",
+    "extensions": { "code": "NOT_FOUND" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "Maximum 5 documents allowed. You have 4 and are trying to add 2.",
+    "extensions": { "code": "MAX_DOCUMENTS_EXCEEDED" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "Invalid file format. Allowed formats for document: jpg, jpeg, png, pdf, doc, docx",
+    "extensions": { "code": "INVALID_FILE_FORMAT" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "File size exceeds maximum allowed (15MB)",
+    "extensions": { "code": "FILE_TOO_LARGE" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "Unauthorized",
+    "extensions": { "code": "UNAUTHORIZED" }
+  }]
+}
+```
+
+> **Notes:**
+> - Convert files to base64 before sending. Include the data URI prefix (e.g. `data:application/pdf;base64,...`)
+> - Documents are stored under `easykonect/documents/` on Cloudinary
+> - The returned URLs are the permanent Cloudinary URLs to store/display
+
+---
+
+## 2. Remove Provider Document
+
+**What this API does:** Removes a specific document from the provider's profile and deletes it from Cloudinary.
+
+### Request
+
+```graphql
+mutation RemoveProviderDocument($documentUrl: String!) {
+  removeProviderDocument(documentUrl: $documentUrl) {
+    success
+    message
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "documentUrl": "https://res.cloudinary.com/dhhmhmitl/raw/upload/v1710000000/easykonect/documents/userId_1710000000.pdf"
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "removeProviderDocument": {
+      "success": true,
+      "message": "Document removed successfully"
+    }
+  }
+}
+```
+
+### Error Responses
+
+```json
+{
+  "errors": [{
+    "message": "Provider profile not found",
+    "extensions": { "code": "NOT_FOUND" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "Document not found",
+    "extensions": { "code": "DOCUMENT_NOT_FOUND" }
+  }]
+}
+```
+
+---
+
+# Provider Gallery Images API
+
+These APIs allow a service provider to manage their portfolio/gallery images shown on their profile.
+
+> 🔐 **All gallery image APIs require `SERVICE_PROVIDER` role + valid access token.**
+
+---
+
+## 1. Upload Provider Gallery Images
+
+**What this API does:** Uploads one or more gallery/portfolio images to Cloudinary and attaches them to the provider's profile `images` array. Maximum **10 images** total. Accepted formats: `jpg`, `jpeg`, `png`, `webp`, `gif`. Max size per file: **10MB**.
+
+### Request
+
+```graphql
+mutation UploadProviderImages($files: [FileUploadInput!]!) {
+  uploadProviderImages(files: $files) {
+    success
+    urls
+    message
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "files": [
+    {
+      "base64Data": "data:image/jpeg;base64,/9j/4AAQSkZJRgAB...",
+      "filename": "workshop_photo.jpg"
+    },
+    {
+      "base64Data": "data:image/png;base64,iVBORw0KGgoAAAA...",
+      "filename": "portfolio_work.png"
+    }
+  ]
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "uploadProviderImages": {
+      "success": true,
+      "urls": [
+        "https://res.cloudinary.com/dhhmhmitl/image/upload/v1710000000/easykonect/services/userId_1710000000.jpg",
+        "https://res.cloudinary.com/dhhmhmitl/image/upload/v1710000001/easykonect/services/userId_1710000001.png"
+      ],
+      "message": "2 image(s) uploaded successfully"
+    }
+  }
+}
+```
+
+### Error Responses
+
+```json
+{
+  "errors": [{
+    "message": "Provider profile not found",
+    "extensions": { "code": "NOT_FOUND" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "Maximum 10 images allowed. You have 9 and are trying to add 2.",
+    "extensions": { "code": "MAX_IMAGES_EXCEEDED" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "Invalid file format. Allowed formats for service: jpg, jpeg, png, webp, gif",
+    "extensions": { "code": "INVALID_FILE_FORMAT" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "File size exceeds maximum allowed (10MB)",
+    "extensions": { "code": "FILE_TOO_LARGE" }
+  }]
+}
+```
+
+---
+
+## 2. Remove Provider Gallery Image
+
+**What this API does:** Removes a specific image from the provider's gallery and deletes it from Cloudinary.
+
+### Request
+
+```graphql
+mutation RemoveProviderImage($imageUrl: String!) {
+  removeProviderImage(imageUrl: $imageUrl) {
+    success
+    message
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "imageUrl": "https://res.cloudinary.com/dhhmhmitl/image/upload/v1710000000/easykonect/services/userId_1710000000.jpg"
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "removeProviderImage": {
+      "success": true,
+      "message": "Image removed successfully"
+    }
+  }
+}
+```
+
+### Error Responses
+
+```json
+{
+  "errors": [{
+    "message": "Provider profile not found",
+    "extensions": { "code": "NOT_FOUND" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "Image not found in provider gallery",
+    "extensions": { "code": "IMAGE_NOT_FOUND" }
+  }]
+}
+```
+
+> **Tip:** To display a provider's gallery, query `images` on `ServiceProviderProfile`. The `images` array is updated automatically after each upload/remove.
+
+---
+
+# Provider Likes API
+
+These APIs allow users to like/unlike service providers and check like status. Useful for showing "saved providers" or popularity scores.
+
+> 🔐 **Like/unlike mutations and queries require authenticated user (any role).** `providerLikeCount` is public.
+
+---
+
+## 1. Like a Provider
+
+**What this API does:** Adds a like from the authenticated user to a provider. Returns the updated like count.
+
+### Request
+
+```graphql
+mutation LikeProvider($providerId: ID!) {
+  likeProvider(providerId: $providerId) {
+    success
+    message
+    likeCount
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "providerId": "68060a1234abcd5678ef9012"
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "likeProvider": {
+      "success": true,
+      "message": "You liked Best Provider Co.",
+      "likeCount": 42
+    }
+  }
+}
+```
+
+### Error Responses
+
+```json
+{
+  "errors": [{
+    "message": "Service provider not found",
+    "extensions": { "code": "NOT_FOUND" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "You have already liked this provider",
+    "extensions": { "code": "ALREADY_LIKED" }
+  }]
+}
+```
+
+---
+
+## 2. Unlike a Provider
+
+**What this API does:** Removes the authenticated user's like from a provider.
+
+### Request
+
+```graphql
+mutation UnlikeProvider($providerId: ID!) {
+  unlikeProvider(providerId: $providerId) {
+    success
+    message
+    likeCount
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "providerId": "68060a1234abcd5678ef9012"
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "unlikeProvider": {
+      "success": true,
+      "message": "You unliked Best Provider Co.",
+      "likeCount": 41
+    }
+  }
+}
+```
+
+### Error Responses
+
+```json
+{
+  "errors": [{
+    "message": "Service provider not found",
+    "extensions": { "code": "NOT_FOUND" }
+  }]
+}
+```
+
+```json
+{
+  "errors": [{
+    "message": "You have not liked this provider",
+    "extensions": { "code": "NOT_LIKED" }
+  }]
+}
+```
+
+---
+
+## 3. Toggle Provider Like
+
+**What this API does:** Likes if not yet liked, unlikes if already liked. Most convenient for a single heart/like button. Returns the new `isLiked` state and updated `likeCount`.
+
+### Request
+
+```graphql
+mutation ToggleProviderLike($providerId: ID!) {
+  toggleProviderLike(providerId: $providerId) {
+    success
+    message
+    isLiked
+    likeCount
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "providerId": "68060a1234abcd5678ef9012"
+}
+```
+
+### Success Response — Liked (200)
+
+```json
+{
+  "data": {
+    "toggleProviderLike": {
+      "success": true,
+      "message": "You liked Best Provider Co.",
+      "isLiked": true,
+      "likeCount": 42
+    }
+  }
+}
+```
+
+### Success Response — Unliked (200)
+
+```json
+{
+  "data": {
+    "toggleProviderLike": {
+      "success": true,
+      "message": "You unliked Best Provider Co.",
+      "isLiked": false,
+      "likeCount": 41
+    }
+  }
+}
+```
+
+### Error Response
+
+```json
+{
+  "errors": [{
+    "message": "Service provider not found",
+    "extensions": { "code": "NOT_FOUND" }
+  }]
+}
+```
+
+> **Best practice:** Use `toggleProviderLike` for the UI button. Check `isLiked` in the response to update the button state without a separate query.
+
+---
+
+## 4. Check if Provider is Liked
+
+**What this API does:** Returns whether the authenticated user has liked a specific provider, plus the current like count.
+
+### Request
+
+```graphql
+query IsProviderLiked($providerId: ID!) {
+  isProviderLiked(providerId: $providerId) {
+    isLiked
+    likeCount
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "providerId": "68060a1234abcd5678ef9012"
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "isProviderLiked": {
+      "isLiked": true,
+      "likeCount": 42
+    }
+  }
+}
+```
+
+> **Use case:** Call this when loading a provider profile page to set the initial heart button state.
+
+---
+
+## 5. Get Provider Like Count (Public)
+
+**What this API does:** Returns the total number of likes for a provider. This is public — no authentication required.
+
+### Request
+
+```graphql
+query ProviderLikeCount($providerId: ID!) {
+  providerLikeCount(providerId: $providerId)
+}
+```
+
+### Variables
+
+```json
+{
+  "providerId": "68060a1234abcd5678ef9012"
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "providerLikeCount": 42
+  }
+}
+```
+
+---
+
+## 6. Get My Liked Providers
+
+**What this API does:** Returns a paginated list of all providers the authenticated user has liked, including provider details (name, city, images, rating, like count).
+
+### Request
+
+```graphql
+query MyLikedProviders($pagination: PaginationInput) {
+  myLikedProviders(pagination: $pagination) {
+    items {
+      id
+      likedAt
+      provider {
+        id
+        businessName
+        businessDescription
+        verificationStatus
+        city
+        state
+        images
+        user {
+          id
+          firstName
+          lastName
+          profilePhoto
+        }
+        reviewCount
+        likeCount
+      }
+    }
+    pagination {
+      page
+      limit
+      total
+      totalPages
+      hasNext
+      hasPrev
+    }
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "pagination": {
+    "page": 1,
+    "limit": 10
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "myLikedProviders": {
+      "items": [
+        {
+          "id": "68060a1234abcd5678ef9013",
+          "likedAt": "2026-03-28T10:00:00.000Z",
+          "provider": {
+            "id": "68060a1234abcd5678ef9012",
+            "businessName": "Best Provider Co.",
+            "businessDescription": "Professional home services in Lagos",
+            "verificationStatus": "VERIFIED",
+            "city": "Lagos",
+            "state": "Lagos",
+            "images": [
+              "https://res.cloudinary.com/dhhmhmitl/image/upload/v1710000000/easykonect/services/img1.jpg"
+            ],
+            "user": {
+              "id": "68060a1234abcd5678ef9011",
+              "firstName": "John",
+              "lastName": "Doe",
+              "profilePhoto": "https://res.cloudinary.com/dhhmhmitl/image/upload/v1/profiles/user_123.jpg"
+            },
+            "reviewCount": 24,
+            "likeCount": 42
+          }
+        }
+      ],
+      "pagination": {
+        "page": 1,
+        "limit": 10,
+        "total": 3,
+        "totalPages": 1,
+        "hasNext": false,
+        "hasPrev": false
+      }
+    }
+  }
+}
+```
+
+### Error Response
+
+```json
+{
+  "errors": [{
+    "message": "Unauthorized",
+    "extensions": { "code": "UNAUTHENTICATED" }
+  }]
+}
+```
+
+---
+
 # Error Codes Reference
 
 | Code | HTTP Equivalent | Description | Action |
@@ -2046,6 +2902,16 @@ At any point before COMPLETED:
 | `INVALID_BOOKING_STATUS` | 400 | Wrong booking status | Check current status |
 | `CANCELLATION_WINDOW_PASSED` | 400 | Too late to cancel | Contact provider |
 | `PROVIDER_NOT_FOUND` | 404 | Provider profile missing | Complete provider setup |
+| `MAX_DOCUMENTS_EXCEEDED` | 400 | Document limit reached (5) | Remove a document first |
+| `MAX_IMAGES_EXCEEDED` | 400 | Image limit reached (10) | Remove an image first |
+| `INVALID_FILE_FORMAT` | 400 | Unsupported file type | Use allowed formats |
+| `FILE_TOO_LARGE` | 400 | File exceeds size limit | Compress or resize file |
+| `TOO_MANY_FILES` | 400 | Too many files in one upload | Upload in batches |
+| `UPLOAD_FAILED` | 500 | Cloudinary upload error | Retry the upload |
+| `DOCUMENT_NOT_FOUND` | 404 | Document URL not in profile | Check documentUrl |
+| `IMAGE_NOT_FOUND` | 404 | Image URL not in gallery | Check imageUrl |
+| `ALREADY_LIKED` | 400 | Provider already liked | Call unlike instead |
+| `NOT_LIKED` | 400 | Provider was not liked | Call like instead |
 
 ---
 
@@ -3738,7 +4604,753 @@ socket.on('error', (err) => {
 
 ---
 
+# Browse Providers API
+
+The browse/discovery API lets users find verified service providers without being logged in. It supports rich filtering, sorting, and geolocation.
+
+---
+
+## Browse All Providers
+
+```graphql
+query BrowseProviders($input: BrowseProvidersInput) {
+  providers(input: $input) {
+    items {
+      id
+      businessName
+      businessDescription
+      verificationStatus
+      city
+      state
+      country
+      images
+      averageRating
+      totalReviews
+      likeCount
+      categories
+      user {
+        id
+        firstName
+        lastName
+        profilePhoto
+      }
+      createdAt
+    }
+    pagination {
+      page
+      limit
+      total
+      totalPages
+      hasNext
+      hasPrev
+    }
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "filters": {
+      "city": "Lagos",
+      "state": "Lagos",
+      "categoryId": "cat_abc123",
+      "verifiedOnly": true,
+      "minRating": 4.0
+    },
+    "sortBy": "RATING_DESC",
+    "pagination": { "page": 1, "limit": 10 }
+  }
+}
+```
+
+### Sort Options (`ProviderSortBy`)
+
+| Value | Description |
+|-------|-------------|
+| `RATING_DESC` | Highest average rating first |
+| `POPULARITY_DESC` | Most likes first |
+| `NEWEST` | Most recently joined first (default) |
+| `NAME_ASC` | Alphabetical by business name |
+
+### Filter Options (`ProviderFiltersInput`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `city` | String | Filter by city (case-insensitive) |
+| `state` | String | Filter by state (case-insensitive) |
+| `country` | String | Filter by country (case-insensitive) |
+| `categoryId` | ID | Filter by service category |
+| `verifiedOnly` | Boolean | Only show verified providers (default: `true`) |
+| `minRating` | Float | Minimum average rating (e.g. `4.0`) |
+
+### Success Response
+
+```json
+{
+  "data": {
+    "providers": {
+      "items": [
+        {
+          "id": "507f1f77bcf86cd799439011",
+          "businessName": "Sparkle Cleaning Co.",
+          "averageRating": 4.8,
+          "totalReviews": 32,
+          "likeCount": 148,
+          "categories": ["Cleaning", "Laundry"],
+          "city": "Lagos",
+          "state": "Lagos",
+          "verificationStatus": "VERIFIED"
+        }
+      ],
+      "pagination": {
+        "page": 1,
+        "limit": 10,
+        "total": 45,
+        "totalPages": 5,
+        "hasNext": true,
+        "hasPrev": false
+      }
+    }
+  }
+}
+```
+
+---
+
+## Get Provider Public Profile
+
+Returns the full public profile of a single provider including their active services.
+
+```graphql
+query GetProviderProfile($providerId: ID!) {
+  providerProfile(providerId: $providerId) {
+    id
+    businessName
+    businessDescription
+    verificationStatus
+    address
+    city
+    state
+    country
+    latitude
+    longitude
+    images
+    averageRating
+    totalReviews
+    likeCount
+    categories
+    user {
+      id
+      firstName
+      lastName
+      profilePhoto
+    }
+    activeServices {
+      id
+      name
+      price
+      duration
+      images
+      category {
+        id
+        name
+        slug
+      }
+    }
+    createdAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "providerId": "507f1f77bcf86cd799439011"
+}
+```
+
+### Success Response
+
+```json
+{
+  "data": {
+    "providerProfile": {
+      "id": "507f1f77bcf86cd799439011",
+      "businessName": "Sparkle Cleaning Co.",
+      "averageRating": 4.8,
+      "totalReviews": 32,
+      "likeCount": 148,
+      "activeServices": [
+        {
+          "id": "svc_abc",
+          "name": "Deep Cleaning",
+          "price": 8000,
+          "duration": 180,
+          "images": ["https://..."],
+          "category": { "id": "cat1", "name": "Cleaning", "slug": "cleaning" }
+        }
+      ]
+    }
+  }
+}
+```
+
+### Error Responses
+
+| Code | Message | Description |
+|------|---------|-------------|
+| `NOT_FOUND` | Provider not found | Invalid `providerId` |
+
+---
+
+# Nearby Providers API
+
+Find service providers near a specific GPS coordinate using the Haversine formula.
+
+> 🔓 **Public endpoint** — no authentication required.  
+> 📍 Latitude/longitude must be WGS-84 decimal degrees (standard GPS format).
+
+---
+
+## Get Nearby Providers
+
+```graphql
+query NearbyProviders($input: NearbyProvidersInput!) {
+  nearbyProviders(input: $input) {
+    items {
+      id
+      businessName
+      businessDescription
+      verificationStatus
+      city
+      state
+      country
+      images
+      averageRating
+      totalReviews
+      likeCount
+      distanceKm
+      categories
+      user {
+        id
+        firstName
+        lastName
+        profilePhoto
+      }
+    }
+    pagination {
+      page
+      limit
+      total
+      totalPages
+      hasNext
+      hasPrev
+    }
+    radiusKm
+    searchLocation {
+      latitude
+      longitude
+    }
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "latitude": 6.5244,
+    "longitude": 3.3792,
+    "radiusKm": 10,
+    "filters": {
+      "categoryId": "cat_abc123",
+      "minRating": 3.5
+    },
+    "sortBy": "RATING_DESC",
+    "pagination": { "page": 1, "limit": 20 }
+  }
+}
+```
+
+### Field Details
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `latitude` | Float | ✅ | User's current latitude |
+| `longitude` | Float | ✅ | User's current longitude |
+| `radiusKm` | Float | ❌ | Search radius in km (default: `25`, max: `100`) |
+| `filters` | ProviderFiltersInput | ❌ | Same filters as `providers` query |
+| `sortBy` | ProviderSortBy | ❌ | Default: `RATING_DESC` for nearby |
+| `pagination` | PaginationInput | ❌ | Default: page 1, limit 10 |
+
+### Sort Behaviour for Nearby
+
+| `sortBy` Value | Behaviour |
+|----------------|-----------|
+| `RATING_DESC` | Highest rated providers first (default) |
+| `POPULARITY_DESC` | Most liked first |
+| `NAME_ASC` | Alphabetical |
+| `NEWEST` | **Distance** (nearest first — NEWEST is repurposed for proximity) |
+
+### Success Response
+
+```json
+{
+  "data": {
+    "nearbyProviders": {
+      "items": [
+        {
+          "id": "507f1f77bcf86cd799439011",
+          "businessName": "Sparkle Cleaning Co.",
+          "averageRating": 4.8,
+          "likeCount": 148,
+          "distanceKm": 2.3,
+          "city": "Lagos"
+        }
+      ],
+      "pagination": {
+        "page": 1,
+        "limit": 20,
+        "total": 7,
+        "totalPages": 1,
+        "hasNext": false,
+        "hasPrev": false
+      },
+      "radiusKm": 10,
+      "searchLocation": {
+        "latitude": 6.5244,
+        "longitude": 3.3792
+      }
+    }
+  }
+}
+```
+
+### Notes
+
+- Providers without `latitude`/`longitude` set are automatically **excluded** from nearby results.
+- `distanceKm` is accurate to 1 decimal place (e.g. `3.7`).
+- The `radiusKm` field in the response reflects the clamped value (e.g. if you pass `9999`, you get `100`).
+- For mobile apps, use the device GPS coordinates (`navigator.geolocation.getCurrentPosition`).
+
+---
+
+# Provider Profile — Own Profile
+
+> 🔐 Requires authentication + `SERVICE_PROVIDER` role.
+
+Providers can fetch their own full profile — including their services list — separately from the `me` query. The `me` query returns basic identity; `myProviderProfile` returns the complete provider record.
+
+---
+
+## Get My Provider Profile
+
+```graphql
+query MyProviderProfile {
+  myProviderProfile {
+    id
+    email
+    firstName
+    lastName
+    phone
+    profilePhoto
+    role
+    activeRole
+    pushEnabled
+    lastLoginAt
+    providerProfile {
+      id
+      businessName
+      businessDescription
+      verificationStatus
+      address
+      city
+      state
+      country
+      latitude
+      longitude
+      documents
+      createdAt
+      updatedAt
+    }
+    createdAt
+    updatedAt
+  }
+}
+```
+
+**Authentication:** Required (`Authorization: Bearer <token>`)  
+**Role:** `SERVICE_PROVIDER` only — returns `FORBIDDEN` for `SERVICE_USER` or `ADMIN`
+
+**Response fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `ID!` | User ID |
+| `pushEnabled` | `Boolean!` | Whether push notifications are on |
+| `lastLoginAt` | `String` | ISO timestamp of last login |
+| `providerProfile` | `ServiceProviderProfile` | Full provider record (always populated for `SERVICE_PROVIDER` role) |
+
+> 💡 **Why use this instead of `me`?** Use `myProviderProfile` when you need the provider-specific nested data (`providerProfile`) and want a single query that guarantees the provider fields are present. `me` works too for providers but `myProviderProfile` makes intent explicit and will throw `FORBIDDEN` immediately if the user is not a provider.
+
+---
+
+# Push Notifications API
+
+> 🔐 All push endpoints require authentication.
+
+---
+
+## Check Push Status
+
+```graphql
+query MyPushStatus {
+  myPushStatus {
+    pushEnabled
+    hasDeviceRegistered
+    playerId
+  }
+}
+```
+
+**Success Response**
+```json
+{
+  "data": {
+    "myPushStatus": {
+      "pushEnabled": true,
+      "hasDeviceRegistered": true,
+      "playerId": "onesignal-player-abc123"
+    }
+  }
+}
+```
+
+---
+
+## Enable Push Notifications
+
+Registers a device and enables push. Call this after the user grants permission in the mobile app.
+
+```graphql
+mutation EnablePush($playerId: String!) {
+  enablePushNotifications(playerId: $playerId) {
+    success
+    message
+    pushEnabled
+  }
+}
+```
+
+**Variables**
+```json
+{ "playerId": "onesignal-player-abc123" }
+```
+
+---
+
+## Disable Push Notifications
+
+Removes the device token and stops all push delivery.
+
+```graphql
+mutation DisablePush {
+  disablePushNotifications {
+    success
+    message
+    pushEnabled
+  }
+}
+```
+
+---
+
+## Toggle Push On/Off (no device change)
+
+Useful for a settings toggle when the device is already registered.
+
+```graphql
+mutation TogglePush($enabled: Boolean!) {
+  togglePushNotifications(enabled: $enabled) {
+    success
+    message
+    pushEnabled
+  }
+}
+```
+
+**Variables**
+```json
+{ "enabled": false }
+```
+
+---
+
+## Existing Push Mutations (still available)
+
+| Mutation | Description |
+|----------|-------------|
+| `registerPushToken(playerId)` | Lower-level: register device only |
+| `unregisterPushToken` | Lower-level: unregister device only |
+| `updatePushPreference(enabled)` | Lower-level: toggle without device change |
+
+> The three new mutations (`enablePushNotifications`, `disablePushNotifications`, `togglePushNotifications`) are convenience wrappers around the above.
+
+---
+
+# Account Settings API
+
+> 🔐 All settings endpoints require authentication.
+
+Granular control over notification preferences, locale, and privacy — stored per user in the database.
+
+---
+
+## Get My Settings
+
+```graphql
+query GetMySettings {
+  mySettings {
+    id
+    # In-app / push preferences
+    notifyBookingUpdates
+    notifyMessages
+    notifyReviews
+    notifyPromotions
+    notifyDisputeUpdates
+    notifyProviderVerification
+    # Email preferences
+    emailBookingUpdates
+    emailMessages
+    emailReviews
+    emailPromotions
+    emailNewsletters
+    # Locale
+    language
+    timezone
+    currency
+    # Privacy
+    showProfileToPublic
+    showPhoneToProviders
+    updatedAt
+  }
+}
+```
+
+**Success Response (defaults for a new user)**
+```json
+{
+  "data": {
+    "mySettings": {
+      "notifyBookingUpdates": true,
+      "notifyMessages": true,
+      "notifyReviews": true,
+      "notifyPromotions": false,
+      "notifyDisputeUpdates": true,
+      "notifyProviderVerification": true,
+      "emailBookingUpdates": true,
+      "emailMessages": false,
+      "emailReviews": true,
+      "emailPromotions": false,
+      "emailNewsletters": false,
+      "language": "en",
+      "timezone": "Africa/Lagos",
+      "currency": "NGN",
+      "showProfileToPublic": true,
+      "showPhoneToProviders": false
+    }
+  }
+}
+```
+
+---
+
+## Update My Settings
+
+All fields are optional — only the fields you pass are changed.
+
+```graphql
+mutation UpdateSettings($input: UpdateSettingsInput!) {
+  updateMySettings(input: $input) {
+    success
+    message
+    settings {
+      language
+      timezone
+      currency
+      notifyPromotions
+      emailNewsletters
+      showPhoneToProviders
+    }
+  }
+}
+```
+
+**Variables**
+```json
+{
+  "input": {
+    "language": "fr",
+    "timezone": "Europe/Paris",
+    "currency": "EUR",
+    "notifyPromotions": true,
+    "showPhoneToProviders": true
+  }
+}
+```
+
+### `UpdateSettingsInput` Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `notifyBookingUpdates` | Boolean | `true` | Push when booking is accepted/completed |
+| `notifyMessages` | Boolean | `true` | Push for new chat messages |
+| `notifyReviews` | Boolean | `true` | Push for new reviews |
+| `notifyPromotions` | Boolean | `false` | Push for promotional content |
+| `notifyDisputeUpdates` | Boolean | `true` | Push for dispute status changes |
+| `notifyProviderVerification` | Boolean | `true` | Push for verification approved/rejected |
+| `emailBookingUpdates` | Boolean | `true` | Email on booking changes |
+| `emailMessages` | Boolean | `false` | Email for messages |
+| `emailReviews` | Boolean | `true` | Email on new reviews |
+| `emailPromotions` | Boolean | `false` | Marketing emails |
+| `emailNewsletters` | Boolean | `false` | Newsletter subscription |
+| `language` | String | `"en"` | ISO 639-1 code (e.g. `"en"`, `"fr"`, `"es"`) |
+| `timezone` | String | `"Africa/Lagos"` | IANA timezone (e.g. `"Europe/London"`) |
+| `currency` | String | `"NGN"` | ISO 4217 code (e.g. `"USD"`, `"GBP"`) |
+| `showProfileToPublic` | Boolean | `true` | Show profile on public browse |
+| `showPhoneToProviders` | Boolean | `false` | Share phone number with providers |
+
+### Error Responses
+
+| Code | Trigger |
+|------|---------|
+| `VALIDATION_ERROR` | Invalid language code (must be ISO 639-1: `en`, `fr-FR`) |
+| `VALIDATION_ERROR` | Invalid currency code (must be ISO 4217: `NGN`, `USD`) |
+
+---
+
+## Reset Settings to Defaults
+
+```graphql
+mutation ResetSettings {
+  resetMySettings {
+    success
+    message
+    settings {
+      language
+      timezone
+      currency
+    }
+  }
+}
+```
+
+---
+
+## Deactivate Account
+
+Soft-disables the account. Data is preserved but login is blocked. Device push token is also cleared.
+
+```graphql
+mutation DeactivateAccount($reason: String) {
+  deactivateMyAccount(reason: $reason) {
+    success
+    message
+  }
+}
+```
+
+**Variables**
+```json
+{ "reason": "Taking a break" }
+```
+
+**Success Response**
+```json
+{
+  "data": {
+    "deactivateMyAccount": {
+      "success": true,
+      "message": "Your account has been deactivated. Contact support to reactivate."
+    }
+  }
+}
+```
+
+> ⚠️ **Deactivate vs Delete**: `deactivateMyAccount` is reversible. `deleteMyAccount` permanently removes all data.
+
+---
+
+## Reactivate Account
+
+Self-service account reactivation.
+
+```graphql
+mutation ReactivateAccount {
+  reactivateMyAccount {
+    success
+    message
+  }
+}
+```
+
+**Error Responses**
+
+| Code | Message |
+|------|---------|
+| `BAD_REQUEST` | Account is not deactivated |
+| `NOT_FOUND` | User not found |
+
+---
+
 ## Changelog
+
+### v2.6.0 (March 30, 2026)
+- ✅ `becomeProvider` now returns `BecomeProviderResponse` (`user` + `accessToken` + `refreshToken`)
+- ✅ Fresh `SERVICE_PROVIDER` JWT issued atomically with role upgrade — no stale token after onboarding
+- ✅ Added `BecomeProviderResponse` GraphQL type
+- ✅ Added full Provider Onboarding API section with critical token-replacement note
+- ✅ Fixed `uploadProviderDocuments` UNAUTHORIZED during onboarding (root cause: stale JWT)
+
+### v2.5.0 (March 29, 2026)
+- ✅ `pushEnabled` field added to `User` type — returned on every `me` / `user` / `myProviderProfile` query
+- ✅ `lastLoginAt` field added to `User` type — ISO timestamp of last successful login
+- ✅ `myProviderProfile` query — providers can fetch their own full profile (with services list) separately from `me`
+- ✅ `getUserById` now returns `activeRole`, `pushEnabled`, `lastLoginAt`
+- ✅ `me` (getCurrentUser path) now returns `pushEnabled`, `lastLoginAt`
+
+### v2.4.0 (March 29, 2026)
+- ✅ Push status query (`myPushStatus`)
+- ✅ `enablePushNotifications` — convenience mutation (register + enable)
+- ✅ `disablePushNotifications` — convenience mutation (unregister + disable)
+- ✅ `togglePushNotifications` — toggle without device change
+- ✅ Account settings API (`mySettings`, `updateMySettings`, `resetMySettings`)
+- ✅ Granular notification preferences (6 push types, 5 email types)
+- ✅ Locale settings (`language`, `timezone`, `currency`)
+- ✅ Privacy settings (`showProfileToPublic`, `showPhoneToProviders`)
+- ✅ Account lifecycle: `deactivateMyAccount`, `reactivateMyAccount`
+- ✅ `UserSettings` model added to Prisma schema
+
+### v2.3.0 (March 29, 2026)
+- ✅ Browse providers API (`providers` query) with filters + sorting
+- ✅ Provider public profile (`providerProfile` query)
+- ✅ Nearby providers API (`nearbyProviders` query) with Haversine geolocation
+- ✅ `ProviderSortBy` enum: `RATING_DESC`, `POPULARITY_DESC`, `NEWEST`, `NAME_ASC`
+- ✅ `ProviderFiltersInput`: `city`, `state`, `country`, `categoryId`, `verifiedOnly`, `minRating`
+- ✅ `distanceKm` field on nearby provider results
+- ✅ Configurable search radius (default 25 km, max 100 km)
+
+### v2.2.0 (March 28, 2026)
+- ✅ Provider gallery images (`uploadProviderImages`, `removeProviderImage`)
+- ✅ Provider documents (`uploadProviderDocuments`, `removeProviderDocument`)
+- ✅ Provider likes (`likeProvider`, `unlikeProvider`, `toggleProviderLike`)
+- ✅ Provider like queries (`isProviderLiked`, `providerLikeCount`, `myLikedProviders`)
+- ✅ `ServiceProviderProfile` now includes `images`, `averageRating`, `totalReviews`, `likeCount`, `isLiked`
 
 ### v2.1.0 (March 22, 2026)
 - ✅ OneSignal push notifications (iOS + Android)
@@ -3769,6 +5381,6 @@ socket.on('error', (err) => {
 
 ---
 
-**API Version**: 2.1.0  
-**Last Updated**: March 22, 2026  
+**API Version**: 2.4.0  
+**Last Updated**: March 29, 2026  
 **Documentation**: https://backend-ehtm.onrender.com/docs

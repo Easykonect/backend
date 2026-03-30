@@ -22,10 +22,13 @@ export const getUserById = async (id: string) => {
       firstName: true,
       lastName: true,
       role: true,
+      activeRole: true,
       phone: true,
       profilePhoto: true,
       status: true,
       isEmailVerified: true,
+      pushEnabled: true,
+      lastLoginAt: true,
       createdAt: true,
       updatedAt: true,
     },
@@ -37,7 +40,12 @@ export const getUserById = async (id: string) => {
     });
   }
 
-  return user;
+  return {
+    ...user,
+    activeRole: user.activeRole || user.role,
+    pushEnabled: user.pushEnabled ?? true,
+    lastLoginAt: user.lastLoginAt ? user.lastLoginAt.toISOString() : null,
+  };
 };
 
 /**
@@ -345,5 +353,279 @@ export const deleteOwnAccount = async (userId: string) => {
   return {
     success: true,
     message: 'Your account has been deleted successfully.',
+  };
+};
+
+// ==================
+// Provider Like Functions
+// ==================
+
+/**
+ * Like a service provider
+ */
+export const likeProvider = async (userId: string, providerId: string) => {
+  // Check if provider exists
+  const provider = await prisma.serviceProvider.findUnique({
+    where: { id: providerId },
+    select: { id: true, businessName: true },
+  });
+
+  if (!provider) {
+    throw new GraphQLError('Service provider not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+
+  // Check if already liked
+  const existingLike = await prisma.providerLike.findUnique({
+    where: {
+      userId_providerId: {
+        userId,
+        providerId,
+      },
+    },
+  });
+
+  if (existingLike) {
+    throw new GraphQLError('You have already liked this provider', {
+      extensions: { code: 'ALREADY_LIKED' },
+    });
+  }
+
+  // Create like
+  await prisma.providerLike.create({
+    data: {
+      userId,
+      providerId,
+    },
+  });
+
+  // Get updated like count
+  const likeCount = await prisma.providerLike.count({
+    where: { providerId },
+  });
+
+  return {
+    success: true,
+    message: `You liked ${provider.businessName}`,
+    likeCount,
+  };
+};
+
+/**
+ * Unlike a service provider
+ */
+export const unlikeProvider = async (userId: string, providerId: string) => {
+  // Check if provider exists
+  const provider = await prisma.serviceProvider.findUnique({
+    where: { id: providerId },
+    select: { id: true, businessName: true },
+  });
+
+  if (!provider) {
+    throw new GraphQLError('Service provider not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+
+  // Check if liked
+  const existingLike = await prisma.providerLike.findUnique({
+    where: {
+      userId_providerId: {
+        userId,
+        providerId,
+      },
+    },
+  });
+
+  if (!existingLike) {
+    throw new GraphQLError('You have not liked this provider', {
+      extensions: { code: 'NOT_LIKED' },
+    });
+  }
+
+  // Delete like
+  await prisma.providerLike.delete({
+    where: {
+      userId_providerId: {
+        userId,
+        providerId,
+      },
+    },
+  });
+
+  // Get updated like count
+  const likeCount = await prisma.providerLike.count({
+    where: { providerId },
+  });
+
+  return {
+    success: true,
+    message: `You unliked ${provider.businessName}`,
+    likeCount,
+  };
+};
+
+/**
+ * Toggle like on a service provider
+ */
+export const toggleProviderLike = async (userId: string, providerId: string) => {
+  // Check if provider exists
+  const provider = await prisma.serviceProvider.findUnique({
+    where: { id: providerId },
+    select: { id: true, businessName: true },
+  });
+
+  if (!provider) {
+    throw new GraphQLError('Service provider not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+
+  // Check if already liked
+  const existingLike = await prisma.providerLike.findUnique({
+    where: {
+      userId_providerId: {
+        userId,
+        providerId,
+      },
+    },
+  });
+
+  if (existingLike) {
+    // Unlike
+    await prisma.providerLike.delete({
+      where: {
+        userId_providerId: {
+          userId,
+          providerId,
+        },
+      },
+    });
+
+    const likeCount = await prisma.providerLike.count({
+      where: { providerId },
+    });
+
+    return {
+      success: true,
+      message: `You unliked ${provider.businessName}`,
+      isLiked: false,
+      likeCount,
+    };
+  } else {
+    // Like
+    await prisma.providerLike.create({
+      data: {
+        userId,
+        providerId,
+      },
+    });
+
+    const likeCount = await prisma.providerLike.count({
+      where: { providerId },
+    });
+
+    return {
+      success: true,
+      message: `You liked ${provider.businessName}`,
+      isLiked: true,
+      likeCount,
+    };
+  }
+};
+
+/**
+ * Check if user has liked a provider
+ */
+export const isProviderLiked = async (userId: string, providerId: string) => {
+  const like = await prisma.providerLike.findUnique({
+    where: {
+      userId_providerId: {
+        userId,
+        providerId,
+      },
+    },
+  });
+
+  return !!like;
+};
+
+/**
+ * Get provider like count
+ */
+export const getProviderLikeCount = async (providerId: string) => {
+  return prisma.providerLike.count({
+    where: { providerId },
+  });
+};
+
+/**
+ * Get user's liked providers
+ */
+export const getMyLikedProviders = async (
+  userId: string,
+  pagination: { page: number; limit: number } = { page: 1, limit: 10 }
+) => {
+  const { page, limit } = pagination;
+  const skip = (page - 1) * limit;
+
+  const [likes, total] = await Promise.all([
+    prisma.providerLike.findMany({
+      where: { userId },
+      include: {
+        provider: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                profilePhoto: true,
+              },
+            },
+            _count: {
+              select: {
+                reviews: true,
+                likes: true,
+              },
+            },
+          },
+        },
+      },
+      skip,
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+    }),
+    prisma.providerLike.count({ where: { userId } }),
+  ]);
+
+  const totalPages = Math.ceil(total / limit);
+
+  return {
+    items: likes.map((like) => ({
+      id: like.id,
+      likedAt: like.createdAt.toISOString(),
+      provider: {
+        id: like.provider.id,
+        businessName: like.provider.businessName,
+        businessDescription: like.provider.businessDescription,
+        verificationStatus: like.provider.verificationStatus,
+        city: like.provider.city,
+        state: like.provider.state,
+        images: like.provider.images,
+        user: like.provider.user,
+        reviewCount: like.provider._count.reviews,
+        likeCount: like.provider._count.likes,
+      },
+    })),
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasNext: page < totalPages,
+      hasPrev: page > 1,
+    },
   };
 };
