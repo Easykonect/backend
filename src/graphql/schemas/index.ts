@@ -422,7 +422,12 @@ export const typeDefs = gql`
   # Paginated Liked Providers
   type PaginatedLikedProviders {
     items: [LikedProviderItem!]!
-    pagination: PaginationInfo!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
   }
 
   # ==================
@@ -496,13 +501,23 @@ export const typeDefs = gql`
   # Paginated browse results
   type PaginatedBrowseProviders {
     items: [BrowseProviderItem!]!
-    pagination: PaginationInfo!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
   }
 
   # Paginated nearby results (includes search metadata)
   type PaginatedNearbyProviders {
     items: [BrowseProviderItem!]!
-    pagination: PaginationInfo!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
     radiusKm: Float!
     searchLocation: SearchLocation!
   }
