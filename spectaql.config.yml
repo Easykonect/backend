@@ -90,17 +90,59 @@ info:
     - Message read receipts
     - Typing indicators
     
-    ### 🔔 Notifications
-    - In-app notifications
-    - Real-time push via WebSocket
-    - Notification preferences
+    ### 🔔 Push Notifications (OneSignal)
+    - iOS and Android push notifications
+    - Device registration (`registerPushToken`)
+    - Push preference management
+    - Automatic notifications for bookings, messages, reviews
     
-    ### 👨‍💼 Admin Features
-    - User management (suspend/activate)
+    ### 📍 Geolocation & Maps (Google Maps Platform)
+    - **Nearby Providers**: Find providers within radius using Haversine formula
+    - **Distance Calculation**: Get distance from user to each provider
+    - **Geocoding**: Convert addresses to coordinates (backend)
+    - **Places Autocomplete**: Address suggestions (frontend integration)
+    - Configurable search radius (default 25km, max 100km)
+    
+    ### � Payment System (Paystack)
+    - **Payment Initialization**: Start Paystack checkout (`initializePayment`)
+    - **Payment Verification**: Verify after callback (`verifyPayment`)
+    - **Wallet Payments**: Pay using wallet balance (`payWithWallet`)
+    - **Webhook Handling**: Secure webhook with signature verification
+    - **10% Platform Commission**: Automatically calculated
+    
+    ### 💰 Wallet System
+    - **User/Provider Wallets**: Track balances (`myWallet`)
+    - **Transaction History**: View all transactions (`myWalletTransactions`)
+    - **Admin Adjustments**: Credit/debit wallets (`adjustWalletBalance`)
+    - **Distributed Locking**: Prevent race conditions
+    
+    ### 🏦 Bank Account Management
+    - **List Banks**: Nigerian banks supported by Paystack (`banks`)
+    - **Verify Account**: Confirm account before adding (`verifyBankAccount`)
+    - **Add/Remove Accounts**: Manage provider banks
+    - **Default Bank**: Set primary withdrawal account
+    
+    ### 💸 Withdrawals
+    - **Request Withdrawal**: Provider payout to bank (`requestWithdrawal`)
+    - **Cancel Withdrawal**: Cancel pending requests (`cancelWithdrawal`)
+    - **Admin Processing**: Approve/reject withdrawals
+    - **Daily Limits**: ₦5,000,000 per day per provider
+    - **Withdrawal Fee**: ₦50 per withdrawal
+    
+    ### 📊 Payment Analytics
+    - **Provider Reports**: Earnings breakdown (`myEarningsReport`)
+    - **Admin Analytics**: Platform-wide statistics (`adminPaymentAnalytics`)
+    - **Top Earners**: Highest earning providers (`topEarningProviders`)
+    - **Refund Stats**: Refund tracking (`refundStats`)
+    
+    ### �👨‍💼 Admin Features
+    - User management (suspend/activate/ban)
     - Provider verification approval
     - Service moderation
     - Dispute resolution
     - Platform analytics
+    - Payment management
+    - Withdrawal processing
     
     ## Authentication
     
@@ -125,27 +167,41 @@ info:
     
     Use `refreshToken` mutation when access token expires to get new tokens.
     
+    ### Token Invalidation
+    
+    All tokens are automatically invalidated when:
+    - User changes password (`changePassword`)
+    - User resets password (`resetPassword`)
+    - User must re-login on all devices after these operations
+    
     ## Security Features
     
     - 🔒 Password hashing with bcrypt (12 rounds)
     - 🔒 OTP hashing with SHA-256 (timing-safe comparison)
     - 🔒 Rate limiting per user/IP
+    - 🔒 Token invalidation on password change/reset
+    - 🔒 XSS prevention - all inputs sanitized
+    - 🔒 NoSQL injection protection
+    - 🔒 IDOR protection - users access own resources only
     - 🔒 Query depth limiting (max 10 levels)
     - 🔒 Request body size limit (1MB)
-    - 🔒 Refresh token invalidation on logout
+    - 🔒 Webhook signature verification
+    - 🔒 Distributed locking for wallet operations
     - 🔒 Account lockout after failed attempts
     
     ## Rate Limits
     
-    | Operation | Limit |
-    |-----------|-------|
-    | General API | 100 requests / 15 minutes |
-    | Login | 10 attempts / 15 minutes |
-    | Authentication | 5 attempts / minute |
-    | OTP Verification | 5 attempts / 5 minutes |
-    | Password Reset | 3 attempts / hour |
-    | File Uploads | 20 / minute |
-    | Messaging | 60 messages / minute |
+    | Operation | Limit | Window | Block Duration |
+    |-----------|-------|--------|----------------|
+    | Login | 5 attempts | 5 minutes | 15 minutes |
+    | Registration | 5 attempts | 1 hour | 1 hour |
+    | Password Reset | 3 attempts | 1 hour | 1 hour |
+    | OTP Verification | 5 attempts | 5 minutes | 10 minutes |
+    | OTP Resend | 3 attempts | 5 minutes | 10 minutes |
+    | File Uploads | 20 uploads | 1 minute | - |
+    | Messaging | 60 messages | 1 minute | - |
+    | Bank Operations | 5 requests | 5 seconds | - |
+    | General API | 100 requests | 15 minutes | - |
     
     ## Error Handling
     
@@ -168,6 +224,10 @@ info:
     | `INVALID_OTP` | Incorrect verification code |
     | `RATE_LIMITED` | Too many requests |
     | `VALIDATION_ERROR` | Invalid input data |
+    | `INSUFFICIENT_BALANCE` | Not enough wallet balance |
+    | `WALLET_LOCKED` | Wallet is locked for operations |
+    | `DAILY_LIMIT_EXCEEDED` | Exceeded daily withdrawal limit |
+    | `PAYMENT_EXISTS` | Payment already exists for booking |
     
     ## WebSocket Events
     
@@ -186,7 +246,7 @@ info:
     
     For API support: api-support@easykonect.com
     
-  version: 2.0.0
+  version: 3.0.0
   contact:
     name: EasyKonnect API Support
     email: api-support@easykonect.com

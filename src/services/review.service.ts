@@ -12,6 +12,7 @@
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { BookingStatus } from '@/constants';
+import { sanitizeBasic, validateRating } from '@/utils/security';
 
 // ==================
 // Types
@@ -79,12 +80,8 @@ const formatReviewResponse = (review: any) => ({
 export const createReview = async (userId: string, input: CreateReviewInput) => {
   const { bookingId, rating, comment } = input;
 
-  // Validate rating
-  if (rating < 1 || rating > 5) {
-    throw new GraphQLError('Rating must be between 1 and 5', {
-      extensions: { code: 'INVALID_RATING' },
-    });
-  }
+  // Validate and sanitize rating
+  const validatedRating = validateRating(rating);
 
   // Get booking
   const booking = await prisma.booking.findUnique({
@@ -125,13 +122,15 @@ export const createReview = async (userId: string, input: CreateReviewInput) => 
   }
 
   // Create review
+  const sanitizedComment = comment ? sanitizeBasic(comment) : undefined;
+  
   const review = await prisma.review.create({
     data: {
       bookingId,
       userId,
       providerId: booking.providerId,
-      rating,
-      comment,
+      rating: validatedRating,
+      comment: sanitizedComment,
     },
     include: {
       user: true,
@@ -186,11 +185,14 @@ export const respondToReview = async (providerId: string, reviewId: string, resp
     });
   }
 
+  // Sanitize response
+  const sanitizedResponse = sanitizeBasic(response.trim());
+
   // Update review with response
   const updatedReview = await prisma.review.update({
     where: { id: reviewId },
     data: {
-      response: response.trim(),
+      response: sanitizedResponse,
       respondedAt: new Date(),
     },
     include: {

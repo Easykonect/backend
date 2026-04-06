@@ -6,6 +6,7 @@
 import { GraphQLError } from 'graphql';
 import { verifyToken, type JWTPayload } from '@/lib/auth';
 import { ErrorCode, ErrorMessage, type UserRoleType, hasMinimumRole } from '@/constants';
+import { isTokenValid } from '@/utils/security';
 
 /**
  * Context type for GraphQL resolvers
@@ -17,6 +18,7 @@ export interface GraphQLContext {
 
 /**
  * Extract and verify token from request headers
+ * Also checks if token has been invalidated (e.g., after password change)
  */
 export const getAuthContext = async (
   request: Request
@@ -31,6 +33,16 @@ export const getAuthContext = async (
 
   try {
     const payload = verifyToken(token);
+    
+    // Check if token has been invalidated (e.g., password changed)
+    if (payload.iat) {
+      const tokenIsValid = await isTokenValid(payload.userId, payload.iat);
+      if (!tokenIsValid) {
+        // Token was issued before password change or session invalidation
+        return { user: null, request };
+      }
+    }
+    
     return { user: payload, request };
   } catch {
     return { user: null, request };

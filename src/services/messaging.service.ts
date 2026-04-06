@@ -13,6 +13,7 @@ import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { UserRole, ConversationType, MessageStatus, NotificationType } from '@/constants';
 import { createNotification } from './notification.service';
+import { sanitizeBasic, validateObjectId } from '@/utils/security';
 
 // ==================
 // Types
@@ -212,12 +213,14 @@ export const createOrGetConversation = async (
 
   // If initial message provided, create it
   if (initialMessage) {
+    const sanitizedInitialMessage = sanitizeBasic(initialMessage);
+    
     await prisma.message.create({
       data: {
         conversationId: conversation.id,
         senderId,
         senderRole: senderRole as any,
-        content: initialMessage,
+        content: sanitizedInitialMessage,
         status: MessageStatus.SENT as any,
         readBy: [senderId],
       },
@@ -228,7 +231,7 @@ export const createOrGetConversation = async (
       where: { id: conversation.id },
       data: {
         lastMessageAt: new Date(),
-        lastMessageText: initialMessage.substring(0, 100),
+        lastMessageText: sanitizedInitialMessage.substring(0, 100),
       },
     });
 
@@ -398,12 +401,14 @@ export const sendMessage = async (
   }
 
   // Create message
+  const sanitizedContent = sanitizeBasic(content.trim());
+  
   const message = await prisma.message.create({
     data: {
       conversationId,
       senderId,
       senderRole: senderRole as any,
-      content: content.trim(),
+      content: sanitizedContent,
       attachments,
       status: MessageStatus.SENT as any,
       readBy: [senderId],
@@ -416,7 +421,7 @@ export const sendMessage = async (
     where: { id: conversationId },
     data: {
       lastMessageAt: new Date(),
-      lastMessageText: content.trim().substring(0, 100),
+      lastMessageText: sanitizedContent.substring(0, 100),
     },
   });
 
@@ -428,7 +433,7 @@ export const sendMessage = async (
       userId: recipientId,
       type: NotificationType.NEW_MESSAGE,
       title: 'New Message',
-      message: content.trim().substring(0, 100),
+      message: sanitizedContent.substring(0, 100),
       entityType: 'conversation',
       entityId: conversationId,
     });

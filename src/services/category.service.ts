@@ -5,6 +5,7 @@
 
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
+import { sanitizeStrict, sanitizeBasic, validateName, validateText, validateUrl, MAX_LENGTHS } from '@/utils/security';
 
 // ==================
 // Types
@@ -110,14 +111,21 @@ export const getCategoryById = async (categoryId: string) => {
 export const createCategory = async (input: CreateCategoryInput) => {
   const { name, description, icon } = input;
 
+  // Sanitize and validate inputs
+  const sanitizedName = validateName(name, 'Category name');
+  const sanitizedDescription = description 
+    ? validateText(sanitizeBasic(description), 'Description', MAX_LENGTHS.MEDIUM_TEXT)
+    : undefined;
+  const sanitizedIcon = icon ? validateUrl(icon) : undefined;
+
   // Generate slug
-  const slug = generateSlug(name);
+  const slug = generateSlug(sanitizedName);
 
   // Check if category with same name or slug exists
   const existing = await prisma.serviceCategory.findFirst({
     where: {
       OR: [
-        { name: { equals: name, mode: 'insensitive' } },
+        { name: { equals: sanitizedName, mode: 'insensitive' } },
         { slug },
       ],
     },
@@ -131,10 +139,10 @@ export const createCategory = async (input: CreateCategoryInput) => {
 
   const category = await prisma.serviceCategory.create({
     data: {
-      name,
+      name: sanitizedName,
       slug,
-      description,
-      icon,
+      description: sanitizedDescription,
+      icon: sanitizedIcon,
       isActive: true,
     },
   });
@@ -156,19 +164,19 @@ export const updateCategory = async (categoryId: string, input: UpdateCategoryIn
     });
   }
 
-  // Build update data
+  // Build update data with sanitization
   const updateData: any = {};
 
   if (input.name !== undefined) {
-    updateData.name = input.name;
-    updateData.slug = generateSlug(input.name);
+    updateData.name = validateName(input.name, 'Category name');
+    updateData.slug = generateSlug(updateData.name);
 
     // Check for duplicate
     const existing = await prisma.serviceCategory.findFirst({
       where: {
         id: { not: categoryId },
         OR: [
-          { name: { equals: input.name, mode: 'insensitive' } },
+          { name: { equals: updateData.name, mode: 'insensitive' } },
           { slug: updateData.slug },
         ],
       },
@@ -181,8 +189,16 @@ export const updateCategory = async (categoryId: string, input: UpdateCategoryIn
     }
   }
 
-  if (input.description !== undefined) updateData.description = input.description;
-  if (input.icon !== undefined) updateData.icon = input.icon;
+  if (input.description !== undefined) {
+    updateData.description = validateText(
+      sanitizeBasic(input.description),
+      'Description',
+      MAX_LENGTHS.MEDIUM_TEXT
+    );
+  }
+  if (input.icon !== undefined) {
+    updateData.icon = input.icon ? validateUrl(input.icon) : null;
+  }
   if (input.isActive !== undefined) updateData.isActive = input.isActive;
 
   const updated = await prisma.serviceCategory.update({

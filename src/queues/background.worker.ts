@@ -177,11 +177,26 @@ async function processBackgroundJob(job: Job<BackgroundJobData>): Promise<void> 
       await generateAnalyticsSnapshot();
       break;
 
+    case 'UNLOCK_STALE_WALLETS':
+      await unlockStaleWallets();
+      break;
+
     default:
       console.warn(`Unknown background job type: ${jobType}`);
   }
 
   console.log(`✅ Background job ${job.id} completed`);
+}
+
+/**
+ * Unlock stale wallet locks (locks older than 1 hour)
+ * Security measure to prevent wallets being locked indefinitely
+ */
+async function unlockStaleWallets(): Promise<{ unlocked: number }> {
+  const { unlockStaleWallets: unlockWallets } = await import('@/services/wallet.service');
+  const count = await unlockWallets();
+  console.log(`🔓 Unlocked ${count} stale wallet locks`);
+  return { unlocked: count };
 }
 
 // ===========================================
@@ -233,6 +248,14 @@ export async function scheduleRecurringJobs(): Promise<void> {
     { jobType: 'ANALYTICS_SNAPSHOT' },
     '0 * * * *', // Every hour
     'analytics-snapshot'
+  );
+
+  // Unlock stale wallet locks every 15 minutes
+  await manager.addScheduledJob<BackgroundJobData>(
+    QUEUE_NAMES.BACKGROUND,
+    { jobType: 'UNLOCK_STALE_WALLETS' },
+    '*/15 * * * *', // Every 15 minutes
+    'unlock-stale-wallets'
   );
 
   console.log('📅 Recurring background jobs scheduled');

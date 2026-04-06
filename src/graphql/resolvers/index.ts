@@ -1,4 +1,5 @@
 import { uploadProviderImages, removeProviderImage } from '@/services/provider-image.service';
+import { GraphQLError } from 'graphql';
 /**
  * GraphQL Resolvers
  * Combined resolvers for the application
@@ -195,6 +196,78 @@ import {
   updatePushPreference,
 } from '@/services/push.service';
 
+import {
+  initializePayment,
+  verifyPayment,
+  processRefund,
+  getPaymentById,
+  getPaymentByBookingId,
+  getUserPayments,
+  getProviderPayments,
+  getProviderEarnings,
+  getAllPayments,
+  getPaymentStats,
+} from '@/services/payment.service';
+
+// Wallet & Bank Services (use bank.service for comprehensive bank functions)
+import {
+  getOrCreateWallet,
+  getWalletTransactions,
+  payWithWallet,
+  adjustWalletBalance,
+} from '@/services/wallet.service';
+
+import {
+  listBanks,
+  suggestBankFromAccountNumber,
+  verifyBankAccount,
+  addProviderBankAccount,
+  getProviderBankAccounts,
+  getBankAccountById,
+  setDefaultBankAccount,
+  deleteBankAccount,
+} from '@/services/bank.service';
+
+import {
+  requestWithdrawal,
+  cancelWithdrawal,
+  getProviderWithdrawals,
+  getAllWithdrawals,
+  getPendingWithdrawalsCount,
+  processWithdrawal,
+  rejectWithdrawal,
+  retryWithdrawal,
+} from '@/services/withdrawal.service';
+
+import {
+  getAllUsers,
+  getUserDetails,
+  getAllProviders,
+  banUser,
+  unbanUser,
+  restrictUser,
+  removeRestriction,
+} from '@/services/user-management.service';
+
+import {
+  getProviderEarningsReport,
+  getAdminPaymentAnalytics,
+  getRefundStats,
+} from '@/services/payment-analytics.service';
+
+import {
+  setPayoutSchedule,
+  getPayoutSchedule,
+  pausePayoutSchedule,
+  getProviderPendingEarnings,
+  getScheduledPayoutHistory,
+} from '@/services/payout.service';
+
+import {
+  getAuditLogs,
+  getAuditLogsForTarget,
+} from '@/services/audit.service';
+
 import { requireAuth, requireRole, requireAnyRole, type GraphQLContext } from '@/middleware';
 import { UserRole, ServiceStatus, type ServiceStatusType } from '@/constants';
 
@@ -239,10 +312,22 @@ export const resolvers = {
     },
 
     /**
-     * Get user by ID
+     * Get user by ID (own data only or admin)
+     * IDOR Protection: Users can only view their own profile
      */
     user: async (_: unknown, args: { id: string }, context: GraphQLContext) => {
-      requireAuth(context);
+      const currentUser = requireAuth(context);
+      
+      // Allow users to view only their own profile
+      // Admins can view any profile
+      const isAdmin = currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPER_ADMIN;
+      
+      if (!isAdmin && currentUser.userId !== args.id) {
+        throw new GraphQLError('You can only view your own profile', {
+          extensions: { code: 'FORBIDDEN' },
+        });
+      }
+      
       return getUserWithProvider(args.id);
     },
 
@@ -1045,6 +1130,568 @@ export const resolvers = {
       const user = requireAuth(context);
       return getMySettings(user.userId);
     },
+
+    // ==================
+    // Payment Queries
+    // ==================
+
+    /**
+     * Get payment by ID
+     */
+    payment: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getPaymentById(args.id, user.userId);
+    },
+
+    /**
+     * Get payment by booking ID
+     */
+    paymentByBooking: async (
+      _: unknown,
+      args: { bookingId: string },
+      context: GraphQLContext
+    ) => {
+      requireAuth(context);
+      return getPaymentByBookingId(args.bookingId);
+    },
+
+    /**
+     * Get user's payment history
+     */
+    myPayments: async (
+      _: unknown,
+      args: {
+        filters?: { status?: string; startDate?: string; endDate?: string };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getUserPayments(
+        user.userId,
+        args.filters || {},
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    /**
+     * Get provider's payment/earnings history
+     */
+    providerPayments: async (
+      _: unknown,
+      args: {
+        filters?: { status?: string; startDate?: string; endDate?: string };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      return getProviderPayments(
+        user.userId,
+        args.filters || {},
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    /**
+     * Get provider's earnings summary
+     */
+    myEarnings: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      return getProviderEarnings(user.userId);
+    },
+
+    /**
+     * Get all payments (Admin)
+     */
+    allPayments: async (
+      _: unknown,
+      args: {
+        filters?: { status?: string; startDate?: string; endDate?: string };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getAllPayments(
+        args.filters || {},
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    /**
+     * Get payment statistics (Admin)
+     */
+    paymentStats: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getPaymentStats();
+    },
+
+    /**
+     * List available banks
+     */
+    banks: async () => {
+      return listBanks();
+    },
+
+    /**
+     * Verify bank account details
+     */
+    verifyBankAccount: async (
+      _: unknown,
+      args: { accountNumber: string; bankCode: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return verifyBankAccount(user.userId, args.accountNumber, args.bankCode);
+    },
+
+    /**
+     * Suggest banks based on account number prefix
+     */
+    suggestBankFromAccountNumber: async (
+      _: unknown,
+      args: { accountNumber: string },
+      context: GraphQLContext
+    ) => {
+      requireAuth(context);
+      return suggestBankFromAccountNumber(args.accountNumber);
+    },
+
+    // ==================
+    // Wallet Queries
+    // ==================
+
+    /**
+     * Get my wallet
+     */
+    myWallet: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getOrCreateWallet(user.userId);
+    },
+
+    /**
+     * Get wallet transaction history
+     */
+    myWalletTransactions: async (
+      _: unknown,
+      args: {
+        filters?: {
+          type?: string;
+          source?: string;
+          startDate?: string;
+          endDate?: string;
+        };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getWalletTransactions(
+        user.userId,
+        args.filters as Parameters<typeof getWalletTransactions>[1],
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    // ==================
+    // Bank Account Queries (Provider)
+    // ==================
+
+    /**
+     * Get my bank accounts
+     */
+    myBankAccounts: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return getProviderBankAccounts(provider.id);
+    },
+
+    /**
+     * Get a specific bank account
+     */
+    bankAccount: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return getBankAccountById(args.id, provider.id);
+    },
+
+    // ==================
+    // Withdrawal Queries (Provider)
+    // ==================
+
+    /**
+     * Get my withdrawals
+     */
+    myWithdrawals: async (
+      _: unknown,
+      args: {
+        filters?: {
+          status?: string;
+          startDate?: string;
+          endDate?: string;
+        };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return getProviderWithdrawals(
+        provider.id,
+        args.filters as Parameters<typeof getProviderWithdrawals>[1],
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    /**
+     * Get a specific withdrawal - Note: using getProviderWithdrawals with filter
+     */
+    withdrawal: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      // Get withdrawal directly from prisma since getWithdrawalById doesn't exist
+      const withdrawal = await prisma.withdrawal.findFirst({
+        where: { id: args.id, providerId: provider.id },
+      });
+      return withdrawal;
+    },
+
+    // ==================
+    // Payout Schedule Queries (Provider)
+    // ==================
+
+    /**
+     * Get my payout schedule
+     */
+    myPayoutSchedule: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return getPayoutSchedule(provider.id);
+    },
+
+    /**
+     * Get pending earnings
+     */
+    myPendingEarnings: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return getProviderPendingEarnings(provider.id);
+    },
+
+    /**
+     * Get scheduled payouts
+     */
+    myScheduledPayouts: async (
+      _: unknown,
+      args: { pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return getScheduledPayoutHistory(
+        provider.id,
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    // ==================
+    // Payment Analytics Queries
+    // ==================
+
+    /**
+     * Get provider earnings report
+     */
+    myEarningsReport: async (
+      _: unknown,
+      args: {
+        input: {
+          period: string;
+          startDate?: string;
+          endDate?: string;
+        };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return getProviderEarningsReport(
+        provider.id,
+        args.input.period as 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'ALL_TIME',
+        args.input.startDate,
+        args.input.endDate
+      );
+    },
+
+    /**
+     * Get admin payment analytics
+     */
+    adminPaymentAnalytics: async (
+      _: unknown,
+      args: {
+        input: {
+          period: string;
+          startDate?: string;
+          endDate?: string;
+        };
+      },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getAdminPaymentAnalytics(
+        args.input as Parameters<typeof getAdminPaymentAnalytics>[0]
+      );
+    },
+
+    /**
+     * Get top earning providers - using payment analytics with filtering
+     */
+    topEarningProviders: async (
+      _: unknown,
+      args: { limit?: number; period?: string },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      // TODO: Implement getTopEarningProviders in payment-analytics.service.ts
+      // For now return empty array
+      return [];
+    },
+
+    /**
+     * Get refund statistics
+     */
+    refundStats: async (
+      _: unknown,
+      args: { period?: string },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getRefundStats(
+        args.period as Parameters<typeof getRefundStats>[0] || 'ALL_TIME'
+      );
+    },
+
+    // ==================
+    // User Management Queries (Admin)
+    // ==================
+
+    /**
+     * Get all managed users with filters
+     */
+    managedUsers: async (
+      _: unknown,
+      args: {
+        filters?: {
+          role?: string;
+          accountStatus?: string;
+          isBanned?: boolean;
+          isRestricted?: boolean;
+          searchTerm?: string;
+          startDate?: string;
+          endDate?: string;
+        };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getAllUsers(
+        args.filters as Parameters<typeof getAllUsers>[0] || {},
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    /**
+     * Get managed user details
+     */
+    managedUser: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getUserDetails(args.id);
+    },
+
+    /**
+     * Get all managed providers with filters
+     */
+    managedProviders: async (
+      _: unknown,
+      args: {
+        filters?: {
+          role?: string;
+          accountStatus?: string;
+          isBanned?: boolean;
+          isRestricted?: boolean;
+          searchTerm?: string;
+          startDate?: string;
+          endDate?: string;
+        };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getAllProviders(
+        args.filters as Parameters<typeof getAllProviders>[0] || {},
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    /**
+     * Get admin audit logs
+     */
+    auditLogs: async (
+      _: unknown,
+      args: {
+        filters?: {
+          action?: string;
+          adminId?: string;
+          targetId?: string;
+          startDate?: string;
+          endDate?: string;
+        };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getAuditLogs(
+        args.filters as Parameters<typeof getAuditLogs>[0] || {},
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    /**
+     * Get audit logs for a specific target
+     */
+    auditLogsForTarget: async (
+      _: unknown,
+      args: { targetId: string; pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return getAuditLogsForTarget(
+        admin.userId,
+        args.targetId,
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    /**
+     * Get all pending withdrawals (Admin)
+     */
+    pendingWithdrawals: async (
+      _: unknown,
+      args: { pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      // Use getAllWithdrawals with PENDING filter
+      return getAllWithdrawals(
+        { status: 'PENDING' } as Parameters<typeof getAllWithdrawals>[0],
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
+
+    /**
+     * Get all withdrawals (Admin)
+     */
+    allWithdrawals: async (
+      _: unknown,
+      args: {
+        filters?: {
+          status?: string;
+          startDate?: string;
+          endDate?: string;
+        };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getAllWithdrawals(
+        args.filters as Parameters<typeof getAllWithdrawals>[0] || {},
+        { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
+      );
+    },
   },
 
   Mutation: {
@@ -1496,6 +2143,340 @@ export const resolvers = {
     ) => {
       requireAdminAuth(context);
       return adminCancelBooking(args.id, args.reason);
+    },
+
+    // ==================
+    // Payment Mutations
+    // ==================
+
+    /**
+     * Initialize payment for a booking
+     */
+    initializePayment: async (
+      _: unknown,
+      args: { input: { bookingId: string; callbackUrl?: string } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return initializePayment(user.userId, args.input);
+    },
+
+    /**
+     * Verify payment status
+     */
+    verifyPayment: async (
+      _: unknown,
+      args: { transactionRef: string },
+      context: GraphQLContext
+    ) => {
+      requireAuth(context);
+      return verifyPayment(args.transactionRef);
+    },
+
+    /**
+     * Process refund (Admin only)
+     */
+    processRefund: async (
+      _: unknown,
+      args: { input: { paymentId: string; amount?: number; reason: string } },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return processRefund(admin.userId, args.input);
+    },
+
+    // ==================
+    // Wallet Mutations
+    // ==================
+
+    /**
+     * Pay for a booking using wallet balance
+     */
+    payWithWallet: async (
+      _: unknown,
+      args: { input: { bookingId: string } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      // Get the booking amount first
+      const booking = await prisma.booking.findUnique({
+        where: { id: args.input.bookingId },
+      });
+      if (!booking) {
+        throw new Error('Booking not found');
+      }
+      return payWithWallet(user.userId, args.input.bookingId, booking.totalAmount);
+    },
+
+    // ==================
+    // Bank Account Mutations (Provider)
+    // ==================
+
+    /**
+     * Add a bank account
+     */
+    addBankAccount: async (
+      _: unknown,
+      args: { input: { bankCode: string; accountNumber: string } },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return addProviderBankAccount(
+        provider.id,
+        args.input,
+        user.userId
+      );
+    },
+
+    /**
+     * Set default bank account
+     */
+    setDefaultBankAccount: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return setDefaultBankAccount(args.id, provider.id);
+    },
+
+    /**
+     * Remove a bank account
+     */
+    removeBankAccount: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      await deleteBankAccount(args.id, provider.id);
+      return { message: 'Bank account removed successfully' };
+    },
+
+    // ==================
+    // Withdrawal Mutations (Provider)
+    // ==================
+
+    /**
+     * Request a withdrawal
+     */
+    requestWithdrawal: async (
+      _: unknown,
+      args: { input: { amount: number; bankAccountId: string } },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return requestWithdrawal(
+        provider.id,
+        user.userId,
+        args.input
+      );
+    },
+
+    /**
+     * Cancel a pending withdrawal
+     */
+    cancelWithdrawal: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return cancelWithdrawal(args.id, provider.id, user.userId);
+    },
+
+    // ==================
+    // Payout Schedule Mutations (Provider)
+    // ==================
+
+    /**
+     * Set payout schedule
+     */
+    setPayoutSchedule: async (
+      _: unknown,
+      args: { input: { frequency: string; minimumAmount?: number } },
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      return setPayoutSchedule(
+        provider.id,
+        user.userId,
+        args.input as Parameters<typeof setPayoutSchedule>[2]
+      );
+    },
+
+    /**
+     * Disable scheduled payouts
+     */
+    disablePayoutSchedule: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const provider = await prisma.serviceProvider.findUnique({
+        where: { userId: user.userId },
+      });
+      if (!provider) {
+        throw new Error('Provider profile not found');
+      }
+      await pausePayoutSchedule(provider.id);
+      return { message: 'Payout schedule disabled' };
+    },
+
+    // ==================
+    // Withdrawal Mutations (Admin)
+    // ==================
+
+    /**
+     * Process a pending withdrawal
+     */
+    processWithdrawal: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return processWithdrawal(args.id, admin.userId, admin.role);
+    },
+
+    /**
+     * Reject a withdrawal
+     */
+    rejectWithdrawal: async (
+      _: unknown,
+      args: { id: string; reason: string },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return rejectWithdrawal(args.id, admin.userId, admin.role, args.reason);
+    },
+
+    /**
+     * Retry a failed withdrawal
+     */
+    retryWithdrawal: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return retryWithdrawal(args.id, admin.userId, admin.role);
+    },
+
+    // ==================
+    // User Management Mutations (Admin)
+    // ==================
+
+    /**
+     * Ban a user/provider
+     */
+    banUser: async (
+      _: unknown,
+      args: { input: { userId: string; reason: string; durationDays?: number } },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return banUser(
+        { userId: args.input.userId, reason: args.input.reason, days: args.input.durationDays },
+        admin.userId,
+        admin.role
+      );
+    },
+
+    /**
+     * Unban a user/provider
+     */
+    unbanUser: async (
+      _: unknown,
+      args: { userId: string },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return unbanUser(args.userId, admin.userId, admin.role);
+    },
+
+    /**
+     * Restrict a user/provider for specific days
+     */
+    restrictUser: async (
+      _: unknown,
+      args: { input: { userId: string; reason: string; durationDays: number } },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return restrictUser(
+        { userId: args.input.userId, reason: args.input.reason, days: args.input.durationDays },
+        admin.userId,
+        admin.role
+      );
+    },
+
+    /**
+     * Remove restriction from user/provider
+     */
+    removeRestriction: async (
+      _: unknown,
+      args: { userId: string },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return removeRestriction(args.userId, admin.userId, admin.role);
+    },
+
+    /**
+     * Adjust wallet balance (Admin)
+     * SECURITY: Role-based limits enforced in service
+     * - Regular Admin: max ₦100,000
+     * - Super Admin: max ₦1,000,000
+     */
+    adjustWalletBalance: async (
+      _: unknown,
+      args: { userId: string; amount: number; reason: string },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      // Determine CREDIT or DEBIT based on amount sign
+      const type = args.amount >= 0 ? 'CREDIT' : 'DEBIT';
+      const amountKobo = Math.abs(args.amount * 100); // Convert to kobo
+      // Pass admin role for limit enforcement
+      return adjustWalletBalance(args.userId, amountKobo, type, args.reason, admin.userId, admin.role);
     },
 
     // ==================

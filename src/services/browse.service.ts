@@ -14,6 +14,7 @@ import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { config } from '@/config';
 import { VerificationStatus } from '@/constants';
+import { sanitizeSearchQuery } from '@/utils/security';
 
 // ==================
 // Types
@@ -81,6 +82,7 @@ export const haversineDistance = (
 
 /**
  * Build the base Prisma WHERE clause from filters
+ * Note: All string filters are sanitized to prevent NoSQL injection
  */
 const buildWhereClause = (filters: ProviderFiltersInput = {}) => {
   const where: any = {};
@@ -91,11 +93,13 @@ const buildWhereClause = (filters: ProviderFiltersInput = {}) => {
   }
 
   if (filters.city) {
-    where.city = { equals: filters.city, mode: 'insensitive' };
+    const sanitizedCity = sanitizeSearchQuery(filters.city);
+    where.city = { equals: sanitizedCity, mode: 'insensitive' };
   }
 
   if (filters.state) {
-    where.state = { equals: filters.state, mode: 'insensitive' };
+    const sanitizedState = sanitizeSearchQuery(filters.state);
+    where.state = { equals: sanitizedState, mode: 'insensitive' };
   }
 
   if (filters.country) {

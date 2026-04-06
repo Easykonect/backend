@@ -9,6 +9,7 @@ import { ErrorCode, ErrorMessage } from '@/constants';
 import type { PaginationInput } from '@/utils/validation';
 import { generateOtp, hashOtp, verifyOtp, getOtpExpiry, isOtpExpired } from '@/lib/otp';
 import { sendProfileUpdatedEmail, sendEmailChangeOtpEmail } from '@/lib/email';
+import { sanitizeStrict, validateName, validatePhone, validateUrl, validateEmail } from '@/utils/security';
 
 /**
  * Get user by ID
@@ -108,10 +109,29 @@ export const updateUserProfile = async (
 
   // Track changed fields for notification email
   const changedFields: string[] = [];
-  if (data.firstName && data.firstName !== current.firstName) changedFields.push('First Name');
-  if (data.lastName && data.lastName !== current.lastName) changedFields.push('Last Name');
-  if (data.phone !== undefined && data.phone !== current.phone) changedFields.push('Phone Number');
-  if (data.profilePhoto !== undefined && data.profilePhoto !== current.profilePhoto) changedFields.push('Profile Photo');
+  
+  // Sanitize and validate inputs
+  let sanitizedFirstName: string | undefined;
+  let sanitizedLastName: string | undefined;
+  let sanitizedPhone: string | undefined;
+  let sanitizedProfilePhoto: string | undefined;
+  
+  if (data.firstName) {
+    sanitizedFirstName = validateName(data.firstName, 'First name');
+    if (sanitizedFirstName !== current.firstName) changedFields.push('First Name');
+  }
+  if (data.lastName) {
+    sanitizedLastName = validateName(data.lastName, 'Last name');
+    if (sanitizedLastName !== current.lastName) changedFields.push('Last Name');
+  }
+  if (data.phone !== undefined) {
+    sanitizedPhone = data.phone ? validatePhone(data.phone) : '';
+    if (sanitizedPhone !== current.phone) changedFields.push('Phone Number');
+  }
+  if (data.profilePhoto !== undefined) {
+    sanitizedProfilePhoto = data.profilePhoto ? validateUrl(data.profilePhoto) : '';
+    if (sanitizedProfilePhoto !== current.profilePhoto) changedFields.push('Profile Photo');
+  }
 
   if (changedFields.length === 0) {
     return current;
@@ -120,10 +140,10 @@ export const updateUserProfile = async (
   const user = await prisma.user.update({
     where: { id: userId },
     data: {
-      ...(data.firstName && { firstName: data.firstName }),
-      ...(data.lastName && { lastName: data.lastName }),
-      ...(data.phone !== undefined && { phone: data.phone }),
-      ...(data.profilePhoto !== undefined && { profilePhoto: data.profilePhoto }),
+      ...(sanitizedFirstName && { firstName: sanitizedFirstName }),
+      ...(sanitizedLastName && { lastName: sanitizedLastName }),
+      ...(sanitizedPhone !== undefined && { phone: sanitizedPhone }),
+      ...(sanitizedProfilePhoto !== undefined && { profilePhoto: sanitizedProfilePhoto }),
     },
     select: {
       id: true,
@@ -151,7 +171,8 @@ export const updateUserProfile = async (
  * Sends an OTP to the NEW email to confirm ownership
  */
 export const requestEmailChange = async (userId: string, newEmail: string) => {
-  const normalizedEmail = newEmail.toLowerCase().trim();
+  // Validate and sanitize email
+  const normalizedEmail = validateEmail(newEmail);
 
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) {

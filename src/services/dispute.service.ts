@@ -12,6 +12,7 @@
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { BookingStatus, DisputeStatus, DisputeResolution, UserRole } from '@/constants';
+import { sanitizeBasic, validateText, MAX_LENGTHS } from '@/utils/security';
 
 // ==================
 // Types
@@ -184,14 +185,22 @@ export const createDispute = async (
   }
 
   // Create dispute and update booking status
+  // Sanitize user inputs to prevent XSS
+  const sanitizedReason = sanitizeBasic(reason.trim());
+  const sanitizedDescription = validateText(
+    sanitizeBasic(description.trim()),
+    'Description',
+    MAX_LENGTHS.DESCRIPTION
+  );
+  
   const [dispute] = await prisma.$transaction([
     prisma.dispute.create({
       data: {
         bookingId,
         raisedById: userId,
         raisedByRole: isUser ? UserRole.SERVICE_USER : UserRole.SERVICE_PROVIDER,
-        reason: reason.trim(),
-        description: description.trim(),
+        reason: sanitizedReason,
+        description: sanitizedDescription,
         evidence,
         status: DisputeStatus.OPEN,
       },

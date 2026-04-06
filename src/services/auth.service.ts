@@ -43,6 +43,17 @@ import {
   passwordSchema,
 } from '@/utils/validation';
 import { storeRefreshToken, validateRefreshToken, invalidateRefreshToken } from './token.service';
+import { 
+  validateName, 
+  validateEmail as validateEmailSecurity, 
+  validatePhone, 
+  validatePassword as validatePasswordSecurity,
+  enforceRateLimit,
+  incrementRateLimit,
+  resetRateLimit,
+  invalidateAllUserTokens,
+  logSecurityEvent,
+} from '@/utils/security';
 
 // ==================
 // Types
@@ -139,8 +150,21 @@ export const registerUser = async (input: RegisterInput) => {
   const validatedInput = validateInput(registerUserSchema, input);
   const { email, password, firstName, lastName, phone } = validatedInput;
 
+  // Additional security validation and sanitization
+  const sanitizedEmail = validateEmailSecurity(email);
+  const sanitizedFirstName = validateName(firstName, 'First name');
+  const sanitizedLastName = validateName(lastName, 'Last name');
+  const sanitizedPhone = phone ? validatePhone(phone) : undefined;
+  
+  // Validate password strength
+  validatePasswordSecurity(password);
+
+  // Rate limiting for registration (prevent mass account creation)
+  await enforceRateLimit('REGISTER', sanitizedEmail);
+  await incrementRateLimit('REGISTER', sanitizedEmail);
+
   // Normalize email
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = sanitizedEmail.toLowerCase().trim();
 
   // Check if user already exists
   const existingUser = await prisma.user.findUnique({
@@ -162,16 +186,16 @@ export const registerUser = async (input: RegisterInput) => {
         where: { id: existingUser.id },
         data: {
           password: hashedPassword,
-          firstName,
-          lastName,
-          phone,
+          firstName: sanitizedFirstName,
+          lastName: sanitizedLastName,
+          phone: sanitizedPhone,
           emailVerifyToken: hashedOtp,
           emailVerifyExpiry: otpExpiry,
         },
       });
 
       // Send verification email
-      await sendVerificationEmail(normalizedEmail, firstName, otp);
+      await sendVerificationEmail(normalizedEmail, sanitizedFirstName, otp);
 
       return {
         success: true,
@@ -198,9 +222,9 @@ export const registerUser = async (input: RegisterInput) => {
     data: {
       email: normalizedEmail,
       password: hashedPassword,
-      firstName,
-      lastName,
-      phone,
+      firstName: sanitizedFirstName,
+      lastName: sanitizedLastName,
+      phone: sanitizedPhone,
       role: UserRole.SERVICE_USER,
       status: AccountStatus.PENDING,
       isEmailVerified: false,
@@ -210,7 +234,7 @@ export const registerUser = async (input: RegisterInput) => {
   });
 
   // Send verification email
-  const emailSent = await sendVerificationEmail(normalizedEmail, firstName, otp);
+  const emailSent = await sendVerificationEmail(normalizedEmail, sanitizedFirstName, otp);
 
   if (!emailSent) {
     console.error('Failed to send verification email to:', normalizedEmail);
@@ -230,12 +254,16 @@ export const verifyEmail = async (input: VerifyEmailInput) => {
   const { email, otp } = input;
   const normalizedEmail = email.toLowerCase().trim();
 
+  // Rate limiting for OTP verification
+  await enforceRateLimit('OTP_VERIFY', normalizedEmail);
+
   // Find user
   const user = await prisma.user.findUnique({
     where: { email: normalizedEmail },
   });
 
   if (!user) {
+    await incrementRateLimit('OTP_VERIFY', normalizedEmail);
     throw new GraphQLError(ErrorMessage[ErrorCode.USER_NOT_FOUND], {
       extensions: { code: ErrorCode.USER_NOT_FOUND },
     });
@@ -266,10 +294,18 @@ export const verifyEmail = async (input: VerifyEmailInput) => {
   const isValidOtp = verifyOtp(otp, user.emailVerifyToken);
 
   if (!isValidOtp) {
+    await incrementRateLimit('OTP_VERIFY', normalizedEmail);
+    logSecurityEvent('AUTH_FAILURE', {
+      userId: user.id,
+      reason: 'Invalid email verification OTP',
+    });
     throw new GraphQLError('Invalid verification code. Please try again.', {
       extensions: { code: 'INVALID_OTP' },
     });
   }
+
+  // Reset rate limits on success
+  await resetRateLimit('OTP_VERIFY', normalizedEmail);
 
   // Update user - mark as verified
   const updatedUser = await prisma.user.update({
@@ -320,6 +356,10 @@ export const verifyEmail = async (input: VerifyEmailInput) => {
 export const resendVerificationOtp = async (input: ResendOtpInput) => {
   const { email } = input;
   const normalizedEmail = email.toLowerCase().trim();
+
+  // Rate limiting to prevent OTP flooding
+  await enforceRateLimit('OTP_RESEND', normalizedEmail);
+  await incrementRateLimit('OTP_RESEND', normalizedEmail);
 
   // Find user
   const user = await prisma.user.findUnique({
@@ -373,12 +413,22 @@ export const loginUser = async (input: LoginInput, clientIp?: string) => {
   const { email, password } = validatedInput;
   const normalizedEmail = email.toLowerCase().trim();
 
+  // Rate limiting - check before any database operations
+  await enforceRateLimit('LOGIN', normalizedEmail);
+  
   // Find user
   const user = await prisma.user.findUnique({
     where: { email: normalizedEmail },
   });
 
   if (!user) {
+    // Increment rate limit even for non-existent users (prevent enumeration)
+    await incrementRateLimit('LOGIN', normalizedEmail);
+    logSecurityEvent('AUTH_FAILURE', { 
+      reason: 'User not found', 
+      input: { email: normalizedEmail },
+      ip: clientIp,
+    });
     throw new GraphQLError(ErrorMessage[ErrorCode.INVALID_CREDENTIALS], {
       extensions: { code: ErrorCode.INVALID_CREDENTIALS },
     });
@@ -422,6 +472,9 @@ export const loginUser = async (input: LoginInput, clientIp?: string) => {
   const isValidPassword = await comparePassword(password, user.password);
 
   if (!isValidPassword) {
+    // Increment rate limit for failed password
+    await incrementRateLimit('LOGIN', normalizedEmail);
+    
     // Increment failed login attempts
     const newFailedAttempts = user.failedLoginAttempts + 1;
     const shouldLock = newFailedAttempts >= config.security.maxLoginAttempts;
@@ -434,6 +487,12 @@ export const loginUser = async (input: LoginInput, clientIp?: string) => {
           ? new Date(Date.now() + config.security.lockoutDurationMinutes * 60 * 1000)
           : null,
       },
+    });
+
+    logSecurityEvent('AUTH_FAILURE', {
+      userId: user.id,
+      reason: 'Invalid password',
+      ip: clientIp,
     });
 
     if (shouldLock) {
@@ -451,7 +510,9 @@ export const loginUser = async (input: LoginInput, clientIp?: string) => {
     });
   }
 
-  // Reset failed attempts and update login info
+  // Reset failed attempts, rate limits, and update login info
+  await resetRateLimit('LOGIN', normalizedEmail);
+  
   await prisma.user.update({
     where: { id: user.id },
     data: {
@@ -510,6 +571,10 @@ export const forgotPassword = async (input: ForgotPasswordInput) => {
   const { email } = input;
   const normalizedEmail = email.toLowerCase().trim();
 
+  // Rate limiting to prevent abuse
+  await enforceRateLimit('PASSWORD_RESET', normalizedEmail);
+  await incrementRateLimit('PASSWORD_RESET', normalizedEmail);
+
   // Find user
   const user = await prisma.user.findUnique({
     where: { email: normalizedEmail },
@@ -562,12 +627,16 @@ export const resetPassword = async (input: ResetPasswordInput) => {
   
   const normalizedEmail = email.toLowerCase().trim();
 
+  // Rate limiting for OTP verification
+  await enforceRateLimit('OTP_VERIFY', normalizedEmail);
+
   // Find user
   const user = await prisma.user.findUnique({
     where: { email: normalizedEmail },
   });
 
   if (!user) {
+    await incrementRateLimit('OTP_VERIFY', normalizedEmail);
     throw new GraphQLError(ErrorMessage[ErrorCode.USER_NOT_FOUND], {
       extensions: { code: ErrorCode.USER_NOT_FOUND },
     });
@@ -591,10 +660,19 @@ export const resetPassword = async (input: ResetPasswordInput) => {
   const isValidOtp = verifyOtp(otp, user.passwordResetToken);
 
   if (!isValidOtp) {
+    await incrementRateLimit('OTP_VERIFY', normalizedEmail);
+    logSecurityEvent('AUTH_FAILURE', {
+      userId: user.id,
+      reason: 'Invalid password reset OTP',
+    });
     throw new GraphQLError('Invalid reset code. Please try again.', {
       extensions: { code: 'INVALID_RESET_CODE' },
     });
   }
+
+  // Reset rate limits on success
+  await resetRateLimit('OTP_VERIFY', normalizedEmail);
+  await resetRateLimit('PASSWORD_RESET', normalizedEmail);
 
   // Hash new password
   const hashedPassword = await hashPassword(newPassword);
@@ -611,6 +689,9 @@ export const resetPassword = async (input: ResetPasswordInput) => {
       lockoutUntil: null,
     },
   });
+
+  // Invalidate all existing tokens for this user (security measure)
+  await invalidateAllUserTokens(user.id);
 
   return {
     success: true,
@@ -775,9 +856,13 @@ export const changePassword = async (
     },
   });
 
+  // Invalidate all existing tokens for security
+  // This forces re-login on all devices after password change
+  await invalidateAllUserTokens(userId);
+
   return {
     success: true,
-    message: 'Password changed successfully.',
+    message: 'Password changed successfully. Please login again on all devices.',
   };
 };
 

@@ -54,7 +54,7 @@ export interface NotificationJobData {
 }
 
 export interface BackgroundJobData {
-  jobType: 'CLEANUP_OLD_NOTIFICATIONS' | 'CLEANUP_OLD_MESSAGES' | 'SEND_DAILY_DIGEST' | 'ANALYTICS_SNAPSHOT';
+  jobType: 'CLEANUP_OLD_NOTIFICATIONS' | 'CLEANUP_OLD_MESSAGES' | 'SEND_DAILY_DIGEST' | 'ANALYTICS_SNAPSHOT' | 'UNLOCK_STALE_WALLETS';
   data?: Record<string, unknown>;
 }
 

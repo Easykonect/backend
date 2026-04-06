@@ -121,6 +121,55 @@ export const typeDefs = gql`
     SUPER_ADMIN
   }
 
+  # Wallet transaction types
+  enum WalletTransactionType {
+    CREDIT
+    DEBIT
+  }
+
+  # Wallet transaction sources
+  enum WalletTransactionSource {
+    REFUND
+    BOOKING_PAYMENT
+    EARNING
+    WITHDRAWAL
+    ADMIN_ADJUSTMENT
+    PAYOUT
+  }
+
+  # Withdrawal status
+  enum WithdrawalStatus {
+    PENDING
+    PROCESSING
+    COMPLETED
+    FAILED
+    CANCELLED
+  }
+
+  # Payout frequency for providers
+  enum PayoutFrequency {
+    INSTANT
+    DAILY
+    WEEKLY
+    BIWEEKLY
+    MONTHLY
+  }
+
+  # Admin actions for audit logging
+  enum AdminAction {
+    BAN_USER
+    UNBAN_USER
+    RESTRICT_USER
+    REMOVE_RESTRICTION
+    SUSPEND_USER
+    ACTIVATE_USER
+    PROCESS_WITHDRAWAL
+    REJECT_WITHDRAWAL
+    ADJUST_WALLET
+    RESOLVE_DISPUTE
+    PROCESS_REFUND
+  }
+
   # ==================
   # Types
   # ==================
@@ -1009,6 +1058,120 @@ export const typeDefs = gql`
   }
 
   # ==================
+  # Input Types - Payments
+  # ==================
+
+  input InitializePaymentInput {
+    bookingId: ID!
+    callbackUrl: String
+  }
+
+  input RefundInput {
+    paymentId: ID!
+    amount: Float
+    reason: String!
+  }
+
+  input PaymentFiltersInput {
+    status: PaymentStatus
+    startDate: String
+    endDate: String
+  }
+
+  # ==================
+  # Input Types - Wallet & Withdrawals
+  # ==================
+
+  input WalletPaymentInput {
+    bookingId: ID!
+  }
+
+  input RequestWithdrawalInput {
+    amount: Float!
+    bankAccountId: ID!
+  }
+
+  input AddBankAccountInput {
+    bankCode: String!
+    accountNumber: String!
+  }
+
+  input SetPayoutScheduleInput {
+    frequency: PayoutFrequency!
+    minimumAmount: Float
+  }
+
+  input WalletTransactionFiltersInput {
+    type: WalletTransactionType
+    source: WalletTransactionSource
+    startDate: String
+    endDate: String
+  }
+
+  input WithdrawalFiltersInput {
+    status: WithdrawalStatus
+    startDate: String
+    endDate: String
+  }
+
+  # ==================
+  # Input Types - User Management (Admin)
+  # ==================
+
+  input BanUserInput {
+    userId: ID!
+    reason: String!
+    durationDays: Int
+  }
+
+  input RestrictUserInput {
+    userId: ID!
+    reason: String!
+    durationDays: Int!
+  }
+
+  input UserManagementFiltersInput {
+    role: UserRole
+    accountStatus: AccountStatus
+    isBanned: Boolean
+    isRestricted: Boolean
+    searchTerm: String
+    startDate: String
+    endDate: String
+  }
+
+  input AuditLogFiltersInput {
+    action: AdminAction
+    adminId: ID
+    targetId: ID
+    startDate: String
+    endDate: String
+  }
+
+  # ==================
+  # Input Types - Analytics
+  # ==================
+
+  enum AnalyticsPeriod {
+    DAILY
+    WEEKLY
+    MONTHLY
+    ALL_TIME
+  }
+
+  input EarningsReportInput {
+    period: AnalyticsPeriod!
+    startDate: String
+    endDate: String
+  }
+
+  input AdminAnalyticsInput {
+    period: AnalyticsPeriod!
+    startDate: String
+    endDate: String
+  }
+
+  # ==================
   # Input Types - File Uploads
   # ==================
 
@@ -1205,6 +1368,427 @@ export const typeDefs = gql`
     pushEnabled: Boolean!
     hasDeviceRegistered: Boolean!
     playerId: String
+  }
+
+  # ==================
+  # Payment Types
+  # ==================
+
+  # Payment initialization response
+  type PaymentInitializationResponse {
+    payment: Payment!
+    authorizationUrl: String!
+    accessCode: String!
+    reference: String!
+  }
+
+  # Payment verification response
+  type PaymentVerificationResponse {
+    payment: Payment!
+    verified: Boolean!
+    message: String!
+  }
+
+  # Payment release response
+  type PaymentReleaseResponse {
+    success: Boolean!
+    message: String!
+    payment: Payment
+  }
+
+  # Refund response
+  type RefundResponse {
+    success: Boolean!
+    message: String!
+    payment: Payment
+  }
+
+  # Extended Payment type with more details
+  type PaymentDetails {
+    id: ID!
+    bookingId: ID!
+    amount: Float!
+    commission: Float!
+    providerPayout: Float!
+    paystackFee: Float
+    status: PaymentStatus!
+    paymentMethod: String
+    transactionRef: String
+    paidAt: String
+    refundedAt: String
+    payoutAt: String
+    refundAmount: Float
+    refundReason: String
+    createdAt: String!
+    updatedAt: String!
+    booking: PaymentBookingDetails
+  }
+
+  type PaymentBookingDetails {
+    id: ID!
+    status: BookingStatus!
+    scheduledDate: String!
+    service: PaymentService
+    user: PaymentUser
+    provider: PaymentProvider
+  }
+
+  type PaymentService {
+    id: ID!
+    name: String!
+    price: Float!
+  }
+
+  type PaymentUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    email: String!
+  }
+
+  type PaymentProvider {
+    id: ID!
+    businessName: String!
+    user: PaymentProviderUser
+  }
+
+  type PaymentProviderUser {
+    id: ID!
+    firstName: String!
+    lastName: String!
+  }
+
+  # Paginated payments
+  type PaginatedPayments {
+    items: [PaymentDetails!]!
+    total: Int!
+    page: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+  }
+
+  # Payment statistics
+  type PaymentStats {
+    totalPayments: Int!
+    completedPayments: Int!
+    pendingPayments: Int!
+    failedPayments: Int!
+    refundedPayments: Int!
+    totalRevenue: Float!
+    totalCommission: Float!
+    totalProviderPayouts: Float!
+    commissionRate: Float!
+  }
+
+  # Provider earnings summary
+  type ProviderEarnings {
+    totalEarnings: Float!
+    thisMonthEarnings: Float!
+    completedJobs: Int!
+    commissionRate: Float!
+  }
+
+  # Bank information
+  type Bank {
+    id: Int!
+    name: String!
+    slug: String!
+    code: String!
+    longcode: String
+    country: String!
+    currency: String!
+    type: String!
+    active: Boolean!
+  }
+
+  # Bank account verification response
+  type BankAccountVerification {
+    accountNumber: String!
+    accountName: String!
+    bankId: Int
+  }
+
+  # Bank suggestion based on account number
+  type BankSuggestion {
+    possibleBanks: [Bank!]!
+    confidence: String!
+  }
+
+  # ==================
+  # Wallet Types
+  # ==================
+
+  # User/Provider wallet
+  type Wallet {
+    id: ID!
+    balance: Float!
+    pendingBalance: Float!
+    isLocked: Boolean!
+    lockReason: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Wallet transaction
+  type WalletTransaction {
+    id: ID!
+    type: WalletTransactionType!
+    source: WalletTransactionSource!
+    amount: Float!
+    balanceAfter: Float!
+    description: String
+    referenceId: String
+    createdAt: String!
+  }
+
+  # Paginated wallet transactions
+  type PaginatedWalletTransactions {
+    items: [WalletTransaction!]!
+    total: Int!
+    page: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+  }
+
+  # Wallet payment result
+  type WalletPaymentResult {
+    success: Boolean!
+    message: String!
+    remainingBalance: Float!
+    transaction: WalletTransaction
+  }
+
+  # ==================
+  # Provider Bank Account Types
+  # ==================
+
+  type ProviderBankAccount {
+    id: ID!
+    bankCode: String!
+    bankName: String!
+    accountNumber: String!
+    accountName: String!
+    isDefault: Boolean!
+    isVerified: Boolean!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # ==================
+  # Withdrawal Types
+  # ==================
+
+  type Withdrawal {
+    id: ID!
+    amount: Float!
+    fee: Float!
+    netAmount: Float!
+    status: WithdrawalStatus!
+    bankAccountSnapshot: BankAccountSnapshot!
+    transferCode: String
+    transferRef: String
+    failureReason: String
+    retryCount: Int!
+    processedAt: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type BankAccountSnapshot {
+    bankCode: String!
+    bankName: String!
+    accountNumber: String!
+    accountName: String!
+  }
+
+  type PaginatedWithdrawals {
+    items: [Withdrawal!]!
+    total: Int!
+    page: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+  }
+
+  type WithdrawalResult {
+    success: Boolean!
+    message: String!
+    withdrawal: Withdrawal
+  }
+
+  # ==================
+  # Payout Schedule Types
+  # ==================
+
+  type PayoutSchedule {
+    id: ID!
+    frequency: PayoutFrequency!
+    minimumAmount: Float!
+    nextPayoutDate: String
+    isActive: Boolean!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type ScheduledPayout {
+    id: ID!
+    amount: Float!
+    fee: Float!
+    netAmount: Float!
+    status: WithdrawalStatus!
+    scheduledFor: String!
+    processedAt: String
+    failureReason: String
+    createdAt: String!
+  }
+
+  type PaginatedScheduledPayouts {
+    items: [ScheduledPayout!]!
+    total: Int!
+    page: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+  }
+
+  type PendingEarnings {
+    totalPending: Float!
+    availableNow: Float!
+    pendingClearance: Float!
+    nextAvailableDate: String
+  }
+
+  # ==================
+  # Payment Analytics Types
+  # ==================
+
+  type ProviderEarningsReport {
+    period: String!
+    startDate: String!
+    endDate: String!
+    totalEarnings: Float!
+    completedJobs: Int!
+    commissionPaid: Float!
+    netEarnings: Float!
+    withdrawnAmount: Float!
+    pendingBalance: Float!
+    breakdown: [EarningsBreakdownItem!]!
+  }
+
+  type EarningsBreakdownItem {
+    date: String!
+    earnings: Float!
+    jobs: Int!
+  }
+
+  type AdminPaymentAnalytics {
+    period: String!
+    totalTransactions: Int!
+    totalVolume: Float!
+    totalCommission: Float!
+    totalRefunds: Float!
+    netRevenue: Float!
+    averageTransactionValue: Float!
+    transactionsByStatus: TransactionStatusBreakdown!
+  }
+
+  type TransactionStatusBreakdown {
+    completed: Int!
+    pending: Int!
+    failed: Int!
+    refunded: Int!
+  }
+
+  type TopEarningProvider {
+    providerId: ID!
+    businessName: String!
+    totalEarnings: Float!
+    completedJobs: Int!
+  }
+
+  type RefundStats {
+    totalRefunds: Int!
+    totalRefundAmount: Float!
+    refundRate: Float!
+    averageRefundAmount: Float!
+    refundsByReason: [RefundReasonBreakdown!]!
+  }
+
+  type RefundReasonBreakdown {
+    reason: String!
+    count: Int!
+    amount: Float!
+  }
+
+  # ==================
+  # User Management Types (Admin)
+  # ==================
+
+  type ManagedUser {
+    id: ID!
+    email: String!
+    firstName: String!
+    lastName: String!
+    phone: String
+    role: UserRole!
+    accountStatus: AccountStatus!
+    isBanned: Boolean!
+    bannedAt: String
+    bannedUntil: String
+    bannedReason: String
+    isRestricted: Boolean!
+    restrictedAt: String
+    restrictedUntil: String
+    restrictionReason: String
+    createdAt: String!
+    lastLoginAt: String
+    provider: ManagedProvider
+  }
+
+  type ManagedProvider {
+    id: ID!
+    businessName: String!
+    verificationStatus: VerificationStatus!
+    averageRating: Float
+    totalReviews: Int
+    totalServices: Int
+    totalBookings: Int
+    totalEarnings: Float
+  }
+
+  type PaginatedManagedUsers {
+    items: [ManagedUser!]!
+    total: Int!
+    page: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+  }
+
+  type UserManagementResult {
+    success: Boolean!
+    message: String!
+    user: ManagedUser
+  }
+
+  # Admin audit log
+  type AdminAuditLog {
+    id: ID!
+    adminId: ID!
+    adminEmail: String!
+    action: AdminAction!
+    targetType: String!
+    targetId: ID!
+    reason: String
+    metadata: String
+    ipAddress: String
+    userAgent: String
+    createdAt: String!
+  }
+
+  type PaginatedAuditLogs {
+    items: [AdminAuditLog!]!
+    total: Int!
+    page: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
   }
 
   # ==================
@@ -1610,6 +2194,124 @@ export const typeDefs = gql`
 
     # Get the authenticated user's account settings
     mySettings: UserSettings!
+
+    # ==================
+    # Payment Queries
+    # ==================
+
+    # Get payment by ID
+    payment(id: ID!): PaymentDetails
+
+    # Get payment by booking ID
+    paymentByBooking(bookingId: ID!): PaymentDetails
+
+    # Get user's payment history
+    myPayments(filters: PaymentFiltersInput, pagination: PaginationInput): PaginatedPayments!
+
+    # Get provider's payment/earnings history
+    providerPayments(filters: PaymentFiltersInput, pagination: PaginationInput): PaginatedPayments!
+
+    # Get provider's earnings summary
+    myEarnings: ProviderEarnings!
+
+    # Get all payments (Admin)
+    allPayments(filters: PaymentFiltersInput, pagination: PaginationInput): PaginatedPayments!
+
+    # Get payment statistics (Admin)
+    paymentStats: PaymentStats!
+
+    # List available banks for payout
+    banks: [Bank!]!
+
+    # Verify bank account details
+    verifyBankAccount(accountNumber: String!, bankCode: String!): BankAccountVerification!
+
+    # Suggest banks based on account number prefix
+    suggestBankFromAccountNumber(accountNumber: String!): BankSuggestion!
+
+    # ==================
+    # Wallet Queries
+    # ==================
+
+    # Get my wallet (User or Provider)
+    myWallet: Wallet!
+
+    # Get wallet transaction history
+    myWalletTransactions(filters: WalletTransactionFiltersInput, pagination: PaginationInput): PaginatedWalletTransactions!
+
+    # ==================
+    # Bank Account Queries (Provider)
+    # ==================
+
+    # Get my bank accounts
+    myBankAccounts: [ProviderBankAccount!]!
+
+    # Get a specific bank account
+    bankAccount(id: ID!): ProviderBankAccount
+
+    # ==================
+    # Withdrawal Queries (Provider)
+    # ==================
+
+    # Get my withdrawals
+    myWithdrawals(filters: WithdrawalFiltersInput, pagination: PaginationInput): PaginatedWithdrawals!
+
+    # Get a specific withdrawal
+    withdrawal(id: ID!): Withdrawal
+
+    # ==================
+    # Payout Schedule Queries (Provider)
+    # ==================
+
+    # Get my payout schedule
+    myPayoutSchedule: PayoutSchedule
+
+    # Get pending earnings
+    myPendingEarnings: PendingEarnings!
+
+    # Get scheduled payouts
+    myScheduledPayouts(pagination: PaginationInput): PaginatedScheduledPayouts!
+
+    # ==================
+    # Payment Analytics Queries
+    # ==================
+
+    # Get provider earnings report (Provider)
+    myEarningsReport(input: EarningsReportInput!): ProviderEarningsReport!
+
+    # Get admin payment analytics (Admin)
+    adminPaymentAnalytics(input: AdminAnalyticsInput!): AdminPaymentAnalytics!
+
+    # Get top earning providers (Admin)
+    topEarningProviders(limit: Int, period: AnalyticsPeriod): [TopEarningProvider!]!
+
+    # Get refund statistics (Admin)
+    refundStats(period: AnalyticsPeriod): RefundStats!
+
+    # ==================
+    # User Management Queries (Admin)
+    # ==================
+
+    # Get all managed users with filters
+    managedUsers(filters: UserManagementFiltersInput, pagination: PaginationInput): PaginatedManagedUsers!
+
+    # Get managed user details
+    managedUser(id: ID!): ManagedUser
+
+    # Get all managed providers with filters
+    managedProviders(filters: UserManagementFiltersInput, pagination: PaginationInput): PaginatedManagedUsers!
+
+    # Get admin audit logs
+    auditLogs(filters: AuditLogFiltersInput, pagination: PaginationInput): PaginatedAuditLogs!
+
+    # Get audit logs for a specific target
+    auditLogsForTarget(targetId: ID!, pagination: PaginationInput): PaginatedAuditLogs!
+
+    # Get all pending withdrawals (Admin)
+    pendingWithdrawals(pagination: PaginationInput): PaginatedWithdrawals!
+
+    # Get all withdrawals (Admin)
+    allWithdrawals(filters: WithdrawalFiltersInput, pagination: PaginationInput): PaginatedWithdrawals!
   }
 
   # ==================
@@ -1726,6 +2428,91 @@ export const typeDefs = gql`
     
     # Admin cancel any booking
     adminCancelBooking(id: ID!, reason: String!): Booking!
+
+    # ==================
+    # Payment Mutations
+    # ==================
+
+    # Initialize payment for a booking (User)
+    initializePayment(input: InitializePaymentInput!): PaymentInitializationResponse!
+
+    # Verify payment status (User)
+    verifyPayment(transactionRef: String!): PaymentVerificationResponse!
+
+    # Process refund (Admin)
+    processRefund(input: RefundInput!): RefundResponse!
+
+    # ==================
+    # Wallet Mutations
+    # ==================
+
+    # Pay for a booking using wallet balance (User)
+    payWithWallet(input: WalletPaymentInput!): WalletPaymentResult!
+
+    # ==================
+    # Bank Account Mutations (Provider)
+    # ==================
+
+    # Add a bank account
+    addBankAccount(input: AddBankAccountInput!): ProviderBankAccount!
+
+    # Set default bank account
+    setDefaultBankAccount(id: ID!): ProviderBankAccount!
+
+    # Remove a bank account
+    removeBankAccount(id: ID!): MessageResponse!
+
+    # ==================
+    # Withdrawal Mutations (Provider)
+    # ==================
+
+    # Request a withdrawal
+    requestWithdrawal(input: RequestWithdrawalInput!): WithdrawalResult!
+
+    # Cancel a pending withdrawal
+    cancelWithdrawal(id: ID!): MessageResponse!
+
+    # ==================
+    # Payout Schedule Mutations (Provider)
+    # ==================
+
+    # Set payout schedule
+    setPayoutSchedule(input: SetPayoutScheduleInput!): PayoutSchedule!
+
+    # Disable scheduled payouts
+    disablePayoutSchedule: MessageResponse!
+
+    # ==================
+    # Withdrawal Mutations (Admin)
+    # ==================
+
+    # Process a pending withdrawal (Admin)
+    processWithdrawal(id: ID!): WithdrawalResult!
+
+    # Reject a withdrawal (Admin)
+    rejectWithdrawal(id: ID!, reason: String!): WithdrawalResult!
+
+    # Retry a failed withdrawal (Admin)
+    retryWithdrawal(id: ID!): WithdrawalResult!
+
+    # ==================
+    # User Management Mutations (Admin)
+    # ==================
+
+    # Ban a user/provider
+    banUser(input: BanUserInput!): UserManagementResult!
+
+    # Unban a user/provider
+    unbanUser(userId: ID!): UserManagementResult!
+
+    # Restrict a user/provider for specific days
+    restrictUser(input: RestrictUserInput!): UserManagementResult!
+
+    # Remove restriction from user/provider
+    removeRestriction(userId: ID!): UserManagementResult!
+
+    # Adjust wallet balance (Admin)
+    adjustWalletBalance(userId: ID!, amount: Float!, reason: String!): Wallet!
 
     # ==================
     # Review Management

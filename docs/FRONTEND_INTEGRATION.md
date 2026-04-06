@@ -44,13 +44,17 @@ This API uses **GraphQL** over HTTP POST requests. All requests go to a single e
 | **Provider Gallery Images** | ✅ Complete | Upload/Remove provider portfolio images |
 | **Provider Documents** | ✅ Complete | Upload/Remove verification documents |
 | **Provider Likes** | ✅ Complete | Like/Unlike/Toggle, like count, liked list |
+| **Geolocation/Maps** | ✅ Complete | Nearby providers, distance calculation, Places autocomplete |
 
 ### 🔜 Coming Soon
 
 | Feature | Status |
 |---------|--------|
-| Payment Integration (Paystack) | 🔜 In Progress |
-| Geolocation Search | 🔜 Planned |
+| Payment Integration (Paystack) | ✅ Complete |
+| Wallet System | ✅ Complete |
+| Bank Account Management | ✅ Complete |
+| Withdrawal System | ✅ Complete |
+| Scheduled Payouts | ✅ Complete |
 
 ---
 
@@ -58,25 +62,52 @@ This API uses **GraphQL** over HTTP POST requests. All requests go to a single e
 
 ### Rate Limits
 
-| Operation | Limit | Window |
-|-----------|-------|--------|
-| General API | 100 requests | 15 minutes |
-| Login | 10 attempts | 15 minutes |
-| Authentication | 5 attempts | 1 minute |
-| OTP Verification | 5 attempts | 5 minutes |
-| Password Reset | 3 attempts | 1 hour |
-| File Uploads | 20 uploads | 1 minute |
-| Messaging | 60 messages | 1 minute |
+| Operation | Limit | Window | Block Duration |
+|-----------|-------|--------|----------------|
+| Login | 5 attempts | 5 minutes | 15 minutes |
+| Registration | 5 attempts | 1 hour | 1 hour |
+| OTP Verification | 5 attempts | 5 minutes | 10 minutes |
+| OTP Resend | 3 attempts | 5 minutes | 10 minutes |
+| Password Reset | 3 attempts | 1 hour | 1 hour |
+| File Uploads | 20 uploads | 1 minute | - |
+| Messaging | 60 messages | 1 minute | - |
+| Bank Operations | 5 requests | 5 seconds | - |
+| General API | 100 requests | 15 minutes | - |
 
 ### Security Features
 
 - 🔒 **Password Hashing**: bcrypt with 12 salt rounds
 - 🔒 **OTP Security**: SHA-256 hashing with timing-safe comparison
 - 🔒 **JWT Tokens**: Access (7d) + Refresh (30d) with blacklisting
-- 🔒 **Account Lockout**: 5 failed attempts = 30-minute lockout
+- 🔒 **Token Invalidation**: All tokens invalidated on password change/reset
+- 🔒 **Account Lockout**: 5 failed login attempts = 15-minute lockout
+- 🔒 **XSS Prevention**: All user inputs sanitized before storage
+- 🔒 **NoSQL Injection Protection**: Search queries sanitized against injection
+- 🔒 **IDOR Protection**: Users can only access their own resources
 - 🔒 **Query Depth Limit**: Maximum 10 levels (prevents DoS)
 - 🔒 **Request Size Limit**: 1MB maximum body size
+- 🔒 **Webhook Security**: Signature verification + IP whitelisting
+- 🔒 **Distributed Locking**: Redis locks for wallet operations
 - 🔒 **Introspection**: Disabled in production
+
+### Token Invalidation Behavior
+
+When a user changes or resets their password:
+1. All existing tokens (access + refresh) are immediately invalidated
+2. User must re-login on ALL devices
+3. API calls with old tokens return `UNAUTHENTICATED` error
+
+**Frontend handling:**
+```javascript
+// Handle token invalidation in your GraphQL client
+if (error.extensions?.code === 'UNAUTHENTICATED') {
+  // Clear stored tokens
+  localStorage.removeItem('accessToken');
+  localStorage.removeItem('refreshToken');
+  // Redirect to login
+  router.push('/login');
+}
+```
 
 ---
 
@@ -3058,6 +3089,1185 @@ const login = async (email, password) => {
 
 ---
 
+# Payment APIs
+
+These APIs handle payment processing, wallet management, bank accounts, and withdrawals. Integration uses Paystack as the payment gateway.
+
+## Payment System Overview
+
+| Component | Description |
+|-----------|-------------|
+| **Payments** | User pays for booking via Paystack or Wallet |
+| **Wallet** | User/Provider balance for quick payments & earnings |
+| **Bank Accounts** | Provider's bank accounts for withdrawals |
+| **Withdrawals** | Provider requests payout to bank account |
+| **Scheduled Payouts** | Automatic payouts based on schedule |
+
+### Payment Flow
+
+```
+1. User creates booking → PENDING
+2. Provider accepts booking → ACCEPTED
+3. User pays (Paystack or Wallet) → Payment COMPLETED, Booking ACCEPTED
+4. Provider completes service → Booking COMPLETED
+5. Funds released to provider wallet
+6. Provider requests withdrawal → Funds transferred to bank
+```
+
+### Commission Structure
+
+- **Platform Commission**: 10% of service price
+- **Paystack Fee**: ~1.5% + ₦100 (deducted from payment)
+- **Withdrawal Fee**: ₦50 per withdrawal
+
+---
+
+## 1. Initialize Payment
+
+**What this API does:** Starts the payment process for a booking. Returns a Paystack authorization URL that the user should be redirected to for payment. The booking must be in ACCEPTED status.
+
+**What it returns:** Returns `PaymentInitializationResponse` containing the payment record, Paystack authorization URL, access code, and transaction reference.
+
+### Request
+
+```graphql
+mutation InitializePayment($input: InitializePaymentInput!) {
+  initializePayment(input: $input) {
+    payment {
+      id
+      amount
+      commission
+      providerPayout
+      status
+      transactionRef
+    }
+    authorizationUrl
+    accessCode
+    reference
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "bookingId": "507f1f77bcf86cd799439012",
+    "callbackUrl": "https://yourapp.com/payment/callback"
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "initializePayment": {
+      "payment": {
+        "id": "507f1f77bcf86cd799439020",
+        "amount": 15000,
+        "commission": 1500,
+        "providerPayout": 13500,
+        "status": "PENDING",
+        "transactionRef": "PAY_abc123xyz"
+      },
+      "authorizationUrl": "https://checkout.paystack.com/abc123xyz",
+      "accessCode": "abc123xyz",
+      "reference": "PAY_abc123xyz"
+    }
+  }
+}
+```
+
+### Frontend Integration
+
+```javascript
+// Initialize payment
+const { data } = await initializePayment({ bookingId });
+
+// Redirect to Paystack checkout
+window.location.href = data.initializePayment.authorizationUrl;
+
+// OR use Paystack Inline (recommended)
+const handler = PaystackPop.setup({
+  key: 'pk_live_xxxxx', // Your Paystack public key
+  email: user.email,
+  amount: payment.amount * 100, // Paystack uses kobo
+  ref: data.initializePayment.reference,
+  callback: (response) => {
+    // Verify payment
+    verifyPayment(response.reference);
+  },
+  onClose: () => {
+    console.log('Payment cancelled');
+  }
+});
+handler.openIframe();
+```
+
+### Error Responses
+
+**Booking Not Found**
+```json
+{
+  "errors": [{ "message": "Booking not found", "extensions": { "code": "BOOKING_NOT_FOUND" } }]
+}
+```
+
+**Booking Not Accepted**
+```json
+{
+  "errors": [{ "message": "Cannot pay for booking in current status", "extensions": { "code": "INVALID_BOOKING_STATUS" } }]
+}
+```
+
+**Payment Already Exists**
+```json
+{
+  "errors": [{ "message": "Payment already exists for this booking", "extensions": { "code": "PAYMENT_EXISTS" } }]
+}
+```
+
+---
+
+## 2. Verify Payment
+
+**What this API does:** Verifies a payment after Paystack callback. Should be called after user returns from Paystack checkout or from your callback URL. Updates payment status based on Paystack verification.
+
+**What it returns:** Returns `PaymentVerificationResponse` with the updated payment, verification status, and message.
+
+### Request
+
+```graphql
+mutation VerifyPayment($transactionRef: String!) {
+  verifyPayment(transactionRef: $transactionRef) {
+    payment {
+      id
+      amount
+      status
+      paidAt
+    }
+    verified
+    message
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "transactionRef": "PAY_abc123xyz"
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "verifyPayment": {
+      "payment": {
+        "id": "507f1f77bcf86cd799439020",
+        "amount": 15000,
+        "status": "COMPLETED",
+        "paidAt": "2026-04-06T14:30:00.000Z"
+      },
+      "verified": true,
+      "message": "Payment verified successfully"
+    }
+  }
+}
+```
+
+### Failed Verification
+
+```json
+{
+  "data": {
+    "verifyPayment": {
+      "payment": {
+        "id": "507f1f77bcf86cd799439020",
+        "amount": 15000,
+        "status": "FAILED",
+        "paidAt": null
+      },
+      "verified": false,
+      "message": "Payment verification failed"
+    }
+  }
+}
+```
+
+---
+
+## 3. Pay with Wallet
+
+**What this API does:** Pays for a booking using the user's wallet balance. The user must have sufficient balance. Instantly completes payment without external redirect.
+
+**What it returns:** Returns `WalletPaymentResult` with success status, remaining balance, and transaction details.
+
+### Request
+
+```graphql
+mutation PayWithWallet($input: WalletPaymentInput!) {
+  payWithWallet(input: $input) {
+    success
+    message
+    remainingBalance
+    transaction {
+      id
+      type
+      amount
+      balanceAfter
+      description
+    }
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "bookingId": "507f1f77bcf86cd799439012"
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "payWithWallet": {
+      "success": true,
+      "message": "Payment completed successfully",
+      "remainingBalance": 35000,
+      "transaction": {
+        "id": "507f1f77bcf86cd799439025",
+        "type": "DEBIT",
+        "amount": 15000,
+        "balanceAfter": 35000,
+        "description": "Payment for booking #507f1f77bcf86cd799439012"
+      }
+    }
+  }
+}
+```
+
+### Error Responses
+
+**Insufficient Balance**
+```json
+{
+  "errors": [{ "message": "Insufficient wallet balance", "extensions": { "code": "INSUFFICIENT_BALANCE" } }]
+}
+```
+
+**Wallet Locked**
+```json
+{
+  "errors": [{ "message": "Your wallet is currently locked. Please contact support.", "extensions": { "code": "WALLET_LOCKED" } }]
+}
+```
+
+---
+
+## 4. Get My Wallet
+
+**What this API does:** Retrieves the authenticated user's wallet information including balance, pending balance, and lock status.
+
+**What it returns:** Returns `Wallet` object with current balance details.
+
+### Request
+
+```graphql
+query MyWallet {
+  myWallet {
+    id
+    balance
+    pendingBalance
+    isLocked
+    lockReason
+    createdAt
+    updatedAt
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "myWallet": {
+      "id": "507f1f77bcf86cd799439030",
+      "balance": 50000,
+      "pendingBalance": 15000,
+      "isLocked": false,
+      "lockReason": null,
+      "createdAt": "2026-03-01T00:00:00.000Z",
+      "updatedAt": "2026-04-06T14:30:00.000Z"
+    }
+  }
+}
+```
+
+---
+
+## 5. Get Wallet Transactions
+
+**What this API does:** Retrieves the user's wallet transaction history with optional filters for transaction type, source, and date range.
+
+**What it returns:** Returns `PaginatedWalletTransactions` with transaction list and pagination info.
+
+### Request
+
+```graphql
+query MyWalletTransactions($filters: WalletTransactionFiltersInput, $pagination: PaginationInput) {
+  myWalletTransactions(filters: $filters, pagination: $pagination) {
+    items {
+      id
+      type
+      source
+      amount
+      balanceAfter
+      description
+      referenceId
+      createdAt
+    }
+    total
+    page
+    totalPages
+    hasNextPage
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "filters": {
+    "type": "CREDIT",
+    "startDate": "2026-04-01",
+    "endDate": "2026-04-30"
+  },
+  "pagination": {
+    "page": 1,
+    "limit": 20
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "myWalletTransactions": {
+      "items": [
+        {
+          "id": "507f1f77bcf86cd799439025",
+          "type": "CREDIT",
+          "source": "BOOKING_PAYMENT",
+          "amount": 13500,
+          "balanceAfter": 50000,
+          "description": "Earnings from booking #507f1f77bcf86cd799439012",
+          "referenceId": "507f1f77bcf86cd799439012",
+          "createdAt": "2026-04-06T14:30:00.000Z"
+        }
+      ],
+      "total": 15,
+      "page": 1,
+      "totalPages": 1,
+      "hasNextPage": false
+    }
+  }
+}
+```
+
+### Transaction Types
+
+| Type | Description |
+|------|-------------|
+| `CREDIT` | Money added to wallet |
+| `DEBIT` | Money removed from wallet |
+
+### Transaction Sources
+
+| Source | Description |
+|--------|-------------|
+| `BOOKING_PAYMENT` | User paid for a booking |
+| `BOOKING_EARNING` | Provider earned from completed booking |
+| `WITHDRAWAL` | Provider withdrew to bank |
+| `REFUND` | Refund from cancelled booking |
+| `ADMIN_ADJUSTMENT` | Admin adjusted balance |
+
+---
+
+# Bank Account APIs (Provider)
+
+These APIs allow service providers to manage their bank accounts for receiving withdrawals.
+
+---
+
+## 1. List Available Banks
+
+**What this API does:** Retrieves list of all Nigerian banks supported by Paystack.
+
+**What it returns:** Returns array of `Bank` objects with bank details.
+
+### Request
+
+```graphql
+query ListBanks {
+  banks {
+    id
+    name
+    code
+    slug
+    country
+    currency
+    active
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "banks": [
+      {
+        "id": 1,
+        "name": "Access Bank",
+        "code": "044",
+        "slug": "access-bank",
+        "country": "Nigeria",
+        "currency": "NGN",
+        "active": true
+      },
+      {
+        "id": 2,
+        "name": "First Bank of Nigeria",
+        "code": "011",
+        "slug": "first-bank-of-nigeria",
+        "country": "Nigeria",
+        "currency": "NGN",
+        "active": true
+      }
+    ]
+  }
+}
+```
+
+---
+
+## 2. Verify Bank Account
+
+**What this API does:** Verifies a bank account number with Paystack to get the account holder's name before adding.
+
+**What it returns:** Returns `BankAccountVerification` with account number and name.
+
+### Request
+
+```graphql
+query VerifyBankAccount($accountNumber: String!, $bankCode: String!) {
+  verifyBankAccount(accountNumber: $accountNumber, bankCode: $bankCode) {
+    accountNumber
+    accountName
+    bankId
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "accountNumber": "0123456789",
+  "bankCode": "044"
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "verifyBankAccount": {
+      "accountNumber": "0123456789",
+      "accountName": "JOHN DOE SMITH",
+      "bankId": 1
+    }
+  }
+}
+```
+
+### Error Response
+
+**Invalid Account**
+```json
+{
+  "errors": [{ "message": "Could not verify account. Please check the account number and bank.", "extensions": { "code": "ACCOUNT_VERIFICATION_FAILED" } }]
+}
+```
+
+---
+
+## 3. Add Bank Account
+
+**What this API does:** Adds a verified bank account to the provider's profile for receiving withdrawals.
+
+**What it returns:** Returns the created `ProviderBankAccount`.
+
+### Request
+
+```graphql
+mutation AddBankAccount($input: AddBankAccountInput!) {
+  addBankAccount(input: $input) {
+    id
+    bankCode
+    bankName
+    accountNumber
+    accountName
+    isDefault
+    isVerified
+    createdAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "bankCode": "044",
+    "accountNumber": "0123456789"
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "addBankAccount": {
+      "id": "507f1f77bcf86cd799439035",
+      "bankCode": "044",
+      "bankName": "Access Bank",
+      "accountNumber": "0123456789",
+      "accountName": "JOHN DOE SMITH",
+      "isDefault": true,
+      "isVerified": true,
+      "createdAt": "2026-04-06T15:00:00.000Z"
+    }
+  }
+}
+```
+
+---
+
+## 4. Get My Bank Accounts
+
+**What this API does:** Retrieves all bank accounts linked to the provider's profile.
+
+**What it returns:** Returns array of `ProviderBankAccount` objects.
+
+### Request
+
+```graphql
+query MyBankAccounts {
+  myBankAccounts {
+    id
+    bankCode
+    bankName
+    accountNumber
+    accountName
+    isDefault
+    isVerified
+    createdAt
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "myBankAccounts": [
+      {
+        "id": "507f1f77bcf86cd799439035",
+        "bankCode": "044",
+        "bankName": "Access Bank",
+        "accountNumber": "0123456789",
+        "accountName": "JOHN DOE SMITH",
+        "isDefault": true,
+        "isVerified": true,
+        "createdAt": "2026-04-06T15:00:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+---
+
+## 5. Set Default Bank Account
+
+**What this API does:** Sets a bank account as the default for receiving withdrawals.
+
+**What it returns:** Returns the updated `ProviderBankAccount`.
+
+### Request
+
+```graphql
+mutation SetDefaultBankAccount($id: ID!) {
+  setDefaultBankAccount(id: $id) {
+    id
+    isDefault
+  }
+}
+```
+
+---
+
+## 6. Remove Bank Account
+
+**What this API does:** Removes a bank account from the provider's profile.
+
+**What it returns:** Returns `MessageResponse` with success status.
+
+### Request
+
+```graphql
+mutation RemoveBankAccount($id: ID!) {
+  removeBankAccount(id: $id) {
+    success
+    message
+  }
+}
+```
+
+---
+
+# Withdrawal APIs (Provider)
+
+These APIs allow service providers to withdraw earnings from their wallet to their bank accounts.
+
+---
+
+## 1. Request Withdrawal
+
+**What this API does:** Initiates a withdrawal from the provider's wallet to their bank account. Withdrawal is processed within 24 hours.
+
+**What it returns:** Returns `WithdrawalResult` with withdrawal details.
+
+### Request
+
+```graphql
+mutation RequestWithdrawal($input: RequestWithdrawalInput!) {
+  requestWithdrawal(input: $input) {
+    success
+    message
+    withdrawal {
+      id
+      amount
+      fee
+      netAmount
+      status
+      bankAccountSnapshot {
+        bankName
+        accountNumber
+        accountName
+      }
+      createdAt
+    }
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "amount": 25000,
+    "bankAccountId": "507f1f77bcf86cd799439035"
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "requestWithdrawal": {
+      "success": true,
+      "message": "Withdrawal request submitted successfully",
+      "withdrawal": {
+        "id": "507f1f77bcf86cd799439040",
+        "amount": 25000,
+        "fee": 50,
+        "netAmount": 24950,
+        "status": "PENDING",
+        "bankAccountSnapshot": {
+          "bankName": "Access Bank",
+          "accountNumber": "0123456789",
+          "accountName": "JOHN DOE SMITH"
+        },
+        "createdAt": "2026-04-06T16:00:00.000Z"
+      }
+    }
+  }
+}
+```
+
+### Error Responses
+
+**Insufficient Balance**
+```json
+{
+  "errors": [{ "message": "Insufficient balance for withdrawal", "extensions": { "code": "INSUFFICIENT_BALANCE" } }]
+}
+```
+
+**Minimum Amount**
+```json
+{
+  "errors": [{ "message": "Minimum withdrawal amount is ₦100", "extensions": { "code": "MINIMUM_AMOUNT" } }]
+}
+```
+
+**Daily Limit Exceeded**
+```json
+{
+  "errors": [{ "message": "Daily withdrawal limit of ₦5,000,000 exceeded", "extensions": { "code": "DAILY_LIMIT_EXCEEDED" } }]
+}
+```
+
+---
+
+## 2. Get My Withdrawals
+
+**What this API does:** Retrieves the provider's withdrawal history with optional filters.
+
+**What it returns:** Returns `PaginatedWithdrawals` with withdrawal list.
+
+### Request
+
+```graphql
+query MyWithdrawals($filters: WithdrawalFiltersInput, $pagination: PaginationInput) {
+  myWithdrawals(filters: $filters, pagination: $pagination) {
+    items {
+      id
+      amount
+      fee
+      netAmount
+      status
+      bankAccountSnapshot {
+        bankName
+        accountNumber
+      }
+      processedAt
+      failureReason
+      createdAt
+    }
+    total
+    page
+    totalPages
+    hasNextPage
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "filters": {
+    "status": "COMPLETED"
+  },
+  "pagination": {
+    "page": 1,
+    "limit": 10
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "myWithdrawals": {
+      "items": [
+        {
+          "id": "507f1f77bcf86cd799439040",
+          "amount": 25000,
+          "fee": 50,
+          "netAmount": 24950,
+          "status": "COMPLETED",
+          "bankAccountSnapshot": {
+            "bankName": "Access Bank",
+            "accountNumber": "0123456789"
+          },
+          "processedAt": "2026-04-06T18:00:00.000Z",
+          "failureReason": null,
+          "createdAt": "2026-04-06T16:00:00.000Z"
+        }
+      ],
+      "total": 5,
+      "page": 1,
+      "totalPages": 1,
+      "hasNextPage": false
+    }
+  }
+}
+```
+
+### Withdrawal Statuses
+
+| Status | Description |
+|--------|-------------|
+| `PENDING` | Withdrawal requested, awaiting processing |
+| `PROCESSING` | Transfer initiated with Paystack |
+| `COMPLETED` | Successfully transferred to bank |
+| `FAILED` | Transfer failed, funds returned to wallet |
+| `CANCELLED` | Cancelled by provider before processing |
+
+---
+
+## 3. Cancel Withdrawal
+
+**What this API does:** Cancels a pending withdrawal request. Only pending withdrawals can be cancelled.
+
+**What it returns:** Returns `MessageResponse` with success status.
+
+### Request
+
+```graphql
+mutation CancelWithdrawal($id: ID!) {
+  cancelWithdrawal(id: $id) {
+    success
+    message
+  }
+}
+```
+
+### Error Response
+
+**Cannot Cancel**
+```json
+{
+  "errors": [{ "message": "Only pending withdrawals can be cancelled", "extensions": { "code": "INVALID_STATUS" } }]
+}
+```
+
+---
+
+# Payout Schedule APIs (Provider)
+
+These APIs allow providers to set up automatic scheduled payouts.
+
+---
+
+## 1. Set Payout Schedule
+
+**What this API does:** Configures automatic payouts based on a schedule.
+
+**What it returns:** Returns the created/updated `PayoutSchedule`.
+
+### Request
+
+```graphql
+mutation SetPayoutSchedule($input: SetPayoutScheduleInput!) {
+  setPayoutSchedule(input: $input) {
+    id
+    frequency
+    minimumAmount
+    nextPayoutDate
+    isActive
+    createdAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "frequency": "WEEKLY",
+    "minimumAmount": 10000
+  }
+}
+```
+
+### Payout Frequencies
+
+| Frequency | Description |
+|-----------|-------------|
+| `DAILY` | Every day at midnight |
+| `WEEKLY` | Every Monday at midnight |
+| `BIWEEKLY` | Every other Monday |
+| `MONTHLY` | 1st of each month |
+
+---
+
+## 2. Get My Payout Schedule
+
+**What this API does:** Retrieves the provider's current payout schedule.
+
+### Request
+
+```graphql
+query MyPayoutSchedule {
+  myPayoutSchedule {
+    id
+    frequency
+    minimumAmount
+    nextPayoutDate
+    isActive
+  }
+}
+```
+
+---
+
+## 3. Disable Payout Schedule
+
+**What this API does:** Disables automatic payouts.
+
+### Request
+
+```graphql
+mutation DisablePayoutSchedule {
+  disablePayoutSchedule {
+    success
+    message
+  }
+}
+```
+
+---
+
+## 4. Get Pending Earnings
+
+**What this API does:** Shows provider's pending earnings that are awaiting clearance.
+
+### Request
+
+```graphql
+query MyPendingEarnings {
+  myPendingEarnings {
+    totalPending
+    availableNow
+    pendingClearance
+    nextAvailableDate
+  }
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "data": {
+    "myPendingEarnings": {
+      "totalPending": 45000,
+      "availableNow": 30000,
+      "pendingClearance": 15000,
+      "nextAvailableDate": "2026-04-08T00:00:00.000Z"
+    }
+  }
+}
+```
+
+---
+
+# Payment APIs (Admin)
+
+These APIs are for admin management of payments, refunds, and withdrawals.
+
+---
+
+## 1. Get All Payments
+
+**What this API does:** Retrieves all platform payments with filters.
+
+### Request
+
+```graphql
+query AllPayments($filters: PaymentFiltersInput, $pagination: PaginationInput) {
+  allPayments(filters: $filters, pagination: $pagination) {
+    items {
+      id
+      amount
+      commission
+      providerPayout
+      status
+      transactionRef
+      paidAt
+      booking {
+        id
+        status
+        user { firstName lastName }
+        provider { businessName }
+      }
+    }
+    total
+    page
+    totalPages
+  }
+}
+```
+
+---
+
+## 2. Get Payment Statistics
+
+**What this API does:** Retrieves platform-wide payment statistics.
+
+### Request
+
+```graphql
+query PaymentStats {
+  paymentStats {
+    totalPayments
+    completedPayments
+    pendingPayments
+    failedPayments
+    refundedPayments
+    totalRevenue
+    totalCommission
+    totalProviderPayouts
+    commissionRate
+  }
+}
+```
+
+---
+
+## 3. Process Refund
+
+**What this API does:** Processes a refund for a completed payment.
+
+### Request
+
+```graphql
+mutation ProcessRefund($input: RefundInput!) {
+  processRefund(input: $input) {
+    success
+    message
+    payment {
+      id
+      status
+      refundAmount
+      refundedAt
+    }
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "input": {
+    "paymentId": "507f1f77bcf86cd799439020",
+    "amount": 15000,
+    "reason": "Service not delivered as expected"
+  }
+}
+```
+
+---
+
+## 4. Process Withdrawal (Admin)
+
+**What this API does:** Manually processes a pending provider withdrawal.
+
+### Request
+
+```graphql
+mutation ProcessWithdrawal($id: ID!) {
+  processWithdrawal(id: $id) {
+    success
+    message
+    withdrawal {
+      id
+      status
+      processedAt
+    }
+  }
+}
+```
+
+---
+
+## 5. Reject Withdrawal (Admin)
+
+**What this API does:** Rejects a withdrawal request with reason.
+
+### Request
+
+```graphql
+mutation RejectWithdrawal($id: ID!, $reason: String!) {
+  rejectWithdrawal(id: $id, reason: $reason) {
+    success
+    message
+    withdrawal {
+      id
+      status
+      failureReason
+    }
+  }
+}
+```
+
+---
+
+## 6. Adjust Wallet Balance (Admin)
+
+**What this API does:** Adjusts a user's wallet balance (credit or debit). Maximum ₦10,000,000 per adjustment.
+
+### Request
+
+```graphql
+mutation AdjustWalletBalance($userId: ID!, $amount: Float!, $reason: String!) {
+  adjustWalletBalance(userId: $userId, amount: $amount, reason: $reason) {
+    id
+    balance
+    updatedAt
+  }
+}
+```
+
+### Variables
+
+```json
+{
+  "userId": "507f1f77bcf86cd799439011",
+  "amount": 5000,
+  "reason": "Compensation for service issue"
+}
+```
+
+> **Note:** Use positive amount for credit, negative for debit.
+
+---
+
 # Messaging APIs
 
 These APIs handle real-time messaging between users, providers, and admins. Authentication is required for all endpoints.
@@ -4940,6 +6150,502 @@ query NearbyProviders($input: NearbyProvidersInput!) {
 
 ---
 
+# Google Maps Integration
+
+EasyKonect uses Google Maps Platform APIs for geolocation features. This section explains how to integrate these on the frontend.
+
+---
+
+## APIs Used
+
+| API | Purpose | Where Used |
+|-----|---------|------------|
+| **Geocoding API** | Convert addresses → lat/lng coordinates | Backend: when provider saves address |
+| **Distance Matrix API** | Calculate distances between points | Backend: `nearbyProviders` query |
+| **Places Autocomplete** | Address suggestions as user types | Frontend: address input fields |
+
+---
+
+## Frontend: Places Autocomplete
+
+The Places Autocomplete API provides address suggestions as users type. This is the **recommended approach** for address inputs (provider onboarding, user location selection).
+
+### Setup (Web)
+
+1. Load the Google Maps JavaScript SDK:
+
+```html
+<script src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&libraries=places"></script>
+```
+
+2. Initialize autocomplete on an input field:
+
+```javascript
+// Initialize autocomplete
+const input = document.getElementById('address-input');
+const autocomplete = new google.maps.places.Autocomplete(input, {
+  types: ['address'],
+  componentRestrictions: { country: 'ng' } // Restrict to Nigeria
+});
+
+// Handle place selection
+autocomplete.addListener('place_changed', () => {
+  const place = autocomplete.getPlace();
+  
+  if (!place.geometry) {
+    console.error('No geometry for this place');
+    return;
+  }
+  
+  const locationData = {
+    address: place.formatted_address,
+    latitude: place.geometry.location.lat(),
+    longitude: place.geometry.location.lng(),
+    city: extractComponent(place, 'locality'),
+    state: extractComponent(place, 'administrative_area_level_1'),
+    country: extractComponent(place, 'country'),
+  };
+  
+  console.log('Selected location:', locationData);
+  // Use this data in your becomeProvider or updateProviderProfile mutation
+});
+
+// Helper to extract address components
+function extractComponent(place, type) {
+  const component = place.address_components?.find(c => c.types.includes(type));
+  return component?.long_name || '';
+}
+```
+
+### Setup (React)
+
+```tsx
+import { useEffect, useRef, useState } from 'react';
+
+interface LocationData {
+  address: string;
+  latitude: number;
+  longitude: number;
+  city: string;
+  state: string;
+  country: string;
+}
+
+interface AddressAutocompleteProps {
+  onSelect: (location: LocationData) => void;
+  placeholder?: string;
+}
+
+export function AddressAutocomplete({ onSelect, placeholder = 'Enter address' }: AddressAutocompleteProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [value, setValue] = useState('');
+
+  useEffect(() => {
+    if (!inputRef.current || !window.google) return;
+
+    const autocomplete = new google.maps.places.Autocomplete(inputRef.current, {
+      types: ['address'],
+      componentRestrictions: { country: 'ng' },
+    });
+
+    autocomplete.addListener('place_changed', () => {
+      const place = autocomplete.getPlace();
+      if (!place.geometry?.location) return;
+
+      const getComponent = (type: string) => {
+        const component = place.address_components?.find(c => c.types.includes(type));
+        return component?.long_name || '';
+      };
+
+      onSelect({
+        address: place.formatted_address || '',
+        latitude: place.geometry.location.lat(),
+        longitude: place.geometry.location.lng(),
+        city: getComponent('locality'),
+        state: getComponent('administrative_area_level_1'),
+        country: getComponent('country'),
+      });
+      
+      setValue(place.formatted_address || '');
+    });
+
+    return () => {
+      google.maps.event.clearInstanceListeners(autocomplete);
+    };
+  }, [onSelect]);
+
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      placeholder={placeholder}
+      className="address-input"
+    />
+  );
+}
+```
+
+### Setup (React Native)
+
+For React Native, use `react-native-google-places-autocomplete`:
+
+```bash
+npm install react-native-google-places-autocomplete
+```
+
+```tsx
+import { GooglePlacesAutocomplete } from 'react-native-google-places-autocomplete';
+
+export function AddressInput({ onSelect }) {
+  return (
+    <GooglePlacesAutocomplete
+      placeholder="Enter your address"
+      onPress={(data, details = null) => {
+        if (!details?.geometry?.location) return;
+        
+        onSelect({
+          address: data.description,
+          latitude: details.geometry.location.lat,
+          longitude: details.geometry.location.lng,
+          city: extractComponent(details, 'locality'),
+          state: extractComponent(details, 'administrative_area_level_1'),
+          country: extractComponent(details, 'country'),
+        });
+      }}
+      query={{
+        key: 'YOUR_GOOGLE_MAPS_API_KEY',
+        language: 'en',
+        components: 'country:ng',
+      }}
+      fetchDetails={true}
+      styles={{
+        textInput: { height: 44, borderWidth: 1, borderColor: '#ccc', borderRadius: 8, paddingHorizontal: 12 },
+      }}
+    />
+  );
+}
+
+function extractComponent(details, type) {
+  const component = details.address_components?.find(c => c.types.includes(type));
+  return component?.long_name || '';
+}
+```
+
+### Setup (Flutter)
+
+For Flutter, use `google_places_flutter`:
+
+```yaml
+# pubspec.yaml
+dependencies:
+  google_places_flutter: ^2.0.5
+```
+
+```dart
+import 'package:google_places_flutter/google_places_flutter.dart';
+import 'package:google_places_flutter/model/prediction.dart';
+
+class AddressInput extends StatelessWidget {
+  final Function(Map<String, dynamic>) onSelect;
+  final TextEditingController controller = TextEditingController();
+
+  AddressInput({required this.onSelect});
+
+  @override
+  Widget build(BuildContext context) {
+    return GooglePlaceAutoCompleteTextField(
+      textEditingController: controller,
+      googleAPIKey: "YOUR_GOOGLE_MAPS_API_KEY",
+      inputDecoration: InputDecoration(
+        hintText: "Enter your address",
+        border: OutlineInputBorder(),
+      ),
+      countries: ["ng"], // Restrict to Nigeria
+      isLatLngRequired: true,
+      getPlaceDetailWithLatLng: (Prediction prediction) {
+        onSelect({
+          'address': prediction.description,
+          'latitude': double.parse(prediction.lat ?? '0'),
+          'longitude': double.parse(prediction.lng ?? '0'),
+        });
+      },
+      itemClick: (Prediction prediction) {
+        controller.text = prediction.description ?? '';
+        controller.selection = TextSelection.fromPosition(
+          TextPosition(offset: prediction.description?.length ?? 0),
+        );
+      },
+    );
+  }
+}
+```
+
+---
+
+## Get User's Current Location
+
+For the `nearbyProviders` query, you need the user's current GPS coordinates.
+
+### Web (Browser)
+
+```javascript
+async function getCurrentLocation() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('Geolocation not supported'));
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        resolve({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracy: position.coords.accuracy, // meters
+        });
+      },
+      (error) => {
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            reject(new Error('Location permission denied'));
+            break;
+          case error.POSITION_UNAVAILABLE:
+            reject(new Error('Location unavailable'));
+            break;
+          case error.TIMEOUT:
+            reject(new Error('Location request timed out'));
+            break;
+          default:
+            reject(new Error('Unknown location error'));
+        }
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 60000, // Cache for 1 minute
+      }
+    );
+  });
+}
+
+// Usage with nearbyProviders query
+async function findNearbyProviders(apolloClient) {
+  try {
+    const location = await getCurrentLocation();
+    
+    const { data } = await apolloClient.query({
+      query: NEARBY_PROVIDERS_QUERY,
+      variables: {
+        input: {
+          latitude: location.latitude,
+          longitude: location.longitude,
+          radiusKm: 25,
+        },
+      },
+    });
+    
+    return data.nearbyProviders;
+  } catch (error) {
+    console.error('Failed to get nearby providers:', error);
+    // Fall back to browse providers without location
+  }
+}
+```
+
+### React Native
+
+```tsx
+import Geolocation from '@react-native-community/geolocation';
+// or: import * as Location from 'expo-location'; // for Expo
+
+async function getCurrentLocation() {
+  // Request permission first
+  const permission = await Geolocation.requestAuthorization('whenInUse');
+  
+  return new Promise((resolve, reject) => {
+    Geolocation.getCurrentPosition(
+      (position) => {
+        resolve({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+        });
+      },
+      (error) => reject(error),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
+    );
+  });
+}
+```
+
+### Flutter
+
+```dart
+import 'package:geolocator/geolocator.dart';
+
+Future<Position> getCurrentLocation() async {
+  bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+  if (!serviceEnabled) {
+    throw Exception('Location services are disabled');
+  }
+
+  LocationPermission permission = await Geolocator.checkPermission();
+  if (permission == LocationPermission.denied) {
+    permission = await Geolocator.requestPermission();
+    if (permission == LocationPermission.denied) {
+      throw Exception('Location permission denied');
+    }
+  }
+
+  return await Geolocator.getCurrentPosition(
+    desiredAccuracy: LocationAccuracy.high,
+  );
+}
+```
+
+---
+
+## Complete Example: Provider Onboarding with Address Autocomplete
+
+```tsx
+import { useMutation } from '@apollo/client';
+import { useState } from 'react';
+import { AddressAutocomplete } from './AddressAutocomplete';
+
+const BECOME_PROVIDER = gql`
+  mutation BecomeProvider($input: BecomeProviderInput!) {
+    becomeProvider(input: $input) {
+      user {
+        id
+        role
+        providerProfile {
+          id
+          businessName
+          verificationStatus
+        }
+      }
+      accessToken
+      refreshToken
+    }
+  }
+`;
+
+export function ProviderOnboardingForm() {
+  const [formData, setFormData] = useState({
+    businessName: '',
+    businessDescription: '',
+    address: '',
+    city: '',
+    state: '',
+    country: 'Nigeria',
+    latitude: null as number | null,
+    longitude: null as number | null,
+  });
+
+  const [becomeProvider, { loading }] = useMutation(BECOME_PROVIDER);
+
+  const handleAddressSelect = (location: LocationData) => {
+    setFormData(prev => ({
+      ...prev,
+      address: location.address,
+      city: location.city,
+      state: location.state,
+      country: location.country,
+      latitude: location.latitude,
+      longitude: location.longitude,
+    }));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    try {
+      const { data } = await becomeProvider({
+        variables: {
+          input: {
+            businessName: formData.businessName,
+            businessDescription: formData.businessDescription,
+            address: formData.address,
+            city: formData.city,
+            state: formData.state,
+            country: formData.country,
+            latitude: formData.latitude,
+            longitude: formData.longitude,
+          },
+        },
+      });
+
+      // ⚠️ CRITICAL: Replace tokens immediately!
+      const { accessToken, refreshToken } = data.becomeProvider;
+      localStorage.setItem('accessToken', accessToken);
+      localStorage.setItem('refreshToken', refreshToken);
+      
+      // Update Apollo Client auth header
+      // Now you can call uploadProviderDocuments, etc.
+      
+    } catch (error) {
+      console.error('Failed to become provider:', error);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input
+        type="text"
+        placeholder="Business Name"
+        value={formData.businessName}
+        onChange={(e) => setFormData(prev => ({ ...prev, businessName: e.target.value }))}
+        required
+      />
+      
+      <textarea
+        placeholder="Business Description"
+        value={formData.businessDescription}
+        onChange={(e) => setFormData(prev => ({ ...prev, businessDescription: e.target.value }))}
+      />
+      
+      {/* Address autocomplete with Google Places */}
+      <AddressAutocomplete
+        onSelect={handleAddressSelect}
+        placeholder="Start typing your business address..."
+      />
+      
+      {formData.latitude && (
+        <p className="text-sm text-gray-500">
+          📍 Location: {formData.latitude.toFixed(4)}, {formData.longitude?.toFixed(4)}
+        </p>
+      )}
+      
+      <button type="submit" disabled={loading || !formData.latitude}>
+        {loading ? 'Processing...' : 'Become a Provider'}
+      </button>
+    </form>
+  );
+}
+```
+
+---
+
+## Environment Variables
+
+Add to your frontend `.env`:
+
+```bash
+# .env.local (Next.js) or .env (React/Vite)
+NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=your-api-key-here
+# or
+VITE_GOOGLE_MAPS_API_KEY=your-api-key-here
+```
+
+⚠️ **Security Note**: The Google Maps API key used on the frontend should be restricted:
+- In Google Cloud Console → Credentials → your API key
+- Set **Application restrictions** to "HTTP referrers" 
+- Add your domains: `localhost:*`, `yourdomain.com/*`, `*.yourdomain.com/*`
+- Set **API restrictions** to only: Places API (frontend only needs this)
+
+---
+
 # Provider Profile — Own Profile
 
 > 🔐 Requires authentication + `SERVICE_PROVIDER` role.
@@ -5310,6 +7016,52 @@ mutation ReactivateAccount {
 
 ## Changelog
 
+### v3.0.0 (April 2026)
+- ✅ **Payment System Complete (Paystack)**
+  - `initializePayment` - Start Paystack checkout
+  - `verifyPayment` - Verify payment after callback
+  - `payWithWallet` - Pay using wallet balance
+  - `processRefund` - Admin refund processing
+- ✅ **Wallet System**
+  - `myWallet` - Get wallet balance and details
+  - `myWalletTransactions` - Transaction history with filters
+  - `adjustWalletBalance` - Admin balance adjustments
+- ✅ **Bank Account Management**
+  - `banks` - List Nigerian banks
+  - `verifyBankAccount` - Verify account before adding
+  - `addBankAccount` / `removeBankAccount`
+  - `setDefaultBankAccount`
+  - `myBankAccounts`
+- ✅ **Withdrawal System**
+  - `requestWithdrawal` - Provider withdrawal requests
+  - `cancelWithdrawal` - Cancel pending withdrawal
+  - `myWithdrawals` - Withdrawal history
+  - `processWithdrawal` / `rejectWithdrawal` - Admin processing
+- ✅ **Scheduled Payouts**
+  - `setPayoutSchedule` - Configure automatic payouts
+  - `disablePayoutSchedule`
+  - `myPayoutSchedule`
+  - `myPendingEarnings`
+- ✅ **Payment Analytics**
+  - `paymentStats` - Platform payment statistics
+  - `myEarningsReport` - Provider earnings report
+  - `adminPaymentAnalytics` - Admin analytics
+- ✅ **Security Hardening (Phase 2)**
+  - Enhanced rate limiting for auth endpoints (5 attempts/5min → 15min block)
+  - Token invalidation on password change/reset
+  - XSS prevention on all user inputs
+  - NoSQL injection protection on search
+  - IDOR protection on user queries
+
+### v2.7.0 (April 5, 2026)
+- ✅ Google Maps Platform integration (Geocoding, Distance Matrix, Places APIs)
+- ✅ Frontend integration guide for Google Places Autocomplete (Web, React, React Native, Flutter)
+- ✅ Address autocomplete component examples for provider onboarding
+- ✅ User geolocation helper code for `nearbyProviders` query
+- ✅ Complete provider onboarding example with address autocomplete + token handling
+- ✅ API metadata updated with geolocation query documentation
+- ✅ SpectaQL config updated with Maps & Push Notification features
+
 ### v2.6.0 (March 30, 2026)
 - ✅ `becomeProvider` now returns `BecomeProviderResponse` (`user` + `accessToken` + `refreshToken`)
 - ✅ Fresh `SERVICE_PROVIDER` JWT issued atomically with role upgrade — no stale token after onboarding
@@ -5381,6 +7133,6 @@ mutation ReactivateAccount {
 
 ---
 
-**API Version**: 2.4.0  
-**Last Updated**: March 29, 2026  
+**API Version**: 3.0.0  
+**Last Updated**: April 2026  
 **Documentation**: https://backend-ehtm.onrender.com/docs

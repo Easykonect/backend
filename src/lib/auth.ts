@@ -15,6 +15,8 @@ export interface JWTPayload {
   userId: string;
   email: string;
   role: UserRoleType;
+  iat?: number;  // Issued at (automatically added by JWT)
+  exp?: number;  // Expiration (automatically added by JWT)
 }
 
 /**

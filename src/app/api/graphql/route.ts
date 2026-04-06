@@ -8,6 +8,7 @@
  * - Introspection disabled in production
  * - CORS configuration
  * - Request body size validation
+ * - Sentry error monitoring
  */
 
 import { ApolloServer } from '@apollo/server';
@@ -28,6 +29,10 @@ import {
   getClientIp,
   RateLimitConfig,
 } from '@/middleware/rate-limit.middleware';
+import { initSentry, captureException, setUserContext } from '@/lib/sentry';
+
+// Initialize Sentry as early as possible
+initSentry();
 
 // Maximum request body size (1MB)
 const MAX_BODY_SIZE = 1024 * 1024;
@@ -121,10 +126,27 @@ const server = new ApolloServer<GraphQLContext>({
         }),
   ],
   formatError: (formattedError, error) => {
+    // Capture errors in Sentry (except validation errors)
+    const errorCode = formattedError.extensions?.code as string;
+    const skipCodes = ['VALIDATION_ERROR', 'BAD_USER_INPUT', 'UNAUTHENTICATED', 'FORBIDDEN'];
+    
+    if (!skipCodes.includes(errorCode)) {
+      captureException(error, {
+        tags: {
+          'graphql.error_code': errorCode || 'UNKNOWN',
+        },
+        extra: {
+          path: formattedError.path,
+          locations: formattedError.locations,
+        },
+        level: errorCode === 'INTERNAL_SERVER_ERROR' ? 'error' : 'warning',
+      });
+    }
+    
     // Hide internal error details in production
     if (config.isProduction) {
       // Don't expose internal errors
-      if (formattedError.extensions?.code === 'INTERNAL_SERVER_ERROR') {
+      if (errorCode === 'INTERNAL_SERVER_ERROR') {
         console.error('Internal Error:', error);
         return {
           message: 'An internal error occurred',

@@ -11,3 +11,5 @@ export * from './cloudinary';
 export * from './redis';
 export * from './socket';
 export * from './logger';
+export * from './paystack';
+export * from './sentry';

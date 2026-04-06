@@ -6,6 +6,7 @@
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { UserRole, ServiceStatus, VerificationStatus, type ServiceStatusType } from '@/constants';
+import { sanitizeStrict, sanitizeBasic, validateName, validateText, validateAmount, sanitizeSearchQuery, MAX_LENGTHS } from '@/utils/security';
 
 // ==================
 // Types
@@ -158,9 +159,11 @@ export const getServices = async (
   }
 
   if (filters.search) {
+    // Sanitize search query to prevent NoSQL injection
+    const sanitizedSearch = sanitizeSearchQuery(filters.search);
     where.OR = [
-      { name: { contains: filters.search, mode: 'insensitive' } },
-      { description: { contains: filters.search, mode: 'insensitive' } },
+      { name: { contains: sanitizedSearch, mode: 'insensitive' } },
+      { description: { contains: sanitizedSearch, mode: 'insensitive' } },
     ];
   }
 
@@ -265,6 +268,16 @@ export const createService = async (userId: string, input: CreateServiceInput) =
 
   const { categoryId, name, description, price, duration, images } = input;
 
+  // Sanitize and validate inputs
+  const sanitizedName = validateName(name, 'Service name');
+  const sanitizedDescription = validateText(
+    sanitizeBasic(description),
+    'Description',
+    MAX_LENGTHS.DESCRIPTION
+  );
+  const validatedPrice = validateAmount(price, 'Price');
+  const validatedDuration = validateAmount(duration, 'Duration');
+
   // Validate category exists
   const category = await prisma.serviceCategory.findUnique({
     where: { id: categoryId },
@@ -283,7 +296,7 @@ export const createService = async (userId: string, input: CreateServiceInput) =
   }
 
   // Generate slug
-  const baseSlug = generateSlug(name);
+  const baseSlug = generateSlug(sanitizedName);
   
   // Check for duplicate slug for this provider
   const existingService = await prisma.service.findFirst({
@@ -302,11 +315,11 @@ export const createService = async (userId: string, input: CreateServiceInput) =
     data: {
       providerId: provider.id,
       categoryId,
-      name,
+      name: sanitizedName,
       slug,
-      description,
-      price,
-      duration,
+      description: sanitizedDescription,
+      price: validatedPrice,
+      duration: validatedDuration,
       images: images || [],
       status: ServiceStatus.DRAFT,
     },
@@ -362,13 +375,19 @@ export const updateService = async (userId: string, serviceId: string, input: Up
   }
 
   if (input.name !== undefined) {
-    updateData.name = input.name;
-    updateData.slug = generateSlug(input.name);
+    updateData.name = validateName(input.name, 'Service name');
+    updateData.slug = generateSlug(updateData.name);
   }
 
-  if (input.description !== undefined) updateData.description = input.description;
-  if (input.price !== undefined) updateData.price = input.price;
-  if (input.duration !== undefined) updateData.duration = input.duration;
+  if (input.description !== undefined) {
+    updateData.description = validateText(
+      sanitizeBasic(input.description),
+      'Description',
+      MAX_LENGTHS.DESCRIPTION
+    );
+  }
+  if (input.price !== undefined) updateData.price = validateAmount(input.price, 'Price');
+  if (input.duration !== undefined) updateData.duration = validateAmount(input.duration, 'Duration');
   if (input.images !== undefined) updateData.images = input.images;
   
   // Status can only be changed to DRAFT or INACTIVE by provider

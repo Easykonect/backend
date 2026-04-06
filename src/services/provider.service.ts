@@ -18,6 +18,7 @@ import {
   sendProviderRejectedEmail,
   sendProviderSubmissionEmail 
 } from '@/lib/email';
+import { sanitizeStrict, sanitizeBasic, validateName, validateText, MAX_LENGTHS } from '@/utils/security';
 
 // ==================
 // Types
@@ -94,6 +95,16 @@ const formatUserWithProvider = (user: any, provider: any = null) => ({
 export const becomeProvider = async (userId: string, input: BecomeProviderInput) => {
   const { businessName, businessDescription, address, city, state, country, latitude, longitude } = input;
 
+  // Sanitize and validate inputs
+  const sanitizedBusinessName = validateName(businessName, 'Business name');
+  const sanitizedDescription = businessDescription 
+    ? validateText(sanitizeBasic(businessDescription), 'Business description', MAX_LENGTHS.DESCRIPTION)
+    : undefined;
+  const sanitizedAddress = validateText(sanitizeStrict(address), 'Address', MAX_LENGTHS.SHORT_TEXT);
+  const sanitizedCity = validateName(city, 'City');
+  const sanitizedState = validateName(state, 'State');
+  const sanitizedCountry = validateName(country, 'Country');
+
   // Find user
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -135,7 +146,7 @@ export const becomeProvider = async (userId: string, input: BecomeProviderInput)
   }
 
   // Generate slug from business name
-  const slug = businessName
+  const slug = sanitizedBusinessName
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-|-$)/g, '');
@@ -146,12 +157,12 @@ export const becomeProvider = async (userId: string, input: BecomeProviderInput)
     const newProvider = await tx.serviceProvider.create({
       data: {
         userId: user.id,
-        businessName,
-        businessDescription,
-        address,
-        city,
-        state,
-        country,
+        businessName: sanitizedBusinessName,
+        businessDescription: sanitizedDescription,
+        address: sanitizedAddress,
+        city: sanitizedCity,
+        state: sanitizedState,
+        country: sanitizedCountry,
         latitude,
         longitude,
         verificationStatus: VerificationStatus.UNVERIFIED,
@@ -211,15 +222,31 @@ export const updateProviderProfile = async (userId: string, input: UpdateProvide
     });
   }
 
-  // Build update data
+  // Build update data with sanitization
   const updateData: any = {};
   
-  if (input.businessName !== undefined) updateData.businessName = input.businessName;
-  if (input.businessDescription !== undefined) updateData.businessDescription = input.businessDescription;
-  if (input.address !== undefined) updateData.address = input.address;
-  if (input.city !== undefined) updateData.city = input.city;
-  if (input.state !== undefined) updateData.state = input.state;
-  if (input.country !== undefined) updateData.country = input.country;
+  if (input.businessName !== undefined) {
+    updateData.businessName = validateName(input.businessName, 'Business name');
+  }
+  if (input.businessDescription !== undefined) {
+    updateData.businessDescription = validateText(
+      sanitizeBasic(input.businessDescription), 
+      'Business description', 
+      MAX_LENGTHS.DESCRIPTION
+    );
+  }
+  if (input.address !== undefined) {
+    updateData.address = validateText(sanitizeStrict(input.address), 'Address', MAX_LENGTHS.SHORT_TEXT);
+  }
+  if (input.city !== undefined) {
+    updateData.city = validateName(input.city, 'City');
+  }
+  if (input.state !== undefined) {
+    updateData.state = validateName(input.state, 'State');
+  }
+  if (input.country !== undefined) {
+    updateData.country = validateName(input.country, 'Country');
+  }
   if (input.latitude !== undefined) updateData.latitude = input.latitude;
   if (input.longitude !== undefined) updateData.longitude = input.longitude;
 

@@ -78,6 +78,61 @@ enum DisputeResolution {
 }
 
 // ==================
+// Wallet & Withdrawal Enums
+// ==================
+
+enum WalletTransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum WalletTransactionSource {
+  REFUND              // User receives refund
+  BOOKING_PAYMENT     // User pays with wallet
+  SERVICE_EARNING     // Provider earns from service
+  WITHDRAWAL          // Provider withdraws to bank
+  WITHDRAWAL_REVERSAL // Failed withdrawal returned
+  ADMIN_ADJUSTMENT    // Manual admin adjustment
+}
+
+enum WithdrawalStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum PayoutFrequency {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  MANUAL              // No auto-payout, manual withdrawal only
+}
+
+enum AdminAction {
+  BAN_USER
+  UNBAN_USER
+  RESTRICT_USER
+  UNRESTRICT_USER
+  SUSPEND_USER
+  ACTIVATE_USER
+  PROCESS_WITHDRAWAL
+  REJECT_WITHDRAWAL
+  PROCESS_REFUND
+  RESOLVE_DISPUTE
+  ADJUST_WALLET
+  UPDATE_USER_ROLE
+  DELETE_USER
+  VERIFY_PROVIDER
+  REJECT_PROVIDER
+  APPROVE_SERVICE
+  REJECT_SERVICE
+  SUSPEND_SERVICE
+}
+
+// ==================
 // Models
 // ==================
 
@@ -113,8 +168,26 @@ model User {
   passwordResetToken  String?
   passwordResetExpiry DateTime?
   
+  // Ban system
+  bannedAt            DateTime?
+  bannedUntil         DateTime?       // null = permanent ban
+  banReason           String?
+  bannedBy            String?         @db.ObjectId
+  
+  // Restriction system (can login but can't transact)
+  restrictedAt        DateTime?
+  restrictedUntil     DateTime?       // null = permanent restriction
+  restrictionReason   String?
+  restrictedBy        String?         @db.ObjectId
+  
+  // Session invalidation (tokens issued before this time are invalid)
+  tokenInvalidatedAt  DateTime?
+  
   // Provider specific fields (only for SERVICE_PROVIDER role)
   provider  ServiceProvider?
+  
+  // Wallet relation
+  wallet    Wallet?
   
   // Relations
   bookingsAsUser Booking[] @relation("UserBookings")
@@ -157,6 +230,8 @@ model ServiceProvider {
   bookings            Booking[] @relation("ProviderBookings")
   reviews             Review[]  @relation("ProviderReviews")
   likes               ProviderLike[] @relation("ProviderLikes")
+  bankAccounts        ProviderBankAccount[]
+  payoutSchedule      PayoutSchedule?
   
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -266,6 +341,7 @@ model Payment {
   amount          Float
   commission      Float
   providerPayout  Float
+  paystackFee     Float?        // Paystack processing fee
   
   status          PaymentStatus @default(PENDING)
   paymentMethod   String?
@@ -273,10 +349,25 @@ model Payment {
   
   paidAt          DateTime?
   refundedAt      DateTime?
+  payoutAt        DateTime?     // When provider was paid out
+  
+  // Withdrawal eligibility (dispute window - typically 24-48 hours after completion)
+  withdrawableAt  DateTime?     // When provider can withdraw this earning
+  
+  // Refund details
+  refundAmount    Float?
+  refundReason    String?
+  refundedBy      String?       @db.ObjectId  // Admin who processed refund
+  refundedVia     String?       // DISPUTE, CANCELLATION, MANUAL, CHARGEBACK
+  
+  // Link to wallet transaction when paid to provider wallet
+  walletTransactionId String?   @db.ObjectId
   
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
+  @@index([status])
+  @@index([withdrawableAt])
   @@map("payments")
 }
 
@@ -553,4 +644,221 @@ model UserSettings {
   @@map("user_settings")
 }
 
+// ==================
+// Wallet System
+// ==================
 
+model Wallet {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId          String   @unique @db.ObjectId
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // All amounts stored in KOBO (integers) to avoid float precision issues
+  balance         Int      @default(0)  // Available balance (in kobo)
+  pendingBalance  Int      @default(0)  // Pending earnings not yet withdrawable (in kobo)
+  
+  currency        String   @default("NGN")
+  isLocked        Boolean  @default(false)  // Lock during pending withdrawal
+  lockedReason    String?
+  
+  transactions    WalletTransaction[]
+  withdrawals     Withdrawal[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("wallets")
+}
+
+model WalletTransaction {
+  id              String                    @id @default(auto()) @map("_id") @db.ObjectId
+  walletId        String                    @db.ObjectId
+  wallet          Wallet                    @relation(fields: [walletId], references: [id])
+  
+  type            WalletTransactionType     // CREDIT or DEBIT
+  source          WalletTransactionSource
+  
+  amount          Int                       // In kobo
+  balanceBefore   Int                       // In kobo
+  balanceAfter    Int                       // In kobo
+  
+  description     String
+  reference       String                    @unique  // Idempotency key
+  
+  // Link to source entity
+  bookingId       String?                   @db.ObjectId
+  paymentId       String?                   @db.ObjectId
+  withdrawalId    String?                   @db.ObjectId
+  
+  // For admin adjustments
+  adjustedBy      String?                   @db.ObjectId
+  adjustmentReason String?
+  
+  createdAt       DateTime                  @default(now())
+  
+  @@index([walletId, createdAt])
+  @@index([source])
+  @@map("wallet_transactions")
+}
+
+model Withdrawal {
+  id                String           @id @default(auto()) @map("_id") @db.ObjectId
+  walletId          String           @db.ObjectId
+  wallet            Wallet           @relation(fields: [walletId], references: [id])
+  providerId        String           @db.ObjectId
+  
+  amount            Int              // In kobo
+  fee               Int              @default(0)  // Transfer fee in kobo
+  netAmount         Int              // amount - fee (what provider receives)
+  
+  status            WithdrawalStatus @default(PENDING)
+  
+  // Snapshot bank details at request time (prevents mid-withdrawal changes)
+  bankCode          String
+  bankName          String
+  accountNumber     String
+  accountName       String
+  
+  // Paystack transfer details
+  transferCode      String?
+  transferReference String?          @unique
+  
+  // Processing details
+  requestedAt       DateTime         @default(now())
+  processedAt       DateTime?
+  completedAt       DateTime?
+  
+  // Failure handling
+  failureReason     String?
+  retryCount        Int              @default(0)
+  lastRetryAt       DateTime?
+  
+  // Admin processing
+  processedBy       String?          @db.ObjectId
+  
+  // Link to scheduled payout if applicable
+  scheduledPayoutId String?          @db.ObjectId
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  @@index([walletId, status])
+  @@index([providerId, status])
+  @@index([status, createdAt])
+  @@map("withdrawals")
+}
+
+// ==================
+// Provider Bank Account
+// ==================
+
+model ProviderBankAccount {
+  id              String          @id @default(auto()) @map("_id") @db.ObjectId
+  providerId      String          @db.ObjectId
+  provider        ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  
+  bankCode        String
+  bankName        String
+  accountNumber   String
+  accountName     String          // Resolved from Paystack
+  
+  isDefault       Boolean         @default(false)
+  isVerified      Boolean         @default(false)
+  
+  // Paystack recipient code for transfers
+  recipientCode   String?
+  
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  
+  @@unique([providerId, accountNumber, bankCode])
+  @@index([providerId])
+  @@map("provider_bank_accounts")
+}
+
+// ==================
+// Scheduled Payouts
+// ==================
+
+model PayoutSchedule {
+  id              String          @id @default(auto()) @map("_id") @db.ObjectId
+  providerId      String          @unique @db.ObjectId
+  provider        ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  
+  frequency       PayoutFrequency @default(MANUAL)
+  
+  // For WEEKLY: 0=Sunday, 1=Monday, etc.
+  dayOfWeek       Int?
+  
+  // For MONTHLY: 1-28 (avoid 29-31 edge cases)
+  dayOfMonth      Int?
+  
+  // Minimum amount to trigger payout (in kobo) - default ₦5,000
+  minimumAmount   Int             @default(500000)
+  
+  // Timezone for scheduling
+  timezone        String          @default("Africa/Lagos")
+  
+  isActive        Boolean         @default(true)
+  
+  // Preferred bank account for payouts
+  bankAccountId   String?         @db.ObjectId
+  
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  
+  @@map("payout_schedules")
+}
+
+model ScheduledPayout {
+  id              String           @id @default(auto()) @map("_id") @db.ObjectId
+  providerId      String           @db.ObjectId
+  
+  amount          Int              // Total amount in kobo
+  paymentIds      String[]         @db.ObjectId  // Payments included in this payout
+  
+  scheduledFor    DateTime
+  status          WithdrawalStatus @default(PENDING)
+  
+  // Link to actual withdrawal when processed
+  withdrawalId    String?          @db.ObjectId
+  
+  processedAt     DateTime?
+  failureReason   String?
+  
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  
+  @@index([providerId, status])
+  @@index([scheduledFor, status])
+  @@map("scheduled_payouts")
+}
+
+// ==================
+// Admin Audit Log
+// ==================
+
+model AdminAuditLog {
+  id              String      @id @default(auto()) @map("_id") @db.ObjectId
+  
+  action          AdminAction
+  targetType      String      // "User", "Provider", "Withdrawal", "Payment", etc.
+  targetId        String      @db.ObjectId
+  
+  performedBy     String      @db.ObjectId  // Admin user ID
+  performedByRole String      // ADMIN or SUPER_ADMIN
+  
+  previousValue   String?     // JSON of previous state
+  newValue        String?     // JSON of new state
+  
+  reason          String?     // Why action was taken
+  ipAddress       String?
+  userAgent       String?
+  
+  createdAt       DateTime    @default(now())
+  
+  @@index([performedBy, createdAt])
+  @@index([targetType, targetId])
+  @@index([action, createdAt])
+  @@map("admin_audit_logs")
+}

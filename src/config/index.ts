@@ -123,11 +123,16 @@ export const config = {
     maxRadiusKm: parseFloat(process.env.GEO_MAX_RADIUS_KM || '100'),
   },
 
+  // Google Maps API
+  googleMaps: {
+    apiKey: process.env.GOOGLE_MAPS_API_KEY || '',
+  },
+
   // Platform Settings
   platform: {
     name: process.env.PLATFORM_NAME || '',
-    commissionRate: parseFloat(process.env.COMMISSION_RATE || '0.10'),
-    currency: process.env.CURRENCY || '',
+    commissionRate: parseFloat(process.env.COMMISSION_RATE || '0.07'), // 7% commission
+    currency: process.env.CURRENCY || 'NGN',
     frontendUrl: process.env.FRONTEND_URL || '',
     supportEmail: process.env.SUPPORT_EMAIL || '',
   },
