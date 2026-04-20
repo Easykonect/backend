@@ -245,6 +245,10 @@ export const typeDefs = gql`
     completedAt: String
     cancelledAt: String
     cancellationReason: String
+    # Customer confirmation and payment release fields
+    customerConfirmedAt: String
+    paymentReleaseAt: String
+    paymentReleasedAt: String
     createdAt: String!
     updatedAt: String!
   }
@@ -2421,6 +2425,10 @@ export const typeDefs = gql`
     
     # Complete service - marks booking as COMPLETED (PROVIDER only)
     completeService(id: ID!): Booking!
+    
+    # Confirm service delivery - starts 24-hour dispute window (USER only)
+    # After 24 hours without dispute, payment is automatically released to provider
+    confirmServiceDelivery(bookingId: ID!): Booking!
 
     # ==================
     # Booking Management (Admin)

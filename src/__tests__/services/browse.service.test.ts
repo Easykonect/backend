@@ -9,6 +9,19 @@ import { GraphQLError } from 'graphql';
 // Mocks
 // ==================
 
+jest.mock('@/lib/redis', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn().mockReturnValue({
+      get: jest.fn(),
+      set: jest.fn(),
+      del: jest.fn(),
+      incr: jest.fn(),
+      expire: jest.fn(),
+    }),
+  },
+}));
+
 jest.mock('@/lib/prisma', () => ({
   __esModule: true,
   default: {
@@ -28,6 +41,7 @@ jest.mock('@/config', () => ({
   config: {
     pagination: { defaultLimit: 10, maxLimit: 100 },
     geo: { defaultRadiusKm: 25, maxRadiusKm: 100 },
+    redisUrl: 'redis://localhost:6379',
   },
 }));
 

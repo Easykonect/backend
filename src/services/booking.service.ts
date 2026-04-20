@@ -66,6 +66,10 @@ const COMMISSION_RATE = config.platform.commissionRate;
 const formatBookingResponse = (booking: any) => {
   return {
     ...booking,
+    // Include customer confirmation and payment release fields
+    customerConfirmedAt: booking.customerConfirmedAt?.toISOString() || null,
+    paymentReleaseAt: booking.paymentReleaseAt?.toISOString() || null,
+    paymentReleasedAt: booking.paymentReleasedAt?.toISOString() || null,
     // Map provider (ServiceProvider) to the expected ServiceProviderProfile format
     provider: booking.provider ? {
       id: booking.provider.id,
@@ -732,6 +736,158 @@ export const completeService = async (bookingId: string, userId: string) => {
   });
 
   return formatBookingResponse(completedBooking);
+};
+
+// ==================
+// Dispute Window Constants
+// ==================
+
+const DISPUTE_WINDOW_HOURS = 24;
+
+/**
+ * Confirm service delivery (USER only)
+ * Starts the 24-hour dispute window before payment is released to provider
+ */
+export const confirmServiceDelivery = async (bookingId: string, userId: string) => {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    include: {
+      payment: true,
+      user: true,
+      provider: {
+        include: { user: true }
+      },
+      service: true,
+    }
+  });
+
+  if (!booking) {
+    throw new GraphQLError('Booking not found', {
+      extensions: { code: 'BOOKING_NOT_FOUND' }
+    });
+  }
+
+  // Verify user owns this booking
+  if (booking.userId !== userId) {
+    throw new GraphQLError('You can only confirm delivery for your own bookings', {
+      extensions: { code: 'UNAUTHORIZED' }
+    });
+  }
+
+  // Must be in COMPLETED status (provider marked as done)
+  if (booking.status !== BookingStatus.COMPLETED) {
+    throw new GraphQLError(
+      `Cannot confirm delivery for a booking with status: ${booking.status}. Service must be marked as completed by the provider first.`,
+      { extensions: { code: 'INVALID_BOOKING_STATUS' } }
+    );
+  }
+
+  // Check if already confirmed
+  if (booking.customerConfirmedAt) {
+    throw new GraphQLError('Service delivery has already been confirmed', {
+      extensions: { code: 'ALREADY_CONFIRMED' }
+    });
+  }
+
+  // Check if payment exists and is completed
+  if (!booking.payment || booking.payment.status !== 'COMPLETED') {
+    throw new GraphQLError('Payment must be completed before confirming delivery', {
+      extensions: { code: 'PAYMENT_NOT_COMPLETED' }
+    });
+  }
+
+  // Calculate payment release time (24 hours from now)
+  const now = new Date();
+  const paymentReleaseAt = new Date(now.getTime() + DISPUTE_WINDOW_HOURS * 60 * 60 * 1000);
+
+  // Update booking with confirmation
+  const confirmedBooking = await prisma.booking.update({
+    where: { id: bookingId },
+    data: {
+      customerConfirmedAt: now,
+      paymentReleaseAt: paymentReleaseAt,
+    },
+    include: {
+      user: true,
+      provider: {
+        include: { user: true }
+      },
+      service: {
+        include: { category: true, provider: true }
+      },
+      payment: true,
+    }
+  });
+
+  // Update payment withdrawableAt
+  await prisma.payment.update({
+    where: { id: booking.payment.id },
+    data: {
+      withdrawableAt: paymentReleaseAt,
+    }
+  });
+
+  return formatBookingResponse(confirmedBooking);
+};
+
+/**
+ * Get bookings ready for payment release
+ * Returns bookings where:
+ * - Customer has confirmed delivery
+ * - 24-hour dispute window has passed
+ * - Payment has not been released yet
+ * - No active dispute
+ */
+export const getBookingsReadyForPaymentRelease = async () => {
+  const now = new Date();
+
+  const bookings = await prisma.booking.findMany({
+    where: {
+      status: BookingStatus.COMPLETED,
+      customerConfirmedAt: { not: null },
+      paymentReleaseAt: { lte: now },
+      paymentReleasedAt: null,
+      dispute: null, // No dispute
+    },
+    include: {
+      payment: true,
+      provider: {
+        include: { user: true }
+      },
+      user: true,
+      service: true,
+    }
+  });
+
+  return bookings;
+};
+
+/**
+ * Mark payment as released to provider
+ */
+export const markPaymentReleased = async (bookingId: string) => {
+  const booking = await prisma.booking.update({
+    where: { id: bookingId },
+    data: {
+      paymentReleasedAt: new Date(),
+    },
+    include: {
+      payment: true,
+      provider: true,
+    }
+  });
+
+  // Update payment payoutAt
+  if (booking.payment) {
+    await prisma.payment.update({
+      where: { id: booking.payment.id },
+      data: {
+        payoutAt: new Date(),
+      }
+    });
+  }
+
+  return booking;
 };
 
 // ==================

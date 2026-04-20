@@ -110,6 +110,7 @@ import {
   rejectBooking,
   startService,
   completeService,
+  confirmServiceDelivery,
   getAllBookings,
   adminCancelBooking,
   getProviderBookingStats,
@@ -2127,6 +2128,20 @@ export const resolvers = {
       const user = requireAuth(context);
       requireRole(context, UserRole.SERVICE_PROVIDER);
       return completeService(args.id, user.userId);
+    },
+
+    /**
+     * Confirm service delivery - starts 24-hour dispute window (USER only)
+     * After 24 hours without dispute, payment is automatically released to provider
+     */
+    confirmServiceDelivery: async (
+      _: unknown,
+      args: { bookingId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      requireRole(context, UserRole.SERVICE_USER);
+      return confirmServiceDelivery(args.bookingId, user.userId);
     },
 
     // ==================

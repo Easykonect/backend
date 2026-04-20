@@ -152,6 +152,88 @@ async function generateAnalyticsSnapshot(): Promise<Record<string, number>> {
   return snapshot;
 }
 
+/**
+ * Process automatic payment releases
+ * Releases payments to providers for bookings where:
+ * - Customer has confirmed delivery
+ * - 24-hour dispute window has passed
+ * - No active dispute exists
+ */
+async function processAutomaticPaymentReleases(): Promise<{ released: number; failed: number }> {
+  const { 
+    getBookingsReadyForPaymentRelease, 
+    markPaymentReleased 
+  } = await import('@/services/booking.service');
+  const { creditProviderEarnings } = await import('@/services/wallet.service');
+  const { createNotification } = await import('@/services/notification.service');
+
+  let released = 0;
+  let failed = 0;
+
+  try {
+    const bookings = await getBookingsReadyForPaymentRelease();
+    console.log(`💰 Found ${bookings.length} bookings ready for payment release`);
+
+    for (const booking of bookings) {
+      try {
+        if (!booking.payment) {
+          console.warn(`⚠️ Booking ${booking.id} has no payment record`);
+          failed++;
+          continue;
+        }
+
+        // Credit provider's wallet with the payout amount (in kobo)
+        const payoutAmountKobo = Math.round(booking.payment.providerPayout * 100);
+        
+        await creditProviderEarnings(
+          booking.providerId,
+          payoutAmountKobo,
+          booking.id,
+          booking.payment.id
+        );
+
+        // Mark payment as released
+        await markPaymentReleased(booking.id);
+
+        // Notify provider
+        await createNotification({
+          userId: booking.provider.userId,
+          type: 'PAYMENT_RELEASED',
+          title: 'Payment Released! 💰',
+          message: `₦${booking.payment.providerPayout.toLocaleString()} has been released to your wallet for completing "${booking.service.name}".`,
+          metadata: {
+            bookingId: booking.id,
+            paymentId: booking.payment.id,
+            amount: booking.payment.providerPayout,
+          },
+        });
+
+        // Notify customer that payment was released
+        await createNotification({
+          userId: booking.userId,
+          type: 'PAYMENT_RELEASED',
+          title: 'Payment Released to Provider',
+          message: `Payment for "${booking.service.name}" has been released to the service provider. Thank you for using EasyKonnect!`,
+          metadata: {
+            bookingId: booking.id,
+          },
+        });
+
+        console.log(`✅ Released payment for booking ${booking.id} to provider ${booking.providerId}`);
+        released++;
+      } catch (error: any) {
+        console.error(`❌ Failed to release payment for booking ${booking.id}:`, error.message);
+        failed++;
+      }
+    }
+  } catch (error: any) {
+    console.error('❌ Error processing automatic payment releases:', error.message);
+  }
+
+  console.log(`💰 Payment release complete: ${released} released, ${failed} failed`);
+  return { released, failed };
+}
+
 // ===========================================
 // Background Job Processor
 // ===========================================
@@ -179,6 +261,10 @@ async function processBackgroundJob(job: Job<BackgroundJobData>): Promise<void> 
 
     case 'UNLOCK_STALE_WALLETS':
       await unlockStaleWallets();
+      break;
+
+    case 'PROCESS_AUTOMATIC_PAYMENT_RELEASES':
+      await processAutomaticPaymentReleases();
       break;
 
     default:
@@ -256,6 +342,15 @@ export async function scheduleRecurringJobs(): Promise<void> {
     { jobType: 'UNLOCK_STALE_WALLETS' },
     '*/15 * * * *', // Every 15 minutes
     'unlock-stale-wallets'
+  );
+
+  // Process automatic payment releases every 10 minutes
+  // Checks for bookings where 24-hour dispute window has passed
+  await manager.addScheduledJob<BackgroundJobData>(
+    QUEUE_NAMES.BACKGROUND,
+    { jobType: 'PROCESS_AUTOMATIC_PAYMENT_RELEASES' },
+    '*/10 * * * *', // Every 10 minutes
+    'automatic-payment-releases'
   );
 
   console.log('📅 Recurring background jobs scheduled');

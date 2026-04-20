@@ -319,6 +319,12 @@ model Booking {
   dispute       Dispute?
   
   completedAt   DateTime?
+  
+  // Customer confirmation of service delivery
+  customerConfirmedAt   DateTime?     // When customer confirmed delivery
+  paymentReleaseAt      DateTime?     // When payment will be auto-released (24h after confirmation)
+  paymentReleasedAt     DateTime?     // When payment was actually released to provider
+  
   cancelledAt   DateTime?
   cancellationReason String?
   
@@ -330,6 +336,7 @@ model Booking {
   @@index([providerId, status])
   @@index([status, scheduledDate])
   @@index([scheduledDate])
+  @@index([paymentReleaseAt])
   @@map("bookings")
 }
 

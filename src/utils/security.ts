@@ -338,7 +338,7 @@ export const validateText = (
   
   if (sanitized.length > maxLength) {
     throw new GraphQLError(
-      `${fieldName} must be less than ${maxLength} characters`,
+      `${fieldName} must be at most ${maxLength} characters`,
       { extensions: { code: 'INVALID_INPUT' } }
     );
   }
