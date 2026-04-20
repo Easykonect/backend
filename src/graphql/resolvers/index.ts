@@ -297,6 +297,13 @@ const requireAdminAuth = (context: GraphQLContext) => {
   return requireAnyRole(context, [UserRole.ADMIN, UserRole.SUPER_ADMIN]);
 };
 
+/**
+ * Helper: Require super admin authentication (SUPER_ADMIN only)
+ */
+const requireSuperAdminAuth = (context: GraphQLContext) => {
+  return requireRole(context, UserRole.SUPER_ADMIN);
+};
+
 export const resolvers = {
   Query: {
     // ==================
@@ -1211,7 +1218,8 @@ export const resolvers = {
     },
 
     /**
-     * Get all payments (Admin)
+     * Get all payments (Super Admin only)
+     * Financial overview - restricted to super admin
      */
     allPayments: async (
       _: unknown,
@@ -1221,7 +1229,7 @@ export const resolvers = {
       },
       context: GraphQLContext
     ) => {
-      requireAdminAuth(context);
+      requireSuperAdminAuth(context);
       return getAllPayments(
         args.filters || {},
         { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
@@ -1229,14 +1237,15 @@ export const resolvers = {
     },
 
     /**
-     * Get payment statistics (Admin)
+     * Get payment statistics (Super Admin only)
+     * Includes commission data - restricted to super admin
      */
     paymentStats: async (
       _: unknown,
       __: unknown,
       context: GraphQLContext
     ) => {
-      requireAdminAuth(context);
+      requireSuperAdminAuth(context);
       return getPaymentStats();
     },
 
@@ -1535,14 +1544,15 @@ export const resolvers = {
     },
 
     /**
-     * Get refund statistics
+     * Get refund statistics (Super Admin only)
+     * Financial data - restricted to super admin
      */
     refundStats: async (
       _: unknown,
       args: { period?: string },
       context: GraphQLContext
     ) => {
-      requireAdminAuth(context);
+      requireSuperAdminAuth(context);
       return getRefundStats(
         args.period as Parameters<typeof getRefundStats>[0] || 'ALL_TIME'
       );
@@ -2189,14 +2199,15 @@ export const resolvers = {
     },
 
     /**
-     * Process refund (Admin only)
+     * Process refund (Super Admin only)
+     * Involves money movement - restricted to super admin
      */
     processRefund: async (
       _: unknown,
       args: { input: { paymentId: string; amount?: number; reason: string } },
       context: GraphQLContext
     ) => {
-      const admin = requireAdminAuth(context);
+      const admin = requireSuperAdminAuth(context);
       return processRefund(admin.userId, args.input);
     },
 
@@ -2380,38 +2391,38 @@ export const resolvers = {
     // ==================
 
     /**
-     * Process a pending withdrawal
+     * Process a pending withdrawal (SUPER_ADMIN only)
      */
     processWithdrawal: async (
       _: unknown,
       args: { id: string },
       context: GraphQLContext
     ) => {
-      const admin = requireAdminAuth(context);
+      const admin = requireSuperAdminAuth(context);
       return processWithdrawal(args.id, admin.userId, admin.role);
     },
 
     /**
-     * Reject a withdrawal
+     * Reject a withdrawal (SUPER_ADMIN only)
      */
     rejectWithdrawal: async (
       _: unknown,
       args: { id: string; reason: string },
       context: GraphQLContext
     ) => {
-      const admin = requireAdminAuth(context);
+      const admin = requireSuperAdminAuth(context);
       return rejectWithdrawal(args.id, admin.userId, admin.role, args.reason);
     },
 
     /**
-     * Retry a failed withdrawal
+     * Retry a failed withdrawal (SUPER_ADMIN only)
      */
     retryWithdrawal: async (
       _: unknown,
       args: { id: string },
       context: GraphQLContext
     ) => {
-      const admin = requireAdminAuth(context);
+      const admin = requireSuperAdminAuth(context);
       return retryWithdrawal(args.id, admin.userId, admin.role);
     },
 
@@ -2477,16 +2488,17 @@ export const resolvers = {
 
     /**
      * Adjust wallet balance (Admin)
-     * SECURITY: Role-based limits enforced in service
-     * - Regular Admin: max ₦100,000
-     * - Super Admin: max ₦1,000,000
+     * Adjust wallet balance (SUPER_ADMIN only)
+     * For manual corrections or compensations
+     * 
+     * SECURITY: Super Admin only, max ₦1,000,000 per adjustment
      */
     adjustWalletBalance: async (
       _: unknown,
       args: { userId: string; amount: number; reason: string },
       context: GraphQLContext
     ) => {
-      const admin = requireAdminAuth(context);
+      const admin = requireSuperAdminAuth(context);
       // Determine CREDIT or DEBIT based on amount sign
       const type = args.amount >= 0 ? 'CREDIT' : 'DEBIT';
       const amountKobo = Math.abs(args.amount * 100); // Convert to kobo
