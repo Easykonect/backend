@@ -273,6 +273,7 @@ export const createService = async (userId: string, input: CreateServiceInput) =
   const sanitizedDescription = validateText(
     sanitizeBasic(description),
     'Description',
+    10,
     MAX_LENGTHS.DESCRIPTION
   );
   const validatedPrice = validateAmount(price, 'Price');
@@ -383,6 +384,7 @@ export const updateService = async (userId: string, serviceId: string, input: Up
     updateData.description = validateText(
       sanitizeBasic(input.description),
       'Description',
+      10,
       MAX_LENGTHS.DESCRIPTION
     );
   }

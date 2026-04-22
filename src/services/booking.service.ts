@@ -14,7 +14,7 @@
  */
 
 import prisma from '@/lib/prisma';
-import { BookingStatus, UserRole, ServiceStatus } from '@/constants';
+import { BookingStatus, PaymentStatus, UserRole, ServiceStatus } from '@/constants';
 import { GraphQLError } from 'graphql';
 import { config } from '@/config';
 
@@ -644,7 +644,8 @@ export const startService = async (bookingId: string, userId: string) => {
   }
 
   const booking = await prisma.booking.findUnique({
-    where: { id: bookingId }
+    where: { id: bookingId },
+    include: { payment: true },
   });
 
   if (!booking) {
@@ -659,10 +660,27 @@ export const startService = async (bookingId: string, userId: string) => {
     });
   }
 
-  if (booking.status !== BookingStatus.ACCEPTED) {
-    throw new GraphQLError(`Cannot start a booking with status: ${booking.status}. Booking must be ACCEPTED first.`, {
-      extensions: { code: 'INVALID_BOOKING_STATUS' }
-    });
+  // Ensure customer has paid before allowing service to start
+  const hasPaid = booking.payment?.status === PaymentStatus.COMPLETED;
+  if (!hasPaid) {
+    throw new GraphQLError(
+      'Customer has not paid yet. Service can only start after payment is confirmed.',
+      { extensions: { code: 'PAYMENT_REQUIRED' } }
+    );
+  }
+
+  if (booking.status === BookingStatus.ACCEPTED) {
+    throw new GraphQLError(
+      'Customer has not paid yet. Service can only start after payment is confirmed.',
+      { extensions: { code: 'PAYMENT_REQUIRED' } }
+    );
+  }
+
+  if (booking.status !== BookingStatus.IN_PROGRESS) {
+    throw new GraphQLError(
+      `Cannot start a booking with status: ${booking.status}. Booking must have a completed payment first.`,
+      { extensions: { code: 'INVALID_BOOKING_STATUS' } }
+    );
   }
 
   const inProgressBooking = await prisma.booking.update({
