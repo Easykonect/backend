@@ -5,8 +5,10 @@
 
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
+import { config } from '@/config';
 import { UserRole, ServiceStatus, VerificationStatus, type ServiceStatusType } from '@/constants';
 import { sanitizeStrict, sanitizeBasic, validateName, validateText, validateAmount, sanitizeSearchQuery, MAX_LENGTHS } from '@/utils/security';
+import { haversineDistance } from '@/services/browse.service';
 
 // ==================
 // Types
@@ -38,6 +40,11 @@ interface ServiceFiltersInput {
   minPrice?: number;
   maxPrice?: number;
   search?: string;
+  city?: string;
+  state?: string;
+  latitude?: number;
+  longitude?: number;
+  radiusKm?: number;
 }
 
 // ==================
@@ -167,6 +174,63 @@ export const getServices = async (
     ];
   }
 
+  // Provider-relation filters (city, state, geo radius)
+  const providerWhere: any = {};
+  if (filters.city) {
+    providerWhere.city = { equals: sanitizeSearchQuery(filters.city), mode: 'insensitive' };
+  }
+  if (filters.state) {
+    providerWhere.state = { equals: sanitizeSearchQuery(filters.state), mode: 'insensitive' };
+  }
+
+  // Geo radius requires lat + lon. radiusKm falls back to config default.
+  const hasGeo =
+    filters.latitude !== undefined && filters.longitude !== undefined;
+  if (hasGeo) {
+    const radius = Math.min(
+      filters.radiusKm ?? config.geo.defaultRadiusKm,
+      config.geo.maxRadiusKm
+    );
+
+    // Resolve qualifying provider IDs by haversine, then constrain the service query.
+    const candidateProviders = await prisma.serviceProvider.findMany({
+      where: {
+        ...providerWhere,
+        latitude: { not: null },
+        longitude: { not: null },
+      },
+      select: { id: true, latitude: true, longitude: true },
+    });
+
+    const nearbyIds = candidateProviders
+      .filter((p) =>
+        haversineDistance(filters.latitude!, filters.longitude!, p.latitude!, p.longitude!) <= radius
+      )
+      .map((p) => p.id);
+
+    if (nearbyIds.length === 0) {
+      return {
+        items: [],
+        total: 0,
+        page,
+        limit,
+        totalPages: 0,
+        hasNextPage: false,
+        hasPreviousPage: false,
+      };
+    }
+
+    if (where.providerId) {
+      // Intersect explicit providerId with the geo set
+      where.providerId = nearbyIds.includes(where.providerId) ? where.providerId : '__no_match__';
+    } else {
+      where.providerId = { in: nearbyIds };
+    }
+  } else if (Object.keys(providerWhere).length > 0) {
+    // city/state without geo: filter via provider relation
+    where.provider = { is: providerWhere };
+  }
+
   const [items, total] = await Promise.all([
     prisma.service.findMany({
       where,
@@ -191,6 +255,114 @@ export const getServices = async (
     totalPages,
     hasNextPage: page < totalPages,
     hasPreviousPage: page > 1,
+  };
+};
+
+/**
+ * Get Nearby Services (Public)
+ * Returns ACTIVE services from providers within radiusKm of (latitude, longitude),
+ * with each service annotated with its provider's distance from the search point.
+ * Sorted by distance ascending.
+ */
+export const getNearbyServices = async (input: {
+  latitude: number;
+  longitude: number;
+  radiusKm?: number;
+  categoryId?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  search?: string;
+  pagination?: { page?: number; limit?: number };
+}) => {
+  const { latitude, longitude, categoryId, minPrice, maxPrice, search } = input;
+  const radius = Math.min(
+    input.radiusKm ?? config.geo.defaultRadiusKm,
+    config.geo.maxRadiusKm
+  );
+  const page = input.pagination?.page ?? 1;
+  const rawLimit = input.pagination?.limit ?? 20;
+  const limit = Math.min(rawLimit, config.pagination.maxLimit);
+
+  // Resolve providers within radius
+  const candidateProviders = await prisma.serviceProvider.findMany({
+    where: {
+      verificationStatus: VerificationStatus.VERIFIED,
+      latitude: { not: null },
+      longitude: { not: null },
+    },
+    select: { id: true, latitude: true, longitude: true },
+  });
+
+  const distanceById = new Map<string, number>();
+  for (const p of candidateProviders) {
+    const d = haversineDistance(latitude, longitude, p.latitude!, p.longitude!);
+    if (d <= radius) {
+      distanceById.set(p.id, d);
+    }
+  }
+
+  if (distanceById.size === 0) {
+    return {
+      items: [],
+      total: 0,
+      page,
+      limit,
+      totalPages: 0,
+      hasNextPage: false,
+      hasPreviousPage: false,
+      radiusKm: radius,
+      searchLocation: { latitude, longitude },
+    };
+  }
+
+  const where: any = {
+    status: ServiceStatus.ACTIVE,
+    providerId: { in: Array.from(distanceById.keys()) },
+  };
+
+  if (categoryId) where.categoryId = categoryId;
+  if (minPrice !== undefined || maxPrice !== undefined) {
+    where.price = {};
+    if (minPrice !== undefined) where.price.gte = minPrice;
+    if (maxPrice !== undefined) where.price.lte = maxPrice;
+  }
+  if (search) {
+    const sanitizedSearch = sanitizeSearchQuery(search);
+    where.OR = [
+      { name: { contains: sanitizedSearch, mode: 'insensitive' } },
+      { description: { contains: sanitizedSearch, mode: 'insensitive' } },
+    ];
+  }
+
+  // Fetch all matching, sort by distance, then paginate in-memory
+  // (distance is computed per provider, can't be ordered by Prisma directly)
+  const allMatches = await prisma.service.findMany({
+    where,
+    include: { provider: true, category: true },
+  });
+
+  const sorted = allMatches
+    .map((s) => ({ service: s, distanceKm: distanceById.get(s.providerId)! }))
+    .sort((a, b) => a.distanceKm - b.distanceKm);
+
+  const total = sorted.length;
+  const totalPages = Math.ceil(total / limit);
+  const skip = (page - 1) * limit;
+  const pageItems = sorted.slice(skip, skip + limit);
+
+  return {
+    items: pageItems.map(({ service, distanceKm }) => ({
+      ...formatService(service),
+      distanceKm,
+    })),
+    total,
+    page,
+    limit,
+    totalPages,
+    hasNextPage: page < totalPages,
+    hasPreviousPage: page > 1,
+    radiusKm: radius,
+    searchLocation: { latitude, longitude },
   };
 };
 

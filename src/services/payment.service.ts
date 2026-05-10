@@ -47,6 +47,7 @@ import { capturePaymentError, addBreadcrumb } from '@/lib/sentry';
 interface InitializePaymentInput {
   bookingId: string;
   callbackUrl?: string;
+  returnDeepLink?: string;
 }
 
 interface PaymentFilters {
@@ -203,7 +204,7 @@ export const initializePayment = async (
   userId: string,
   input: InitializePaymentInput
 ) => {
-  const { bookingId, callbackUrl } = input;
+  const { bookingId, callbackUrl, returnDeepLink } = input;
 
   // Get booking with user details
   const booking = await prisma.booking.findUnique({
@@ -253,17 +254,37 @@ export const initializePayment = async (
   // Generate transaction reference
   const reference = generateTransactionReference();
 
+  // Resolve the callback URL Paystack will redirect to after checkout.
+  // - Native app flow: caller sets returnDeepLink. We force Paystack to land
+  //   on our HTTPS bridge route, which then bounces to the deep link. This is
+  //   required because Paystack's hosted checkout cannot navigate browsers
+  //   directly to non-http(s) schemes.
+  // - Web/legacy flow: caller passes a fully-formed HTTPS callbackUrl.
+  // - Fallback: FRONTEND_URL/payment/callback.
+  let resolvedCallbackUrl: string;
+  if (returnDeepLink) {
+    const base = config.platform.backendUrl || config.platform.frontendUrl;
+    resolvedCallbackUrl = `${base}/api/payments/paystack/callback`;
+  } else if (callbackUrl) {
+    resolvedCallbackUrl = callbackUrl;
+  } else {
+    resolvedCallbackUrl = `${config.platform.frontendUrl}/payment/callback`;
+  }
+
   // Initialize Paystack transaction
   const paystackResponse = await paystack.initializeTransaction({
     email: booking.user.email,
     amount: serviceAmountKobo,
     reference,
-    callback_url: callbackUrl || `${config.platform.frontendUrl}/payment/callback`,
+    callback_url: resolvedCallbackUrl,
     metadata: {
       bookingId: booking.id,
       userId: booking.userId,
       providerId: booking.providerId,
       serviceId: booking.serviceId,
+      // Stored on the Paystack transaction so the bridge route can recover it
+      // from /transaction/verify without holding state on the backend.
+      returnDeepLink: returnDeepLink || null,
       custom_fields: [
         {
           display_name: 'Booking ID',

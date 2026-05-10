@@ -817,6 +817,34 @@ export const typeDefs = gql`
     hasPreviousPage: Boolean!
   }
 
+  type ServiceWithDistance {
+    id: ID!
+    provider: ServiceProviderProfile!
+    category: ServiceCategory!
+    name: String!
+    slug: String!
+    description: String!
+    price: Float!
+    duration: Int!
+    status: ServiceStatus!
+    images: [String!]!
+    distanceKm: Float!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type PaginatedNearbyServices {
+    items: [ServiceWithDistance!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+    radiusKm: Float!
+    searchLocation: SearchLocation!
+  }
+
   type PaginatedCategories {
     items: [ServiceCategory!]!
     total: Int!
@@ -953,6 +981,23 @@ export const typeDefs = gql`
     minPrice: Float
     maxPrice: Float
     search: String
+    city: String
+    state: String
+    # Geo filter (all three required together to apply)
+    latitude: Float
+    longitude: Float
+    radiusKm: Float
+  }
+
+  input NearbyServicesInput {
+    latitude: Float!
+    longitude: Float!
+    radiusKm: Float
+    categoryId: ID
+    minPrice: Float
+    maxPrice: Float
+    search: String
+    pagination: PaginationInput
   }
 
   # ==================
@@ -1067,7 +1112,14 @@ export const typeDefs = gql`
 
   input InitializePaymentInput {
     bookingId: ID!
+    # Legacy/web flow: a final URL Paystack should redirect to after checkout.
+    # Ignored for native apps — use returnDeepLink instead.
     callbackUrl: String
+    # Native app flow: the deep link the bridge should bounce back to once
+    # Paystack redirects to the backend (e.g. "easykonnect://payment-callback").
+    # When set, the backend forwards Paystack to its own HTTPS bridge route,
+    # which verifies the payment and redirects to this deep link.
+    returnDeepLink: String
   }
 
   input RefundInput {
@@ -2108,6 +2160,9 @@ export const typeDefs = gql`
 
     # Get nearby providers within a radius using geolocation
     nearbyProviders(input: NearbyProvidersInput!): PaginatedNearbyProviders!
+
+    # Get nearby services within a radius using geolocation
+    nearbyServices(input: NearbyServicesInput!): PaginatedNearbyServices!
 
     # ==================
     # Dispute Queries

@@ -79,6 +79,7 @@ import {
 
 import {
   getServices,
+  getNearbyServices,
   getServiceById,
   getMyServices,
   createService,
@@ -387,6 +388,11 @@ export const resolvers = {
           minPrice?: number;
           maxPrice?: number;
           search?: string;
+          city?: string;
+          state?: string;
+          latitude?: number;
+          longitude?: number;
+          radiusKm?: number;
         };
         pagination?: { page?: number; limit?: number };
       }
@@ -836,6 +842,27 @@ export const resolvers = {
         sortBy: (sortBy as any) ?? 'RATING_DESC',
         pagination: pagination ?? { page: 1, limit: 10 },
       });
+    },
+
+    /**
+     * Get nearby services using Haversine distance (geolocation)
+     */
+    nearbyServices: async (
+      _: unknown,
+      args: {
+        input: {
+          latitude: number;
+          longitude: number;
+          radiusKm?: number;
+          categoryId?: string;
+          minPrice?: number;
+          maxPrice?: number;
+          search?: string;
+          pagination?: { page?: number; limit?: number };
+        };
+      }
+    ) => {
+      return getNearbyServices(args.input);
     },
 
     // ==================
@@ -2179,7 +2206,7 @@ export const resolvers = {
      */
     initializePayment: async (
       _: unknown,
-      args: { input: { bookingId: string; callbackUrl?: string } },
+      args: { input: { bookingId: string; callbackUrl?: string; returnDeepLink?: string } },
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);

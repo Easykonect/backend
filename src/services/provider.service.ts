@@ -97,10 +97,10 @@ export const becomeProvider = async (userId: string, input: BecomeProviderInput)
 
   // Sanitize and validate inputs
   const sanitizedBusinessName = validateName(businessName, 'Business name');
-  const sanitizedDescription = businessDescription 
-    ? validateText(sanitizeBasic(businessDescription), 'Business description', MAX_LENGTHS.DESCRIPTION)
+  const sanitizedDescription = businessDescription
+    ? validateText(sanitizeBasic(businessDescription), 'Business description', 10, 250)
     : undefined;
-  const sanitizedAddress = validateText(sanitizeStrict(address), 'Address', MAX_LENGTHS.SHORT_TEXT);
+  const sanitizedAddress = validateText(sanitizeStrict(address), 'Address', 0, MAX_LENGTHS.SHORT_TEXT);
   const sanitizedCity = validateName(city, 'City');
   const sanitizedState = validateName(state, 'State');
   const sanitizedCountry = validateName(country, 'Country');
@@ -230,13 +230,14 @@ export const updateProviderProfile = async (userId: string, input: UpdateProvide
   }
   if (input.businessDescription !== undefined) {
     updateData.businessDescription = validateText(
-      sanitizeBasic(input.businessDescription), 
-      'Business description', 
-      MAX_LENGTHS.DESCRIPTION
+      sanitizeBasic(input.businessDescription),
+      'Business description',
+      10,
+      250
     );
   }
   if (input.address !== undefined) {
-    updateData.address = validateText(sanitizeStrict(input.address), 'Address', MAX_LENGTHS.SHORT_TEXT);
+    updateData.address = validateText(sanitizeStrict(input.address), 'Address', 0, MAX_LENGTHS.SHORT_TEXT);
   }
   if (input.city !== undefined) {
     updateData.city = validateName(input.city, 'City');

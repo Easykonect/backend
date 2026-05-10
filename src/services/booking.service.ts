@@ -17,6 +17,16 @@ import prisma from '@/lib/prisma';
 import { BookingStatus, PaymentStatus, UserRole, ServiceStatus } from '@/constants';
 import { GraphQLError } from 'graphql';
 import { config } from '@/config';
+import { emitToUser } from '@/lib/socket';
+import {
+  notifyBookingAccepted,
+  notifyBookingRejected,
+  notifyBookingStarted,
+  notifyBookingCompleted,
+  notifyBookingCancelled,
+} from '@/services/notification.service';
+import { sendBookingPush } from '@/services/push.service';
+import { logger } from '@/lib/logger';
 
 // ==================
 // Types
@@ -387,7 +397,20 @@ export const cancelBooking = async (bookingId: string, userId: string, reason: s
     }
   });
 
-  return formatBookingResponse(cancelledBooking);
+  const response = formatBookingResponse(cancelledBooking);
+
+  // Customer cancelled -> notify the provider (their user account)
+  await dispatchBookingEvent({
+    kind: 'cancelled',
+    recipientUserId: cancelledBooking.provider.user.id,
+    bookingId: cancelledBooking.id,
+    serviceName: cancelledBooking.service.name,
+    cancelledByLabel: `${cancelledBooking.user.firstName} ${cancelledBooking.user.lastName}`.trim() || 'the customer',
+    reason,
+    bookingPayload: response,
+  });
+
+  return response;
 };
 
 /**
@@ -521,6 +544,61 @@ export const getProviderBookings = async (
 };
 
 /**
+ * Fan out a booking status change to: socket emit, in-app notification, push.
+ * Failures are swallowed (logged) — the DB transition has already succeeded
+ * and a downstream messaging hiccup must not roll it back.
+ */
+type BookingEventKind = 'accepted' | 'rejected' | 'started' | 'completed' | 'cancelled';
+const dispatchBookingEvent = async (params: {
+  kind: BookingEventKind;
+  recipientUserId: string;
+  bookingId: string;
+  serviceName: string;
+  providerName?: string;
+  reason?: string;
+  cancelledByLabel?: string;
+  bookingPayload: unknown;
+}) => {
+  const { kind, recipientUserId, bookingId, serviceName, providerName, reason, cancelledByLabel, bookingPayload } = params;
+
+  // 1. Real-time socket event
+  try {
+    await emitToUser(recipientUserId, `booking:${kind}`, {
+      bookingId,
+      booking: bookingPayload,
+    });
+  } catch (err) {
+    logger.error('Failed to emit booking socket event', { kind, bookingId, err });
+  }
+
+  // 2. In-app notification (DB row)
+  try {
+    if (kind === 'accepted') {
+      await notifyBookingAccepted(recipientUserId, bookingId, serviceName, providerName ?? 'The provider');
+    } else if (kind === 'rejected') {
+      await notifyBookingRejected(recipientUserId, bookingId, serviceName, reason);
+    } else if (kind === 'started') {
+      await notifyBookingStarted(recipientUserId, bookingId, serviceName);
+    } else if (kind === 'completed') {
+      await notifyBookingCompleted(recipientUserId, bookingId, serviceName);
+    } else if (kind === 'cancelled') {
+      await notifyBookingCancelled(recipientUserId, bookingId, serviceName, cancelledByLabel ?? 'the other party', reason);
+    }
+  } catch (err) {
+    logger.error('Failed to write booking notification', { kind, bookingId, err });
+  }
+
+  // 3. Push notification (sendBookingPush has no 'started' variant)
+  if (kind !== 'started') {
+    try {
+      await sendBookingPush(recipientUserId, kind, bookingId, serviceName);
+    } catch (err) {
+      logger.error('Failed to send booking push', { kind, bookingId, err });
+    }
+  }
+};
+
+/**
  * Accept booking (PROVIDER only)
  */
 export const acceptBooking = async (bookingId: string, userId: string) => {
@@ -570,7 +648,18 @@ export const acceptBooking = async (bookingId: string, userId: string) => {
     }
   });
 
-  return formatBookingResponse(acceptedBooking);
+  const response = formatBookingResponse(acceptedBooking);
+
+  await dispatchBookingEvent({
+    kind: 'accepted',
+    recipientUserId: acceptedBooking.userId,
+    bookingId: acceptedBooking.id,
+    serviceName: acceptedBooking.service.name,
+    providerName: acceptedBooking.provider.businessName,
+    bookingPayload: response,
+  });
+
+  return response;
 };
 
 /**
@@ -626,7 +715,18 @@ export const rejectBooking = async (bookingId: string, userId: string, reason: s
     }
   });
 
-  return formatBookingResponse(rejectedBooking);
+  const response = formatBookingResponse(rejectedBooking);
+
+  await dispatchBookingEvent({
+    kind: 'rejected',
+    recipientUserId: rejectedBooking.userId,
+    bookingId: rejectedBooking.id,
+    serviceName: rejectedBooking.service.name,
+    reason,
+    bookingPayload: response,
+  });
+
+  return response;
 };
 
 /**
@@ -660,26 +760,17 @@ export const startService = async (bookingId: string, userId: string) => {
     });
   }
 
-  // Ensure customer has paid before allowing service to start
-  const hasPaid = booking.payment?.status === PaymentStatus.COMPLETED;
-  if (!hasPaid) {
+  if (booking.status !== BookingStatus.ACCEPTED) {
     throw new GraphQLError(
-      'Customer has not paid yet. Service can only start after payment is confirmed.',
-      { extensions: { code: 'PAYMENT_REQUIRED' } }
-    );
-  }
-
-  if (booking.status === BookingStatus.ACCEPTED) {
-    throw new GraphQLError(
-      'Customer has not paid yet. Service can only start after payment is confirmed.',
-      { extensions: { code: 'PAYMENT_REQUIRED' } }
-    );
-  }
-
-  if (booking.status !== BookingStatus.IN_PROGRESS) {
-    throw new GraphQLError(
-      `Cannot start a booking with status: ${booking.status}. Booking must have a completed payment first.`,
+      `Cannot start a booking with status: ${booking.status}. Booking must be ACCEPTED before it can be started.`,
       { extensions: { code: 'INVALID_BOOKING_STATUS' } }
+    );
+  }
+
+  if (booking.payment?.status !== PaymentStatus.COMPLETED) {
+    throw new GraphQLError(
+      'Customer has not paid yet. Service can only start after payment is confirmed.',
+      { extensions: { code: 'PAYMENT_REQUIRED' } }
     );
   }
 
@@ -697,7 +788,17 @@ export const startService = async (bookingId: string, userId: string) => {
     }
   });
 
-  return formatBookingResponse(inProgressBooking);
+  const response = formatBookingResponse(inProgressBooking);
+
+  await dispatchBookingEvent({
+    kind: 'started',
+    recipientUserId: inProgressBooking.userId,
+    bookingId: inProgressBooking.id,
+    serviceName: inProgressBooking.service.name,
+    bookingPayload: response,
+  });
+
+  return response;
 };
 
 /**
@@ -753,7 +854,17 @@ export const completeService = async (bookingId: string, userId: string) => {
     }
   });
 
-  return formatBookingResponse(completedBooking);
+  const response = formatBookingResponse(completedBooking);
+
+  await dispatchBookingEvent({
+    kind: 'completed',
+    recipientUserId: completedBooking.userId,
+    bookingId: completedBooking.id,
+    serviceName: completedBooking.service.name,
+    bookingPayload: response,
+  });
+
+  return response;
 };
 
 // ==================

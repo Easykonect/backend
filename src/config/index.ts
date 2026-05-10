@@ -134,6 +134,10 @@ export const config = {
     commissionRate: parseFloat(process.env.COMMISSION_RATE || '0.07'), // 7% commission
     currency: process.env.CURRENCY || 'NGN',
     frontendUrl: process.env.FRONTEND_URL || '',
+    // Public HTTPS origin of this backend (e.g. "https://api.easykonnect.com").
+    // Used for Paystack callback bridge so native apps can be redirected back
+    // via deep link after checkout. Falls back to FRONTEND_URL for dev.
+    backendUrl: process.env.BACKEND_URL || process.env.FRONTEND_URL || '',
     supportEmail: process.env.SUPPORT_EMAIL || '',
   },
 

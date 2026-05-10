@@ -53,3 +53,6 @@ docs/PROVIDER_VERIFICATION_TESTS.md
 docs/HOSTING_DOCS.md
 docs/DEPLOYMENT.md
 docs/api-metadata.json
+# Contains placeholder env values (sk_live_xxxx etc.) that trip GitHub
+# secret scanning. Keep this file out of the repo entirely.
+docs/THIRD_PARTY_SERVICES.md
