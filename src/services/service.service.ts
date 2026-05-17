@@ -45,6 +45,10 @@ interface ServiceFiltersInput {
   latitude?: number;
   longitude?: number;
   radiusKm?: number;
+  // Not exposed in GraphQL — populated by the resolver from the auth context
+  // so that a logged-in provider doesn't see their own services in the
+  // customer-facing service list.
+  excludeProviderUserId?: string;
 }
 
 // ==================
@@ -174,13 +178,16 @@ export const getServices = async (
     ];
   }
 
-  // Provider-relation filters (city, state, geo radius)
+  // Provider-relation filters (city, state, geo radius, exclude-self)
   const providerWhere: any = {};
   if (filters.city) {
     providerWhere.city = { equals: sanitizeSearchQuery(filters.city), mode: 'insensitive' };
   }
   if (filters.state) {
     providerWhere.state = { equals: sanitizeSearchQuery(filters.state), mode: 'insensitive' };
+  }
+  if (filters.excludeProviderUserId) {
+    providerWhere.userId = { not: filters.excludeProviderUserId };
   }
 
   // Geo radius requires lat + lon. radiusKm falls back to config default.
@@ -273,8 +280,11 @@ export const getNearbyServices = async (input: {
   maxPrice?: number;
   search?: string;
   pagination?: { page?: number; limit?: number };
+  // Not exposed in GraphQL — populated by the resolver from auth context to
+  // exclude the requesting provider's own services from the customer view.
+  excludeProviderUserId?: string;
 }) => {
-  const { latitude, longitude, categoryId, minPrice, maxPrice, search } = input;
+  const { latitude, longitude, categoryId, minPrice, maxPrice, search, excludeProviderUserId } = input;
   const radius = Math.min(
     input.radiusKm ?? config.geo.defaultRadiusKm,
     config.geo.maxRadiusKm
@@ -289,6 +299,7 @@ export const getNearbyServices = async (input: {
       verificationStatus: VerificationStatus.VERIFIED,
       latitude: { not: null },
       longitude: { not: null },
+      ...(excludeProviderUserId ? { userId: { not: excludeProviderUserId } } : {}),
     },
     select: { id: true, latitude: true, longitude: true },
   });

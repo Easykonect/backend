@@ -553,3 +553,47 @@ describe('getNearbyProviders', () => {
     expect(result.items[0].businessName).toBe('High');
   });
 });
+
+// ==================
+// Own-provider filtering (caller is themselves a provider)
+// ==================
+
+describe('browseProviders — excludeUserId', () => {
+  it('adds userId: { not: ... } to the where clause when excludeUserId is set', async () => {
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.serviceProvider.count as jest.Mock).mockResolvedValueOnce(0);
+    (prisma.review.groupBy as jest.Mock).mockResolvedValueOnce([]);
+
+    await browseProviders({ excludeUserId: 'user-A' });
+
+    const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(call.where.userId).toEqual({ not: 'user-A' });
+  });
+
+  it('omits the userId filter when excludeUserId is not passed', async () => {
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.serviceProvider.count as jest.Mock).mockResolvedValueOnce(0);
+    (prisma.review.groupBy as jest.Mock).mockResolvedValueOnce([]);
+
+    await browseProviders({});
+
+    const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(call.where.userId).toBeUndefined();
+  });
+});
+
+describe('getNearbyProviders — excludeUserId', () => {
+  it('adds userId: { not: ... } to the geo query when excludeUserId is set', async () => {
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.review.groupBy as jest.Mock).mockResolvedValueOnce([]);
+
+    await getNearbyProviders({
+      latitude: 6.5244,
+      longitude: 3.3792,
+      excludeUserId: 'user-A',
+    });
+
+    const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(call.where.userId).toEqual({ not: 'user-A' });
+  });
+});

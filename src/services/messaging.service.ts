@@ -13,6 +13,7 @@ import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { UserRole, ConversationType, MessageStatus, NotificationType } from '@/constants';
 import { createNotification } from './notification.service';
+import { sendMessagePush } from './push.service';
 import { sanitizeBasic, validateObjectId } from '@/utils/security';
 
 // ==================
@@ -236,14 +237,32 @@ export const createOrGetConversation = async (
     });
 
     // Send notification to recipient
-    await createNotification({
-      userId: participantId,
-      type: NotificationType.NEW_MESSAGE,
-      title: 'New Message',
-      message: `You have a new message`,
-      entityType: 'conversation',
-      entityId: conversation.id,
-    });
+    try {
+      await createNotification({
+        userId: participantId,
+        type: NotificationType.NEW_MESSAGE,
+        title: 'New Message',
+        message: `You have a new message`,
+        entityType: 'conversation',
+        entityId: conversation.id,
+      });
+    } catch (err) {
+      console.error('Failed to write initial message notification', err);
+    }
+
+    try {
+      const sender = await getUserDisplayInfo(senderId);
+      const senderDisplay =
+        [sender?.firstName, sender?.lastName].filter(Boolean).join(' ').trim() || 'Someone';
+      await sendMessagePush(
+        participantId,
+        senderDisplay,
+        sanitizedInitialMessage.substring(0, 100),
+        conversation.id
+      );
+    } catch (err) {
+      console.error('Failed to send initial message push', err);
+    }
   }
 
   return prisma.conversation.findUnique({
@@ -425,22 +444,36 @@ export const sendMessage = async (
     },
   });
 
+  // Enrich message with sender info — fetched up front so the push
+  // notification can show "New message from <name>".
+  const sender = await getUserDisplayInfo(senderId);
+  const senderDisplay =
+    [sender?.firstName, sender?.lastName].filter(Boolean).join(' ').trim() || 'Someone';
+  const messagePreview = sanitizedContent.substring(0, 100);
+
   // Send notification to other participants
   const otherParticipantIds = conversation.participantIds.filter((id) => id !== senderId);
-  
-  for (const recipientId of otherParticipantIds) {
-    await createNotification({
-      userId: recipientId,
-      type: NotificationType.NEW_MESSAGE,
-      title: 'New Message',
-      message: sanitizedContent.substring(0, 100),
-      entityType: 'conversation',
-      entityId: conversationId,
-    });
-  }
 
-  // Enrich message with sender info
-  const sender = await getUserDisplayInfo(senderId);
+  for (const recipientId of otherParticipantIds) {
+    try {
+      await createNotification({
+        userId: recipientId,
+        type: NotificationType.NEW_MESSAGE,
+        title: 'New Message',
+        message: messagePreview,
+        entityType: 'conversation',
+        entityId: conversationId,
+      });
+    } catch (err) {
+      console.error('Failed to write message notification', err);
+    }
+
+    try {
+      await sendMessagePush(recipientId, senderDisplay, messagePreview, conversationId);
+    } catch (err) {
+      console.error('Failed to send message push', err);
+    }
+  }
 
   return {
     ...message,

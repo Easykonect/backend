@@ -57,7 +57,83 @@ Wired into:
 
 All side-effect calls are wrapped in `try/catch` and logged on failure — a flaky push or socket cannot roll back a successful DB transition.
 
-### 1.5. Paystack callback bridge for native deep links
+### 1.5. Full push-notification coverage + admin broadcast endpoints
+**Files:** `src/services/payment.service.ts`, `src/services/messaging.service.ts`, `src/services/user-management.service.ts`, `src/services/withdrawal.service.ts`, `src/services/notification.service.ts`, `src/graphql/schemas/index.ts`, `src/graphql/resolvers/index.ts`
+
+Previously 13 of the 18 notification trigger sites wrote an in-app row but never fired a push. Customers got no phone buzz for payment events, new chat messages, account moderation, or withdrawals. Now every trigger fans out push as well.
+
+**Strategy:** rather than modifying 13 call sites individually, each service got a small `notifyAndPush` (or upgraded `sendNotification`) wrapper that fires both channels. New call sites pick this up automatically.
+
+| Trigger | In-app | Push (new) | Socket |
+|---|:---:|:---:|:---:|
+| Payment verified (customer + provider) | ✓ | ✓ | – |
+| Payment fails during verification | ✓ | ✓ | – |
+| Payment released to provider | ✓ | ✓ | – |
+| Refund processed | ✓ | ✓ | – |
+| New message in conversation | ✓ | ✓ | ✓ |
+| Admin bans / unbans user | ✓ | ✓ | – |
+| Admin restricts / removes restriction | ✓ | ✓ | – |
+| Withdrawal submitted / approved / completed / failed | ✓ | ✓ | – |
+
+Booking events were already wired; nothing changed there.
+
+**New admin broadcast endpoints:**
+
+```graphql
+mutation AdminBroadcast($input: BroadcastNotificationInput!) {
+  adminBroadcastNotification(input: $input) {
+    recipientCount
+    inAppCreated
+    pushDelivery
+    pushError
+  }
+}
+
+mutation SuperAdminBroadcast($input: BroadcastNotificationInput!) {
+  superAdminBroadcastNotification(input: $input) { ... }
+}
+```
+
+Four targeting modes via `BroadcastTargetInput.mode`:
+- `USER_IDS` — specific list
+- `ROLE` — `["SERVICE_USER"]`, `["SERVICE_PROVIDER"]`, `["ADMIN"]` (super-admin only), or any combination
+- `ALL` — every active user the caller is allowed to reach
+- `LOCATION` — by `city` / `state` (matches against provider profiles)
+
+**Permission boundary:**
+- `adminBroadcastNotification` — ADMIN or SUPER_ADMIN. Can target `SERVICE_USER` + `SERVICE_PROVIDER` only.
+- `superAdminBroadcastNotification` — SUPER_ADMIN only. Can additionally target the `ADMIN` role.
+- An ADMIN attempting to target `ADMIN` or `SUPER_ADMIN` gets a `FORBIDDEN` error before the broadcast runs.
+
+**Safety:**
+- Banned / deactivated users are excluded automatically (ACTIVE-status filter on every recipient query)
+- Per-admin daily cap: 50 broadcasts / 24h via Redis sorted-set sliding window — protects against a compromised admin account spamming phishing pushes. Returns `RATE_LIMITED` when exceeded.
+- For `ALL`-mode broadcasts that span every allowedRole (super-admin), the push step uses OneSignal's segment endpoint (`sendPushToAll`) instead of passing tens of thousands of player IDs in one HTTP body.
+
+---
+
+### 1.6. Self-booking prevention + own-service filtering
+**Files:** `src/services/booking.service.ts`, `src/services/service.service.ts`, `src/services/browse.service.ts`, `src/graphql/resolvers/index.ts`
+
+Providers also hold a base user role, so without a guard they could see and book their own services from the customer side. Two layers of defense added.
+
+**1. Hard backend block at the mutation:** `createBooking` now throws `SELF_BOOKING_NOT_ALLOWED` if `service.provider.userId === bookerUserId`. This is the source of truth — even a direct mutation call with a known service ID can't bypass it.
+
+**2. Own-services filtered out of customer-facing list queries:** when the caller is authenticated, the following queries exclude services / providers owned by the caller:
+| Query | Mechanism |
+|---|---|
+| `services(filters)` | Adds `provider.is.userId: { not: caller.userId }` to the where clause |
+| `nearbyServices(input)` | Adds `userId: { not: caller.userId }` to the candidate-provider geo query (pre-haversine) |
+| `nearbyProviders(input)` | Adds `userId: { not: caller.userId }` to the provider query |
+| `providers(input)` | Same |
+
+`providerProfile(providerId)` is **intentionally not filtered** — a provider should still be able to view their own storefront page directly.
+
+Anonymous and customer-only accounts see everything normally. The exclusion only kicks in when the caller's `userId` happens to also own a `ServiceProvider` record.
+
+---
+
+### 1.7. Paystack callback bridge for native deep links
 **Files:** `src/app/api/payments/paystack/callback/route.ts` (new), `src/services/payment.service.ts`, `src/graphql/schemas/index.ts`, `src/graphql/resolvers/index.ts`, `src/config/index.ts`
 
 **Why this exists:** Paystack's hosted checkout cannot redirect a browser directly to a non-http(s) URL like `easykonnect://payment-callback`. Modern browsers block sandboxed iframes from navigating to custom schemes, so the user got stuck on Paystack's "Payment Successful" screen with no way back into the app.
@@ -328,19 +404,25 @@ If step 2 doesn't deliver, the FCM/OneSignal handshake is still broken — retur
 | `src/graphql/resolvers/index.ts` | Wired `nearbyServices` resolver; extended `services` and `initializePayment` resolver typing |
 | `src/config/index.ts` | Added `config.platform.backendUrl` (reads `BACKEND_URL`, falls back to `FRONTEND_URL`) |
 | `src/app/api/payments/paystack/callback/route.ts` | **New file.** HTTPS bridge that bounces Paystack redirects into the mobile app's deep link |
+| `src/services/notification.service.ts` | Added `broadcastNotification()` with `BroadcastTarget` (USER_IDS / ROLE / ALL / LOCATION) and allowedRoles permission gate |
+| `src/services/messaging.service.ts` | Wired `sendMessagePush` into both message-create paths |
+| `src/services/user-management.service.ts` | Added local `notifyAndPush` helper, replaced 4 moderation `createNotification` call sites |
+| `src/services/withdrawal.service.ts` | Added local `notifyAndPush` helper, replaced 3 withdrawal `createNotification` call sites |
 
 ### Test files added
 
 | File | Tests |
 |---|---|
-| `src/__tests__/services/booking.service.test.ts` | 11 — startService payment guard (5), event dispatch fan-out across all 5 mutations, side-effect failure isolation |
+| `src/__tests__/services/booking.service.test.ts` | 15 — startService payment guard (5), event dispatch fan-out across all 5 mutations, side-effect failure isolation, **self-booking guard (4)** |
 | `src/__tests__/services/provider.service.test.ts` | 8 — businessDescription 10–250 validation in becomeProvider + updateProviderProfile, address arg-order regression |
-| `src/__tests__/services/service.service.test.ts` | 8 — geo filtering on `getServices`, `getNearbyServices` distance sort + radius cutoff + search + metadata |
+| `src/__tests__/services/service.service.test.ts` | 14 — geo filtering on `getServices`, `getNearbyServices` distance sort + radius cutoff + search + metadata, **own-service exclude filter (6)** |
+| `src/__tests__/services/browse.service.test.ts` | +3 added — **excludeUserId on `browseProviders` + `getNearbyProviders`** |
 | `src/__tests__/services/payment.service.test.ts` | 9 — pay-after-accept guard, callback URL resolution (bridge / legacy / fallback / both-set precedence), metadata embedding |
 | `src/__tests__/services/review.service.test.ts` | 5 — review-after-complete guard, ownership, double-review prevention |
 | `src/__tests__/services/paystack-callback-bridge.test.ts` | 8 — bridge route HTML output, reference handling, fallbacks on Paystack/verifyPayment failure, HTML/JS injection escaping |
+| `src/__tests__/services/broadcast.service.test.ts` | 12 — **all four targeting modes (USER_IDS / ROLE / ALL / LOCATION), allowedRoles permission gate, ACTIVE-status filter, fan-out resilience when push fails** |
 
-**49 new tests** added. Full suite: **18 suites, 294 tests, 0 failures**. `npx tsc --noEmit` clean.
+**74 new tests** added overall (49 original sweep + 13 self-booking/own-service + 12 broadcast). Full suite: **19 suites, 319 tests, 0 failures**. `npx tsc --noEmit` clean.
 
 Run the tests with:
 ```bash

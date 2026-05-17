@@ -1186,6 +1186,45 @@ export const typeDefs = gql`
     durationDays: Int!
   }
 
+  # ==================
+  # Broadcast Notification (Admin / Super-Admin)
+  # ==================
+
+  enum BroadcastTargetMode {
+    USER_IDS
+    ROLE
+    ALL
+    LOCATION
+  }
+
+  input BroadcastTargetInput {
+    mode: BroadcastTargetMode!
+    # USER_IDS mode
+    userIds: [ID!]
+    # ROLE mode — array of role names, e.g. ["SERVICE_USER", "SERVICE_PROVIDER"]
+    # Super-admin endpoint can also include "ADMIN".
+    roles: [String!]
+    # LOCATION mode — at least one of city/state
+    city: String
+    state: String
+  }
+
+  input BroadcastNotificationInput {
+    title: String!
+    message: String!
+    target: BroadcastTargetInput!
+    # Optional structured payload (JSON-stringified) carried on the in-app
+    # row + push data. Caller is responsible for JSON.stringify.
+    metadataJson: String
+  }
+
+  type BroadcastNotificationResult {
+    recipientCount: Int!
+    inAppCreated: Int!
+    pushDelivery: String!
+    pushError: String
+  }
+
   input UserManagementFiltersInput {
     role: UserRole
     accountStatus: AccountStatus
@@ -2576,6 +2615,15 @@ export const typeDefs = gql`
 
     # Adjust wallet balance (Admin)
     adjustWalletBalance(userId: ID!, amount: Float!, reason: String!): Wallet!
+
+    # Broadcast a notification (push + in-app + socket) to users/providers.
+    # ADMIN or SUPER_ADMIN. Cannot target the ADMIN role from this endpoint
+    # — use superAdminBroadcastNotification for that.
+    adminBroadcastNotification(input: BroadcastNotificationInput!): BroadcastNotificationResult!
+
+    # Broadcast a notification — SUPER_ADMIN only. Can additionally target
+    # the ADMIN role (useful for ops-team announcements).
+    superAdminBroadcastNotification(input: BroadcastNotificationInput!): BroadcastNotificationResult!
 
     # ==================
     # Review Management

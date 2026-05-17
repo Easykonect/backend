@@ -272,3 +272,93 @@ describe('getNearbyServices', () => {
     expect(result.searchLocation).toEqual({ latitude: lagosLat, longitude: lagosLng });
   });
 });
+
+// ==================
+// Own-service filtering (caller is a provider)
+// ==================
+
+describe('getServices — excludeProviderUserId', () => {
+  it('adds userId: { not: ... } to the provider relation filter', async () => {
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(0);
+
+    await getServices(
+      { excludeProviderUserId: 'user-A' },
+      { page: 1, limit: 10 }
+    );
+
+    const call = (prisma.service.findMany as jest.Mock).mock.calls[0][0];
+    expect(call.where.provider).toEqual({
+      is: expect.objectContaining({ userId: { not: 'user-A' } }),
+    });
+  });
+
+  it('combines excludeProviderUserId with city/state filters', async () => {
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(0);
+
+    await getServices(
+      { city: 'Lagos', excludeProviderUserId: 'user-A' },
+      { page: 1, limit: 10 }
+    );
+
+    const call = (prisma.service.findMany as jest.Mock).mock.calls[0][0];
+    expect(call.where.provider.is).toMatchObject({
+      city: expect.anything(),
+      userId: { not: 'user-A' },
+    });
+  });
+
+  it('applies excludeProviderUserId to the geo candidate-provider query', async () => {
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+
+    await getServices(
+      {
+        latitude: lagosLat,
+        longitude: lagosLng,
+        radiusKm: 10,
+        excludeProviderUserId: 'user-A',
+      },
+      { page: 1, limit: 10 }
+    );
+
+    const providerCall = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(providerCall.where.userId).toEqual({ not: 'user-A' });
+  });
+
+  it('does nothing when excludeProviderUserId is omitted (anonymous caller)', async () => {
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(0);
+
+    await getServices({}, { page: 1, limit: 10 });
+
+    const call = (prisma.service.findMany as jest.Mock).mock.calls[0][0];
+    // No provider relation filter at all — the where clause should only
+    // contain the public-default status filter.
+    expect(call.where.provider).toBeUndefined();
+  });
+});
+
+describe('getNearbyServices — excludeProviderUserId', () => {
+  it('filters the candidate-provider query by userId: { not: ... }', async () => {
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+
+    await getNearbyServices({
+      latitude: lagosLat,
+      longitude: lagosLng,
+      excludeProviderUserId: 'user-A',
+    });
+
+    const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(call.where.userId).toEqual({ not: 'user-A' });
+  });
+
+  it('omits the userId filter when excludeProviderUserId is not passed', async () => {
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+
+    await getNearbyServices({ latitude: lagosLat, longitude: lagosLng });
+
+    const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(call.where.userId).toBeUndefined();
+  });
+});

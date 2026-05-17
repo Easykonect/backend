@@ -20,9 +20,13 @@ jest.mock('@/lib/prisma', () => ({
     serviceProvider: {
       findUnique: jest.fn(),
     },
+    service: {
+      findUnique: jest.fn(),
+    },
     booking: {
       findUnique: jest.fn(),
       update: jest.fn(),
+      create: jest.fn(),
     },
   },
 }));
@@ -75,6 +79,7 @@ import {
   startService,
   completeService,
   cancelBooking,
+  createBooking,
 } from '@/services/booking.service';
 
 // ==================
@@ -370,5 +375,81 @@ describe('booking event dispatch — fan-out to socket + notification + push', (
 
     // Should resolve, not throw — the DB update already succeeded.
     await expect(acceptBooking(bookingId, providerUserId)).resolves.toBeDefined();
+  });
+});
+
+// ==================
+// createBooking — self-booking guard
+// ==================
+
+describe('createBooking — self-booking guard', () => {
+  // Pick a scheduled date 10 days from now — comfortably inside the
+  // 30-day-in-advance window the booking validator enforces.
+  const futureDate = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .split('T')[0];
+  const validInput = {
+    serviceId: 'svc1',
+    scheduledDate: futureDate,
+    scheduledTime: '14:00',
+    address: '1 Main St',
+    city: 'Lagos',
+    state: 'Lagos',
+  };
+
+  const baseService = {
+    id: 'svc1',
+    providerId: 'p1',
+    price: 5000,
+    status: 'ACTIVE',
+    provider: {
+      id: 'p1',
+      userId: providerUserId, // the provider's owning user
+      verificationStatus: 'VERIFIED',
+    },
+    category: { id: 'cat1', name: 'Cleaning' },
+  };
+
+  it('rejects when the booker is the provider behind the service', async () => {
+    (prisma.service.findUnique as jest.Mock).mockResolvedValueOnce(baseService);
+
+    let caught: GraphQLError | undefined;
+    await createBooking(providerUserId, validInput).catch((e) => (caught = e));
+
+    expect(caught).toBeInstanceOf(GraphQLError);
+    expect(caught!.extensions.code).toBe('SELF_BOOKING_NOT_ALLOWED');
+    expect(prisma.booking.create).not.toHaveBeenCalled();
+  });
+
+  it('throws SELF_BOOKING_NOT_ALLOWED before checking service status', async () => {
+    // Even an INACTIVE service owned by the caller should fail with the
+    // self-booking error first — the guard runs above SERVICE_NOT_AVAILABLE.
+    (prisma.service.findUnique as jest.Mock).mockResolvedValueOnce({
+      ...baseService,
+      status: 'INACTIVE',
+    });
+
+    let caught: GraphQLError | undefined;
+    await createBooking(providerUserId, validInput).catch((e) => (caught = e));
+    expect(caught!.extensions.code).toBe('SELF_BOOKING_NOT_ALLOWED');
+  });
+
+  it('allows a different user to book the same service', async () => {
+    (prisma.service.findUnique as jest.Mock).mockResolvedValueOnce(baseService);
+    (prisma.booking.create as jest.Mock).mockResolvedValueOnce({
+      ...baseBooking,
+      status: 'PENDING',
+    });
+
+    await expect(createBooking(customerUserId, validInput)).resolves.toBeDefined();
+    expect(prisma.booking.create).toHaveBeenCalled();
+  });
+
+  it('still throws SERVICE_NOT_FOUND when the service does not exist (guard not reached)', async () => {
+    (prisma.service.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+    let caught: GraphQLError | undefined;
+    await createBooking(providerUserId, validInput).catch((e) => (caught = e));
+    expect(caught!.extensions.code).toBe('SERVICE_NOT_FOUND');
   });
 });

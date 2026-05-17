@@ -39,6 +39,9 @@ export interface BrowseProvidersInput {
   filters?: ProviderFiltersInput;
   sortBy?: ProviderSortBy;
   pagination?: { page: number; limit: number };
+  // Not exposed in GraphQL — populated by the resolver from auth context to
+  // exclude the requesting user's own provider profile from public listings.
+  excludeUserId?: string;
 }
 
 export interface NearbyProvidersInput {
@@ -48,6 +51,7 @@ export interface NearbyProvidersInput {
   filters?: ProviderFiltersInput;
   sortBy?: ProviderSortBy;
   pagination?: { page: number; limit: number };
+  excludeUserId?: string;
 }
 
 // ==================
@@ -185,12 +189,16 @@ export const browseProviders = async ({
   filters = {},
   sortBy = 'NEWEST',
   pagination = { page: 1, limit: 10 },
+  excludeUserId,
 }: BrowseProvidersInput) => {
   const { page, limit: rawLimit } = pagination;
   const limit = Math.min(rawLimit, config.pagination.maxLimit);
   const skip = (page - 1) * limit;
 
   const where = buildWhereClause(filters);
+  if (excludeUserId) {
+    where.userId = { not: excludeUserId };
+  }
 
   // For rating/popularity sort we fetch all matched and sort in-memory
   // (MongoDB aggregations via Prisma are limited for computed sort)
@@ -360,6 +368,7 @@ export const getNearbyProviders = async ({
   filters = {},
   sortBy = 'RATING_DESC',
   pagination = { page: 1, limit: 10 },
+  excludeUserId,
 }: NearbyProvidersInput) => {
   const radius = Math.min(
     radiusKm ?? config.geo.defaultRadiusKm,
@@ -370,6 +379,9 @@ export const getNearbyProviders = async ({
   const limit = Math.min(rawLimit, config.pagination.maxLimit);
 
   const where = buildWhereClause(filters);
+  if (excludeUserId) {
+    where.userId = { not: excludeUserId };
+  }
 
   // Fetch all providers with lat/lng (we filter by distance in JS)
   const rawProviders = await prisma.serviceProvider.findMany({

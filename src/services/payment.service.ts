@@ -38,6 +38,7 @@ import { GraphQLError } from 'graphql';
 import { config } from '@/config';
 import { PaymentStatus, BookingStatus, NotificationType } from '@/constants';
 import { createNotification } from '@/services/notification.service';
+import { sendPushToUser } from '@/services/push.service';
 import { capturePaymentError, addBreadcrumb } from '@/lib/sentry';
 
 // ==========================================
@@ -170,7 +171,9 @@ const formatPaymentResponse = (payment: any) => {
 };
 
 /**
- * Send notification helper
+ * Send notification helper — writes an in-app notification row AND fires a
+ * push notification. Both failures are swallowed so the calling payment
+ * flow is never rolled back by a flaky downstream service.
  */
 const sendNotification = async (
   userId: string,
@@ -189,6 +192,16 @@ const sendNotification = async (
     });
   } catch (error) {
     console.error('Failed to send notification:', error);
+  }
+
+  try {
+    await sendPushToUser(userId, {
+      title,
+      message,
+      data: { type, ...(metadata ?? {}) },
+    });
+  } catch (error) {
+    console.error('Failed to send push:', error);
   }
 };
 

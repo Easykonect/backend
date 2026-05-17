@@ -36,7 +36,35 @@ import {
 } from './wallet.service';
 import { createAuditLog } from './audit.service';
 import { createNotification } from './notification.service';
+import { sendPushToUser } from './push.service';
 import { ensureRecipientCode } from './bank.service';
+
+/**
+ * Write an in-app notification AND fire a push. Errors are swallowed so a
+ * messaging failure can't roll back a successful withdrawal-state change.
+ */
+const notifyAndPush = async (
+  userId: string,
+  type: string,
+  title: string,
+  message: string,
+  metadata?: Record<string, any>
+) => {
+  try {
+    await createNotification({ userId, type, title, message, metadata });
+  } catch (err) {
+    console.error('Failed to write withdrawal notification', err);
+  }
+  try {
+    await sendPushToUser(userId, {
+      title,
+      message,
+      data: { type, ...(metadata ?? {}) },
+    });
+  } catch (err) {
+    console.error('Failed to send withdrawal push', err);
+  }
+};
 
 // ==========================================
 // Types
@@ -779,13 +807,13 @@ export const rejectWithdrawal = async (
   });
 
   if (provider) {
-    await createNotification({
-      userId: provider.userId,
-      type: 'PAYMENT_FAILED',
-      title: 'Withdrawal Rejected',
-      message: `Your withdrawal of ₦${koboToNaira(withdrawal.amount)} has been rejected. Reason: ${reason}`,
-      metadata: { withdrawalId },
-    });
+    await notifyAndPush(
+      provider.userId,
+      'PAYMENT_FAILED',
+      'Withdrawal Rejected',
+      `Your withdrawal of ₦${koboToNaira(withdrawal.amount)} has been rejected. Reason: ${reason}`,
+      { withdrawalId },
+    );
   }
 
   const updated = await prisma.withdrawal.findUnique({
@@ -845,13 +873,13 @@ export const handleTransferSuccess = async (transferCode: string) => {
   });
 
   if (provider) {
-    await createNotification({
-      userId: provider.userId,
-      type: 'PAYMENT_RECEIVED',
-      title: 'Withdrawal Successful',
-      message: `₦${koboToNaira(withdrawal.netAmount)} has been sent to your ${withdrawal.bankName} account.`,
-      metadata: { withdrawalId: withdrawal.id },
-    });
+    await notifyAndPush(
+      provider.userId,
+      'PAYMENT_RECEIVED',
+      'Withdrawal Successful',
+      `₦${koboToNaira(withdrawal.netAmount)} has been sent to your ${withdrawal.bankName} account.`,
+      { withdrawalId: withdrawal.id },
+    );
   }
 };
 
@@ -930,13 +958,13 @@ export const handleTransferFailed = async (
     });
 
     if (provider) {
-      await createNotification({
-        userId: provider.userId,
-        type: 'PAYMENT_FAILED',
-        title: 'Withdrawal Failed',
-        message: `Your withdrawal of ₦${koboToNaira(withdrawal.amount)} failed after multiple attempts. The amount has been refunded to your wallet.`,
-        metadata: { withdrawalId: withdrawal.id },
-      });
+      await notifyAndPush(
+        provider.userId,
+        'PAYMENT_FAILED',
+        'Withdrawal Failed',
+        `Your withdrawal of ₦${koboToNaira(withdrawal.amount)} failed after multiple attempts. The amount has been refunded to your wallet.`,
+        { withdrawalId: withdrawal.id },
+      );
     }
   }
 };

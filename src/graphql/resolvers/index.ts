@@ -190,7 +190,10 @@ import {
   getUnreadNotificationCount,
   getNotificationStats,
   sendSystemAnnouncement,
+  broadcastNotification,
+  type BroadcastTarget,
 } from '@/services/notification.service';
+import { rateLimit } from '@/lib/redis';
 
 import {
   registerPushToken,
@@ -305,6 +308,60 @@ const requireSuperAdminAuth = (context: GraphQLContext) => {
   return requireRole(context, UserRole.SUPER_ADMIN);
 };
 
+/**
+ * Translate the GraphQL BroadcastTargetInput into the service-layer
+ * BroadcastTarget discriminated union, validating that the fields
+ * required for the chosen mode are present.
+ */
+const buildBroadcastTarget = (input: {
+  mode: 'USER_IDS' | 'ROLE' | 'ALL' | 'LOCATION';
+  userIds?: string[];
+  roles?: string[];
+  city?: string;
+  state?: string;
+}): BroadcastTarget => {
+  switch (input.mode) {
+    case 'USER_IDS':
+      if (!input.userIds || input.userIds.length === 0) {
+        throw new GraphQLError('USER_IDS target requires a non-empty userIds list', {
+          extensions: { code: 'INVALID_INPUT' },
+        });
+      }
+      return { mode: 'USER_IDS', userIds: input.userIds };
+    case 'ROLE':
+      if (!input.roles || input.roles.length === 0) {
+        throw new GraphQLError('ROLE target requires a non-empty roles list', {
+          extensions: { code: 'INVALID_INPUT' },
+        });
+      }
+      return { mode: 'ROLE', roles: input.roles };
+    case 'ALL':
+      return { mode: 'ALL' };
+    case 'LOCATION':
+      if (!input.city && !input.state) {
+        throw new GraphQLError('LOCATION target requires city and/or state', {
+          extensions: { code: 'INVALID_INPUT' },
+        });
+      }
+      return { mode: 'LOCATION', city: input.city, state: input.state };
+  }
+};
+
+const parseMetadataJson = (raw?: string | null): Record<string, any> | undefined => {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('metadataJson must encode a JSON object');
+    }
+    return parsed;
+  } catch (err) {
+    throw new GraphQLError(`metadataJson is not valid JSON: ${(err as Error).message}`, {
+      extensions: { code: 'INVALID_INPUT' },
+    });
+  }
+};
+
 export const resolvers = {
   Query: {
     // ==================
@@ -395,12 +452,16 @@ export const resolvers = {
           radiusKm?: number;
         };
         pagination?: { page?: number; limit?: number };
-      }
+      },
+      context: GraphQLContext
     ) => {
       const { page = 1, limit = 20 } = args.pagination || {};
       const filters = {
         ...args.filters,
         status: args.filters?.status as ServiceStatusType | undefined,
+        // Hide the caller's own services from the customer-facing list.
+        // Customer-only accounts will simply have no matching services to exclude.
+        excludeProviderUserId: context.user?.userId,
       };
       return getServices(filters, { page, limit });
     },
@@ -797,13 +858,15 @@ export const resolvers = {
      */
     providers: async (
       _: unknown,
-      args: { input?: { filters?: any; sortBy?: string; pagination?: { page: number; limit: number } } }
+      args: { input?: { filters?: any; sortBy?: string; pagination?: { page: number; limit: number } } },
+      context: GraphQLContext
     ) => {
       const { filters, sortBy, pagination } = args.input ?? {};
       return browseProviders({
         filters: filters ?? {},
         sortBy: (sortBy as any) ?? 'NEWEST',
         pagination: pagination ?? { page: 1, limit: 10 },
+        excludeUserId: context.user?.userId,
       });
     },
 
@@ -831,7 +894,8 @@ export const resolvers = {
           sortBy?: string;
           pagination?: { page: number; limit: number };
         };
-      }
+      },
+      context: GraphQLContext
     ) => {
       const { latitude, longitude, radiusKm, filters, sortBy, pagination } = args.input;
       return getNearbyProviders({
@@ -841,6 +905,7 @@ export const resolvers = {
         filters: filters ?? {},
         sortBy: (sortBy as any) ?? 'RATING_DESC',
         pagination: pagination ?? { page: 1, limit: 10 },
+        excludeUserId: context.user?.userId,
       });
     },
 
@@ -860,9 +925,13 @@ export const resolvers = {
           search?: string;
           pagination?: { page?: number; limit?: number };
         };
-      }
+      },
+      context: GraphQLContext
     ) => {
-      return getNearbyServices(args.input);
+      return getNearbyServices({
+        ...args.input,
+        excludeProviderUserId: context.user?.userId,
+      });
     },
 
     // ==================
@@ -2531,6 +2600,110 @@ export const resolvers = {
       const amountKobo = Math.abs(args.amount * 100); // Convert to kobo
       // Pass admin role for limit enforcement
       return adjustWalletBalance(args.userId, amountKobo, type, args.reason, admin.userId, admin.role);
+    },
+
+    /**
+     * Broadcast a notification — ADMIN or SUPER_ADMIN.
+     * ADMIN can target SERVICE_USER + SERVICE_PROVIDER only. Targeting the
+     * ADMIN role is reserved for the super-admin endpoint below.
+     *
+     * Rate-limited per admin to 50 broadcasts per 24 hours.
+     */
+    adminBroadcastNotification: async (
+      _: unknown,
+      args: {
+        input: {
+          title: string;
+          message: string;
+          target: {
+            mode: 'USER_IDS' | 'ROLE' | 'ALL' | 'LOCATION';
+            userIds?: string[];
+            roles?: string[];
+            city?: string;
+            state?: string;
+          };
+          metadataJson?: string | null;
+        };
+      },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+
+      // Daily cap — protects against compromised admin accounts spamming pushes.
+      const rl = await rateLimit.check(
+        `broadcast:admin:${admin.userId}`,
+        50,
+        24 * 60 * 60
+      );
+      if (!rl.allowed) {
+        throw new GraphQLError(
+          `Broadcast rate limit reached (50/day). Resets in ${rl.resetIn}s.`,
+          { extensions: { code: 'RATE_LIMITED' } }
+        );
+      }
+
+      const target = buildBroadcastTarget(args.input.target);
+      const metadata = parseMetadataJson(args.input.metadataJson);
+
+      return broadcastNotification({
+        title: args.input.title,
+        message: args.input.message,
+        target,
+        // ADMIN can target users + providers, never admins/super-admins.
+        allowedRoles: ['SERVICE_USER', 'SERVICE_PROVIDER'],
+        metadata,
+      });
+    },
+
+    /**
+     * Broadcast a notification — SUPER_ADMIN only.
+     * Can additionally target the ADMIN role (e.g. ops-team announcements).
+     *
+     * Rate-limited per super-admin to 50 broadcasts per 24 hours.
+     */
+    superAdminBroadcastNotification: async (
+      _: unknown,
+      args: {
+        input: {
+          title: string;
+          message: string;
+          target: {
+            mode: 'USER_IDS' | 'ROLE' | 'ALL' | 'LOCATION';
+            userIds?: string[];
+            roles?: string[];
+            city?: string;
+            state?: string;
+          };
+          metadataJson?: string | null;
+        };
+      },
+      context: GraphQLContext
+    ) => {
+      const admin = requireSuperAdminAuth(context);
+
+      const rl = await rateLimit.check(
+        `broadcast:superadmin:${admin.userId}`,
+        50,
+        24 * 60 * 60
+      );
+      if (!rl.allowed) {
+        throw new GraphQLError(
+          `Broadcast rate limit reached (50/day). Resets in ${rl.resetIn}s.`,
+          { extensions: { code: 'RATE_LIMITED' } }
+        );
+      }
+
+      const target = buildBroadcastTarget(args.input.target);
+      const metadata = parseMetadataJson(args.input.metadataJson);
+
+      return broadcastNotification({
+        title: args.input.title,
+        message: args.input.message,
+        target,
+        // SUPER_ADMIN can additionally hit ADMIN role.
+        allowedRoles: ['SERVICE_USER', 'SERVICE_PROVIDER', 'ADMIN'],
+        metadata,
+      });
     },
 
     // ==================

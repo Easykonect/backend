@@ -15,6 +15,36 @@ import prisma from '@/lib/prisma';
 import { UserRole, AccountStatus, AdminAction } from '@prisma/client';
 import { createAuditLog } from './audit.service';
 import { createNotification } from './notification.service';
+import { sendPushToUser } from './push.service';
+
+/**
+ * Write an in-app notification AND fire a push so the user is alerted to
+ * moderation events immediately. Failures are swallowed — the moderation
+ * action has already happened in the DB and we don't want to roll back
+ * a ban/restriction because a downstream service is flaky.
+ */
+const notifyAndPush = async (
+  userId: string,
+  type: string,
+  title: string,
+  message: string,
+  metadata?: Record<string, any>
+) => {
+  try {
+    await createNotification({ userId, type, title, message, metadata });
+  } catch (err) {
+    console.error('Failed to write moderation notification', err);
+  }
+  try {
+    await sendPushToUser(userId, {
+      title,
+      message,
+      data: { type, ...(metadata ?? {}) },
+    });
+  } catch (err) {
+    console.error('Failed to send moderation push', err);
+  }
+};
 
 // ==========================================
 // Types
@@ -569,15 +599,15 @@ export const banUser = async (
   });
 
   // Notify user
-  await createNotification({
+  await notifyAndPush(
     userId,
-    type: 'ACCOUNT_SUSPENDED',
-    title: 'Account Banned',
-    message: days
+    'ACCOUNT_SUSPENDED',
+    'Account Banned',
+    days
       ? `Your account has been banned for ${days} days. Reason: ${reason}`
       : `Your account has been permanently banned. Reason: ${reason}`,
-    metadata: { reason, bannedUntil },
-  });
+    { reason, bannedUntil },
+  );
 
   return {
     success: true,
@@ -637,12 +667,12 @@ export const unbanUser = async (
   });
 
   // Notify user
-  await createNotification({
+  await notifyAndPush(
     userId,
-    type: 'ACCOUNT_ACTIVATED',
-    title: 'Account Unbanned',
-    message: 'Your account ban has been lifted. You can now access your account.',
-  });
+    'ACCOUNT_ACTIVATED',
+    'Account Unbanned',
+    'Your account ban has been lifted. You can now access your account.',
+  );
 
   return {
     success: true,
@@ -725,13 +755,13 @@ export const restrictUser = async (
   });
 
   // Notify user
-  await createNotification({
+  await notifyAndPush(
     userId,
-    type: 'ACCOUNT_SUSPENDED',
-    title: 'Account Restricted',
-    message: `Your account has been restricted for ${days} days. You can still view your account but cannot make new transactions. Reason: ${reason}`,
-    metadata: { reason, restrictedUntil },
-  });
+    'ACCOUNT_SUSPENDED',
+    'Account Restricted',
+    `Your account has been restricted for ${days} days. You can still view your account but cannot make new transactions. Reason: ${reason}`,
+    { reason, restrictedUntil },
+  );
 
   return {
     success: true,
@@ -793,12 +823,12 @@ export const removeRestriction = async (
   });
 
   // Notify user
-  await createNotification({
+  await notifyAndPush(
     userId,
-    type: 'ACCOUNT_ACTIVATED',
-    title: 'Restriction Removed',
-    message: 'Your account restriction has been removed. You can now make transactions.',
-  });
+    'ACCOUNT_ACTIVATED',
+    'Restriction Removed',
+    'Your account restriction has been removed. You can now make transactions.',
+  );
 
   return {
     success: true,

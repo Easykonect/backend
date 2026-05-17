@@ -191,6 +191,15 @@ export const createBooking = async (userId: string, input: CreateBookingInput) =
     });
   }
 
+  // Block providers from booking their own services even when they hit
+  // the mutation directly with a valid service ID. The list queries also
+  // filter these out, but this guard is the source of truth.
+  if (service.provider.userId === userId) {
+    throw new GraphQLError('You cannot book your own service', {
+      extensions: { code: 'SELF_BOOKING_NOT_ALLOWED' }
+    });
+  }
+
   // Check service is active
   if (service.status !== ServiceStatus.ACTIVE) {
     throw new GraphQLError('This service is not currently available for booking', {
