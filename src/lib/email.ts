@@ -1,55 +1,12 @@
 /**
  * Email Service
- * Handles all email sending functionality using Nodemailer
- * 
- * Security considerations:
- * - Uses environment variables for credentials
- * - Supports multiple email providers
- * - HTML emails are sanitized
+ * Uses Resend HTTP API — avoids SMTP port blocking on shared hosting.
  */
 
-import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 import { config } from '@/config';
 
-// Email transporter singleton
-let transporter: nodemailer.Transporter | null = null;
-
-/**
- * Get or create email transporter
- * Uses singleton pattern to reuse connection
- */
-const getTransporter = (): nodemailer.Transporter => {
-  if (transporter) {
-    return transporter;
-  }
-
-  // Create transporter based on environment
-  if (config.isDevelopment) {
-    // For development, use Ethereal (fake SMTP) or configured SMTP
-    transporter = nodemailer.createTransport({
-      host: config.email.host,
-      port: config.email.port,
-      secure: config.email.secure,
-      auth: {
-        user: config.email.user,
-        pass: config.email.pass,
-      },
-    });
-  } else {
-    // Production: Use configured SMTP server
-    transporter = nodemailer.createTransport({
-      host: config.email.host,
-      port: config.email.port,
-      secure: config.email.secure,
-      auth: {
-        user: config.email.user,
-        pass: config.email.pass,
-      },
-    });
-  }
-
-  return transporter;
-};
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ==========================================
 // Shared Email Layout Helpers
@@ -380,24 +337,17 @@ interface SendEmailOptions {
 
 export const sendEmail = async (options: SendEmailOptions): Promise<boolean> => {
   try {
-    const transport = getTransporter();
-
-    const mailOptions = {
-      from: `"${config.email.fromName}" <${config.email.fromAddress}>`,
+    const { error } = await resend.emails.send({
+      from: `${config.email.fromName} <${config.email.fromAddress}>`,
       to: options.to,
       subject: options.subject,
       html: options.html,
       text: options.text,
-    };
+    });
 
-    const info = await transport.sendMail(mailOptions);
-
-    if (config.isDevelopment) {
-      console.log('📧 Email sent:', info.messageId);
-      // If using Ethereal, log the preview URL
-      if (info.messageId) {
-        console.log('Preview URL:', nodemailer.getTestMessageUrl(info));
-      }
+    if (error) {
+      console.error('❌ Email sending failed:', error);
+      return false;
     }
 
     return true;

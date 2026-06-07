@@ -37,6 +37,7 @@
     "nodemailer": "^8.0.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "resend": "^6.12.4",
     "sanitize-html": "^2.17.2",
     "socket.io": "^4.8.3",
     "validator": "^13.15.35",
