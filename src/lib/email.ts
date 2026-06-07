@@ -13,7 +13,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 // ==========================================
 
 const BRAND_COLOR = '#003C3A';
-const LOGO_URL = 'https://api.easykonnet.com/logo.png';
+const LOGO_URL = 'https://api.easykonnet.com/easykonneticon.png';
 
 const emailHeader = () => `
   <div style="background: ${BRAND_COLOR}; padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
