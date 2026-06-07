@@ -23,13 +23,12 @@ import {
   checkRateLimit,
   rateLimitHeaders,
   rateLimitedResponse,
-  extractGraphQLOperation,
   getRateLimitTypeForOperation,
   isBlockedIp,
   getClientIp,
   RateLimitConfig,
 } from '@/middleware/rate-limit.middleware';
-import { initSentry, captureException, setUserContext } from '@/lib/sentry';
+import { initSentry, captureException } from '@/lib/sentry';
 
 // Initialize Sentry as early as possible
 initSentry();
@@ -58,24 +57,6 @@ const getQueryDepth = (query: string): number => {
   }
   
   return maxDepth;
-};
-
-/**
- * Validate GraphQL query depth
- */
-const validateQueryDepth = async (request: NextRequest): Promise<string | null> => {
-  try {
-    const body = await request.clone().json();
-    if (body.query) {
-      const depth = getQueryDepth(body.query);
-      if (depth > MAX_QUERY_DEPTH) {
-        return `Query depth ${depth} exceeds maximum allowed depth of ${MAX_QUERY_DEPTH}`;
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
 };
 
 // CORS headers for GraphQL endpoint
@@ -190,7 +171,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const origin = request.headers.get('origin');
   const corsHeaders = getCorsHeaders(origin);
-  
+
   // Check if IP is blocked
   const clientIp = getClientIp(request);
   if (await isBlockedIp(clientIp)) {
@@ -201,7 +182,7 @@ export async function POST(request: NextRequest) {
       { status: 403, headers: corsHeaders }
     );
   }
-  
+
   // Check content length (prevent oversized requests)
   const contentLength = request.headers.get('content-length');
   if (contentLength && parseInt(contentLength) > MAX_BODY_SIZE) {
@@ -212,22 +193,40 @@ export async function POST(request: NextRequest) {
       { status: 413, headers: corsHeaders }
     );
   }
-  
-  // Validate query depth
-  const depthError = await validateQueryDepth(request);
-  if (depthError) {
-    return new NextResponse(
-      JSON.stringify({
-        errors: [{ message: depthError, extensions: { code: 'QUERY_TOO_COMPLEX' } }],
-      }),
-      { status: 400, headers: corsHeaders }
-    );
+
+  // Read body once — Next.js 16 streams can only be consumed once.
+  // We reconstruct the request for Apollo after inspecting the body.
+  let bodyText = '';
+  let bodyJson: Record<string, unknown> = {};
+  try {
+    bodyText = await request.text();
+    bodyJson = JSON.parse(bodyText);
+  } catch {
+    // Non-JSON or empty body — let Apollo handle the error
   }
-  
-  // Extract operation for rate limiting
-  const { operationName } = await extractGraphQLOperation(request);
+
+  // Validate query depth from already-parsed body
+  const query = typeof bodyJson.query === 'string' ? bodyJson.query : '';
+  if (query) {
+    const depth = getQueryDepth(query);
+    if (depth > MAX_QUERY_DEPTH) {
+      return new NextResponse(
+        JSON.stringify({
+          errors: [{ message: `Query depth ${depth} exceeds maximum allowed depth of ${MAX_QUERY_DEPTH}`, extensions: { code: 'QUERY_TOO_COMPLEX' } }],
+        }),
+        { status: 400, headers: corsHeaders }
+      );
+    }
+  }
+
+  // Extract operation from already-parsed body
+  let operationName: string | undefined = typeof bodyJson.operationName === 'string' ? bodyJson.operationName : undefined;
+  if (!operationName && query) {
+    const match = query.match(/(?:query|mutation|subscription)\s+(\w+)/);
+    if (match) operationName = match[1];
+  }
   const rateLimitType = getRateLimitTypeForOperation(operationName);
-  
+
   // Check rate limit (hybrid: uses userId for authenticated, IP for unauthenticated)
   const rateCheck = await checkRateLimit(request, rateLimitType, undefined, operationName);
   if (rateCheck.limited) {
@@ -237,9 +236,16 @@ export async function POST(request: NextRequest) {
     });
     return response;
   }
-  
+
+  // Reconstruct request with the body so Apollo can read it
+  const reconstructedRequest = new NextRequest(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: bodyText,
+  });
+
   // Process the request
-  const response = await handler(request);
+  const response = await handler(reconstructedRequest);
   
   // Add CORS and rate limit headers
   Object.entries(corsHeaders).forEach(([key, value]) => {
