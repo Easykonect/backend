@@ -218,7 +218,7 @@ describe('browseProviders', () => {
   });
 
   it('respects pagination — page 2 with limit 1', async () => {
-    const p1 = makeProvider({ id: 'a', businessName: 'P1' });
+    const _p1 = makeProvider({ id: 'a', businessName: 'P1' });
     const p2 = makeProvider({ id: 'b', businessName: 'P2' });
     // For NEWEST, DB handles skip/take
     (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValue([p2]);

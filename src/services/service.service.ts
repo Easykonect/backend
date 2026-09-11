@@ -7,7 +7,7 @@ import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { config } from '@/config';
 import { UserRole, ServiceStatus, VerificationStatus, type ServiceStatusType } from '@/constants';
-import { sanitizeStrict, sanitizeBasic, validateName, validateText, validateAmount, sanitizeSearchQuery, MAX_LENGTHS } from '@/utils/security';
+import { sanitizeBasic, validateName, validateText, validateAmount, sanitizeSearchQuery, MAX_LENGTHS } from '@/utils/security';
 import { haversineDistance } from '@/services/browse.service';
 
 // ==================
@@ -764,7 +764,9 @@ export const approveService = async (serviceId: string) => {
 /**
  * Reject Service (Admin)
  */
-export const rejectService = async (serviceId: string, reason: string) => {
+// TODO(notify): `reason` is required by the schema but never stored or sent,
+// so providers are not told why their service was rejected.
+export const rejectService = async (serviceId: string, _reason: string) => {
   const service = await prisma.service.findUnique({
     where: { id: serviceId },
   });
@@ -794,7 +796,9 @@ export const rejectService = async (serviceId: string, reason: string) => {
 /**
  * Suspend Service (Admin)
  */
-export const suspendService = async (serviceId: string, reason: string) => {
+// TODO(notify): `reason` is required by the schema but never stored or sent,
+// so providers are not told why their service was suspended.
+export const suspendService = async (serviceId: string, _reason: string) => {
   const service = await prisma.service.findUnique({
     where: { id: serviceId },
   });

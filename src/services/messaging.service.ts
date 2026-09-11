@@ -14,7 +14,7 @@ import prisma from '@/lib/prisma';
 import { UserRole, ConversationType, MessageStatus, NotificationType } from '@/constants';
 import { createNotification } from './notification.service';
 import { sendMessagePush } from './push.service';
-import { sanitizeBasic, validateObjectId } from '@/utils/security';
+import { sanitizeBasic } from '@/utils/security';
 
 // ==================
 // Types

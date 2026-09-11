@@ -650,6 +650,7 @@ describe('OneSignal Not Configured', () => {
 
     // Need to clear and re-import
     jest.resetModules();
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- re-import after jest.resetModules()
     const { sendPushToUser: sendPushNoConfig } = require('@/services/push.service');
     
     const result = await sendPushNoConfig(mockUserId, {

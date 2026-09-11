@@ -14,7 +14,6 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { config } from '@/config';
 
 // ==========================================
 // Initialization
@@ -353,7 +352,7 @@ export const flush = async (timeout: number = 2000): Promise<boolean> => {
 
 export { Sentry };
 
-export default {
+const sentryService = {
   init: initSentry,
   setUserContext,
   clearUserContext,
@@ -369,3 +368,5 @@ export default {
   flush,
   Sentry,
 };
+
+export default sentryService;

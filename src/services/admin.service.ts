@@ -28,7 +28,7 @@ import {
 } from '@/lib/otp';
 import { sendPasswordResetEmail, sendProfileUpdatedEmail, sendEmailChangeOtpEmail } from '@/lib/email';
 import { config } from '@/config';
-import { ErrorCode, ErrorMessage, UserRole, AccountStatus } from '@/constants';
+import { UserRole, AccountStatus } from '@/constants';
 import { passwordSchema } from '@/utils/validation';
 
 // ==================
@@ -228,7 +228,9 @@ export const adminLogin = async (input: AdminLoginInput, clientIp?: string) => {
  * Create Admin (SUPER_ADMIN only)
  * Invite-based admin creation
  */
-export const createAdmin = async (input: CreateAdminInput, creatorId: string) => {
+// TODO(audit): `creatorId` is supplied by the resolver but not recorded anywhere.
+// Persist it (or write an audit log) so admin creation is attributable.
+export const createAdmin = async (input: CreateAdminInput, _creatorId: string) => {
   const { email, password, firstName, lastName, role } = input;
   const normalizedEmail = email.toLowerCase().trim();
 
@@ -874,7 +876,10 @@ export const deleteAdmin = async (adminId: string, deleterId: string) => {
 /**
  * Suspend User
  */
-export const suspendUser = async (userId: string, reason: string) => {
+// TODO(audit): `reason` is required by the GraphQL schema but is currently
+// discarded — see the TODOs below. `user-management.service.banUser` is the
+// audited equivalent and should probably supersede this.
+export const suspendUser = async (userId: string, _reason: string) => {
   const user = await prisma.user.findUnique({
     where: { id: userId },
   });

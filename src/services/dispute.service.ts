@@ -441,7 +441,9 @@ export const getOpenDisputesCount = async () => {
 /**
  * Admin takes dispute under review
  */
-export const takeDisputeUnderReview = async (disputeId: string, adminId: string) => {
+// TODO(audit): `adminId` is discarded — the Dispute model has no field for who
+// took it under review (only `resolvedById` at resolution time).
+export const takeDisputeUnderReview = async (disputeId: string, _adminId: string) => {
   const dispute = await prisma.dispute.findUnique({
     where: { id: disputeId },
   });

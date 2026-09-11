@@ -39,7 +39,6 @@ import { ErrorCode, ErrorMessage, UserRole, AccountStatus } from '@/constants';
 import {
   registerUserSchema,
   loginSchema,
-  emailSchema,
   passwordSchema,
 } from '@/utils/validation';
 import { storeRefreshToken, validateRefreshToken, invalidateRefreshToken } from './token.service';
@@ -880,7 +879,7 @@ export const logout = async (refreshToken?: string): Promise<{ success: boolean;
   };
 };
 
-export default {
+const authService = {
   registerUser,
   verifyEmail,
   resendVerificationOtp,
@@ -893,3 +892,5 @@ export default {
   logout,
   getClientIp,
 };
+
+export default authService;

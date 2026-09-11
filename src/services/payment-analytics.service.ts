@@ -10,9 +10,7 @@
  * - Refund statistics
  */
 
-import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
-import { koboToNaira } from './wallet.service';
 
 // ==========================================
 // Types

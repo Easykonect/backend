@@ -190,7 +190,7 @@ export const getUserSessionCount = async (userId: string): Promise<number> => {
   }
 };
 
-export default {
+const tokenService = {
   storeRefreshToken,
   validateRefreshToken,
   invalidateRefreshToken,
@@ -199,3 +199,5 @@ export default {
   isTokenBlacklisted,
   getUserSessionCount,
 };
+
+export default tokenService;

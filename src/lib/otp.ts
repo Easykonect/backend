@@ -88,7 +88,7 @@ export const hashToken = (token: string): string => {
     .digest('hex');
 };
 
-export default {
+const otpService = {
   generateOtp,
   hashOtp,
   verifyOtp,
@@ -97,3 +97,5 @@ export default {
   generateSecureToken,
   hashToken,
 };
+
+export default otpService;

@@ -35,8 +35,6 @@ export async function processPayoutJob(job: Job<PayoutJobData>) {
 
   logger.info(`Processing payout job: ${job.id}`, { jobType, data });
 
-  const startTime = Date.now();
-
   try {
     switch (jobType) {
       case 'PROCESS_SCHEDULED_PAYOUTS':

@@ -24,20 +24,14 @@ import { paystack } from '@/lib/paystack';
 import { WithdrawalStatus, AdminAction } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import RedisClient from '@/lib/redis';
-import { 
-  lockWallet, 
-  unlockWallet, 
-  debitWallet, 
-  creditWallet,
+import {
   koboToNaira,
   nairaToKobo,
   canWithdraw,
-  MAX_DAILY_WITHDRAWAL_KOBO,
 } from './wallet.service';
 import { createAuditLog } from './audit.service';
 import { createNotification } from './notification.service';
 import { sendPushToUser } from './push.service';
-import { ensureRecipientCode } from './bank.service';
 
 /**
  * Write an in-app notification AND fire a push. Errors are swallowed so a
@@ -354,7 +348,7 @@ export const requestWithdrawal = async (
 export const cancelWithdrawal = async (
   withdrawalId: string,
   providerId: string,
-  userId: string
+  _userId: string
 ) => {
   const withdrawal = await prisma.withdrawal.findFirst({
     where: {
@@ -606,7 +600,7 @@ export const processWithdrawal = async (
   const wallet = withdrawal.wallet;
   
   // Verify wallet still has sufficient balance and debit atomically
-  const debitResult = await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx) => {
     // Atomic debit with balance check
     const updateResult = await tx.wallet.updateMany({
       where: {

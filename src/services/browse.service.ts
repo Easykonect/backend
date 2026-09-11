@@ -248,7 +248,7 @@ export const browseProviders = async ({
   const ratingMap = new Map(ratingAggs.map((r) => [r.providerId, r._avg.rating ?? 0]));
 
   // Attach minRating filter (post-query since it's computed)
-  let providers = rawProviders
+  const providers = rawProviders
     .map((p) => ({
       ...p,
       averageRating: Math.round((ratingMap.get(p.id) ?? 0) * 10) / 10,
@@ -422,7 +422,7 @@ export const getNearbyProviders = async ({
   const ratingMap = new Map(ratingAggs.map((r) => [r.providerId, r._avg.rating ?? 0]));
 
   // Attach computed fields + distance, then filter by radius
-  let providers = rawProviders
+  const providers = rawProviders
     .map((p) => ({
       ...p,
       averageRating: Math.round((ratingMap.get(p.id) ?? 0) * 10) / 10,

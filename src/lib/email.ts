@@ -482,7 +482,7 @@ export const sendEmailChangeOtpEmail = async (
   });
 };
 
-export default {
+const emailService = {
   sendEmail,
   sendVerificationEmail,
   sendPasswordResetEmail,
@@ -493,3 +493,5 @@ export default {
   sendProfileUpdatedEmail,
   sendEmailChangeOtpEmail,
 };
+
+export default emailService;

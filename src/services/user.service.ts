@@ -6,10 +6,9 @@
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { ErrorCode, ErrorMessage } from '@/constants';
-import type { PaginationInput } from '@/utils/validation';
 import { generateOtp, hashOtp, verifyOtp, getOtpExpiry, isOtpExpired } from '@/lib/otp';
 import { sendProfileUpdatedEmail, sendEmailChangeOtpEmail } from '@/lib/email';
-import { sanitizeStrict, validateName, validatePhone, validateUrl, validateEmail } from '@/utils/security';
+import { validateName, validatePhone, validateUrl, validateEmail } from '@/utils/security';
 
 /**
  * Get user by ID

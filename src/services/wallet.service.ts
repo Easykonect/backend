@@ -21,7 +21,7 @@ import prisma from '@/lib/prisma';
 import { WalletTransactionType, WalletTransactionSource } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import RedisClient from '@/lib/redis';
-import { captureWalletError, addBreadcrumb } from '@/lib/sentry';
+import { captureWalletError } from '@/lib/sentry';
 
 // ==========================================
 // Security Constants
@@ -35,7 +35,6 @@ const LOCK_TTL_MS = 30000;
 
 // Lock key prefixes
 const WALLET_LOCK_PREFIX = 'wallet_lock:';
-const WITHDRAWAL_LOCK_PREFIX = 'withdrawal_lock:';
 
 // ==========================================
 // Types

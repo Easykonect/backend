@@ -24,7 +24,6 @@ const usesTLS = REDIS_URL.startsWith('rediss://');
 
 // Track connection state to avoid log spam
 let isConnected = false;
-let lastLoggedAttempt = 0;
 
 // ===========================================
 // Redis Connection Options
@@ -57,7 +56,6 @@ const redisOptions: RedisOptions = {
     if (times === 1 || times % 5 === 0 || times === 10) {
       logger.warn(`🔄 Redis reconnecting in ${delay / 1000}s (attempt ${times}/10)`);
     }
-    lastLoggedAttempt = times;
     return delay;
   },
   

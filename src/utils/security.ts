@@ -733,7 +733,7 @@ export const logSecurityEvent = (
 // Export Everything
 // ==========================================
 
-export default {
+const securityUtils = {
   // Sanitization
   sanitizeStrict,
   sanitizeBasic,
@@ -779,3 +779,5 @@ export default {
   // Constants
   MAX_LENGTHS,
 };
+
+export default securityUtils;

@@ -14,7 +14,6 @@ import prisma from '@/lib/prisma';
 import {
   registerUser,
   loginUser,
-  getCurrentUser,
   verifyEmail,
   resendVerificationOtp,
   forgotPassword,
@@ -27,7 +26,6 @@ import {
 
 
 import {
-  getUserById,
   getUsers,
   updateUserProfile,
   requestEmailChange,
@@ -238,7 +236,6 @@ import {
   cancelWithdrawal,
   getProviderWithdrawals,
   getAllWithdrawals,
-  getPendingWithdrawalsCount,
   processWithdrawal,
   rejectWithdrawal,
   retryWithdrawal,
@@ -274,7 +271,7 @@ import {
 } from '@/services/audit.service';
 
 import { requireAuth, requireRole, requireAnyRole, type GraphQLContext } from '@/middleware';
-import { UserRole, ServiceStatus, type ServiceStatusType } from '@/constants';
+import { UserRole, type ServiceStatusType } from '@/constants';
 
 import {
   browseProviders,
@@ -535,7 +532,7 @@ export const resolvers = {
     review: async (
       _: unknown,
       args: { id: string },
-      context: GraphQLContext
+      _context: GraphQLContext
     ) => {
       return getReviewById(args.id);
     },
@@ -550,7 +547,7 @@ export const resolvers = {
         filters?: { rating?: number; hasResponse?: boolean };
         pagination?: { page?: number; limit?: number };
       },
-      context: GraphQLContext
+      _context: GraphQLContext
     ) => {
       const { page = 1, limit = 10 } = args.pagination || {};
       return getProviderReviews(args.providerId, args.filters || {}, { page, limit });
@@ -565,7 +562,7 @@ export const resolvers = {
         serviceId: string;
         pagination?: { page?: number; limit?: number };
       },
-      context: GraphQLContext
+      _context: GraphQLContext
     ) => {
       const { page = 1, limit = 10 } = args.pagination || {};
       return getServiceReviews(args.serviceId, { page, limit });
@@ -590,7 +587,7 @@ export const resolvers = {
     providerRating: async (
       _: unknown,
       args: { providerId: string },
-      context: GraphQLContext
+      _context: GraphQLContext
     ) => {
       return getProviderRatingStats(args.providerId);
     },

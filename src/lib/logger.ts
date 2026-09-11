@@ -11,13 +11,6 @@ import { config } from '@/config';
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
-interface LoggerOptions {
-  /** Only log in development */
-  devOnly?: boolean;
-  /** Only log once per session (for startup messages) */
-  once?: boolean;
-}
-
 // Track messages that should only be logged once
 const loggedOnce = new Set<string>();
 

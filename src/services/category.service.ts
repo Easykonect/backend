@@ -5,7 +5,7 @@
 
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
-import { sanitizeStrict, sanitizeBasic, validateName, validateText, validateUrl, MAX_LENGTHS } from '@/utils/security';
+import { sanitizeBasic, validateName, validateText, validateUrl, MAX_LENGTHS } from '@/utils/security';
 
 // ==================
 // Types

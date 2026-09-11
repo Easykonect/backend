@@ -286,7 +286,8 @@ export const resetMySettings = async (userId: string) => {
  * Deactivate account (soft-disable — keeps data, blocks login)
  * Different from deleteOwnAccount which purges all data
  */
-export const deactivateMyAccount = async (userId: string, reason?: string) => {
+// TODO(audit): `reason` is accepted from the client but not recorded.
+export const deactivateMyAccount = async (userId: string, _reason?: string) => {
   await assertUserExists(userId);
 
   await prisma.user.update({

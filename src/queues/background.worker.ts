@@ -238,7 +238,7 @@ async function processAutomaticPaymentReleases(): Promise<{ released: number; fa
 // Background Job Processor
 // ===========================================
 async function processBackgroundJob(job: Job<BackgroundJobData>): Promise<void> {
-  const { jobType, data } = job.data;
+  const { jobType } = job.data;
 
   console.log(`⚙️ Processing background job ${job.id}: ${jobType}`);
 

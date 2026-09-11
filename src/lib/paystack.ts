@@ -267,13 +267,15 @@ const paystackRequest = async <T>(
 
   try {
     const response = await fetch(url, options);
-    const data = await response.json();
+    // Node's fetch types `json()` as `unknown`; Paystack always returns an
+    // object carrying a `message` on failure.
+    const data = (await response.json()) as T & { message?: string };
 
     if (!response.ok) {
       throw new Error(data.message || `Paystack API error: ${response.status}`);
     }
 
-    return data as T;
+    return data;
   } catch (error) {
     if (error instanceof Error) {
       throw new Error(`Paystack request failed: ${error.message}`);

@@ -90,7 +90,10 @@ const oneSignalRequest = async (
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ errors: ['Unknown error'] }));
+    // Node's fetch types `json()` as `unknown`; OneSignal returns `{ errors: [...] }`.
+    const error = (await response
+      .json()
+      .catch(() => ({ errors: ['Unknown error'] }))) as { errors?: string[] };
     console.error('❌ OneSignal API error:', error);
     throw new Error(error.errors?.[0] || 'OneSignal API request failed');
   }
@@ -750,7 +753,7 @@ export const sendVerificationPush = async (
   });
 };
 
-export default {
+const pushService = {
   registerPushToken,
   unregisterPushToken,
   updatePushPreference,
@@ -768,3 +771,5 @@ export default {
   sendReviewPush,
   sendVerificationPush,
 };
+
+export default pushService;

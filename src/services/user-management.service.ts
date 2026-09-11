@@ -87,7 +87,6 @@ interface RestrictUserInput {
 // Constants
 // ==========================================
 
-const ADMIN_ROLES = [UserRole.ADMIN, UserRole.SUPER_ADMIN];
 const MANAGEABLE_ROLES: string[] = [UserRole.SERVICE_USER, UserRole.SERVICE_PROVIDER];
 
 // ==========================================

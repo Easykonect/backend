@@ -145,12 +145,6 @@ export const becomeProvider = async (userId: string, input: BecomeProviderInput)
     });
   }
 
-  // Generate slug from business name
-  const slug = sanitizedBusinessName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '');
-
   // Create provider profile and update user role in a transaction
   const [updatedUser, provider] = await prisma.$transaction(async (tx) => {
     // Create provider profile
@@ -570,7 +564,7 @@ export const switchActiveRole = async (userId: string, targetRole: string) => {
   }
 
   // Update active role
-  const updatedUser = await prisma.user.update({
+  await prisma.user.update({
     where: { id: userId },
     data: { activeRole: targetRole as any },
   });

@@ -113,7 +113,7 @@ export async function initializeSocketServer(httpServer: HttpServer): Promise<Se
       authSocket.userName = decoded.email.split('@')[0]; // Use email prefix as display name
 
       next();
-    } catch (error) {
+    } catch {
       next(new Error('Authentication failed'));
     }
   });
@@ -466,7 +466,7 @@ export async function getOnlineUsersCount(): Promise<number> {
   return sockets.length;
 }
 
-export default {
+const socketService = {
   initialize: initializeSocketServer,
   getIO,
   emitToUser,
@@ -475,3 +475,5 @@ export default {
   broadcastToAll,
   getOnlineUsersCount,
 };
+
+export default socketService;

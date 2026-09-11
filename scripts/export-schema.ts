@@ -3,7 +3,6 @@
  * Exports GraphQL schema to SDL file for documentation
  */
 
-import { printSchema, buildSchema } from 'graphql';
 import { typeDefs } from '../src/graphql/schemas/index';
 import * as fs from 'fs';
 import * as path from 'path';

@@ -28,7 +28,7 @@ export async function GET() {
 
 // WebSocket upgrade not directly supported in Next.js API routes
 // This is a placeholder to explain the architecture
-export async function POST(request: NextRequest) {
+export async function POST(_request: NextRequest) {
   return NextResponse.json({
     error: 'WebSocket upgrade not supported via API routes',
     solution: 'Use the custom server (npm run server) for WebSocket support',

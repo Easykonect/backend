@@ -62,7 +62,6 @@ describe('GraphQL API Integration', () => {
   // Authentication Flow
   // ==================
   describe('Authentication Flow', () => {
-    let accessToken: string;
 
     it('should register a new user', async () => {
       const result = await gql(`

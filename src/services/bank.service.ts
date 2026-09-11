@@ -33,11 +33,6 @@ interface AddBankAccountInput {
   accountNumber: string;
 }
 
-interface PaginationInput {
-  page: number;
-  limit: number;
-}
-
 // ==========================================
 // Constants
 // ==========================================
