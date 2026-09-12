@@ -34,6 +34,10 @@ jest.mock('@/lib/prisma', () => ({
       groupBy: jest.fn(),
       aggregate: jest.fn(),
     },
+    userBlock: {
+      findMany: jest.fn(),
+      findFirst: jest.fn(),
+    },
   },
 }));
 
@@ -202,23 +206,26 @@ describe('browseProviders', () => {
     expect(result.items[1].businessName).toBe('Provider A');
   });
 
-  it('filters by minRating post-query', async () => {
-    const providerA = makeProvider({ id: 'a', businessName: 'Low Rated', _count: { reviews: 2, likes: 1 } });
+  it('filters by minRating in the query', async () => {
     const providerB = makeProvider({ id: 'b', businessName: 'High Rated', _count: { reviews: 5, likes: 10 } });
-    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValue([providerA, providerB]);
-    (prisma.serviceProvider.count as jest.Mock).mockResolvedValue(2);
-    (prisma.review.groupBy as jest.Mock).mockResolvedValue([
-      makeRatingAgg('a', 2.5),
-      makeRatingAgg('b', 4.8),
-    ]);
+    (prisma.review.groupBy as jest.Mock)
+      // Providers whose rounded average is at least 4.0
+      .mockResolvedValueOnce([{ providerId: 'b' }])
+      // Ratings for the loaded page
+      .mockResolvedValueOnce([makeRatingAgg('b', 4.8)]);
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValue([providerB]);
+    (prisma.serviceProvider.count as jest.Mock).mockResolvedValue(1);
 
     const result = await browseProviders({ filters: { minRating: 4.0 } });
+
+    const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(call.where.id).toEqual({ in: ['b'] });
+    expect(result.total).toBe(1);
     expect(result.items).toHaveLength(1);
     expect(result.items[0].businessName).toBe('High Rated');
   });
 
   it('respects pagination — page 2 with limit 1', async () => {
-    const _p1 = makeProvider({ id: 'a', businessName: 'P1' });
     const p2 = makeProvider({ id: 'b', businessName: 'P2' });
     // For NEWEST, DB handles skip/take
     (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValue([p2]);
@@ -486,7 +493,7 @@ describe('getNearbyProviders', () => {
     expect(result.items[0].businessName).toBe('Ace Services');
   });
 
-  it('sorts by distance (nearest first) when no sortBy given', async () => {
+  it('sorts by distance (nearest first) with sortBy NEAREST', async () => {
     const closer = makeProvider({ id: 'c', businessName: 'Closer', latitude: 6.525, longitude: 3.380, _count: { reviews: 1, likes: 1 } });
     const further = makeProvider({ id: 'f', businessName: 'Further', latitude: 6.560, longitude: 3.420, _count: { reviews: 1, likes: 1 } });
     (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValue([further, closer]);
@@ -496,9 +503,8 @@ describe('getNearbyProviders', () => {
       latitude: userLat,
       longitude: userLng,
       radiusKm: 25,
-      sortBy: 'NEWEST',
+      sortBy: 'NEAREST',
     });
-    // NEWEST for nearby defaults to distance sort
     expect(result.items[0].businessName).toBe('Closer');
   });
 
@@ -534,14 +540,12 @@ describe('getNearbyProviders', () => {
     expect(result.pagination.hasNext).toBe(true);
   });
 
-  it('filters by minRating post-distance filter', async () => {
-    const p1 = makeProvider({ id: 'p1', businessName: 'Low', latitude: 6.525, longitude: 3.380, _count: { reviews: 2, likes: 1 } });
+  it('filters by minRating in the candidate query', async () => {
     const p2 = makeProvider({ id: 'p2', businessName: 'High', latitude: 6.526, longitude: 3.381, _count: { reviews: 3, likes: 2 } });
-    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValue([p1, p2]);
-    (prisma.review.groupBy as jest.Mock).mockResolvedValue([
-      makeRatingAgg('p1', 2.0),
-      makeRatingAgg('p2', 4.5),
-    ]);
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValue([p2]);
+    (prisma.review.groupBy as jest.Mock)
+      .mockResolvedValueOnce([{ providerId: 'p2' }])
+      .mockResolvedValueOnce([makeRatingAgg('p2', 4.5)]);
 
     const result = await getNearbyProviders({
       latitude: userLat,
@@ -555,11 +559,16 @@ describe('getNearbyProviders', () => {
 });
 
 // ==================
-// Own-provider filtering (caller is themselves a provider)
+// Own and blocked providers (caller is signed in)
 // ==================
 
 describe('browseProviders — excludeUserId', () => {
-  it('adds userId: { not: ... } to the where clause when excludeUserId is set', async () => {
+  beforeEach(() => {
+    // Nobody has blocked anybody unless a test says so
+    (prisma.userBlock.findMany as jest.Mock).mockResolvedValue([]);
+  });
+
+  it('adds userId: { notIn: [viewer] } to the where clause when excludeUserId is set', async () => {
     (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
     (prisma.serviceProvider.count as jest.Mock).mockResolvedValueOnce(0);
     (prisma.review.groupBy as jest.Mock).mockResolvedValueOnce([]);
@@ -567,7 +576,24 @@ describe('browseProviders — excludeUserId', () => {
     await browseProviders({ excludeUserId: 'user-A' });
 
     const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
-    expect(call.where.userId).toEqual({ not: 'user-A' });
+    expect(call.where.userId).toEqual({ notIn: ['user-A'] });
+    expect(prisma.userBlock.findMany).toHaveBeenCalledWith({
+      where: { blockerId: 'user-A' },
+      select: { blockedId: true },
+    });
+  });
+
+  it('also excludes providers the viewer blocked, from both the list and the count', async () => {
+    (prisma.userBlock.findMany as jest.Mock).mockResolvedValue([{ blockedId: 'user-B' }, { blockedId: 'user-C' }]);
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.serviceProvider.count as jest.Mock).mockResolvedValueOnce(0);
+    (prisma.review.groupBy as jest.Mock).mockResolvedValueOnce([]);
+
+    await browseProviders({ excludeUserId: 'user-A' });
+
+    const excluded = { notIn: ['user-A', 'user-B', 'user-C'] };
+    expect((prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0].where.userId).toEqual(excluded);
+    expect((prisma.serviceProvider.count as jest.Mock).mock.calls[0][0].where.userId).toEqual(excluded);
   });
 
   it('omits the userId filter when excludeUserId is not passed', async () => {
@@ -579,11 +605,16 @@ describe('browseProviders — excludeUserId', () => {
 
     const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
     expect(call.where.userId).toBeUndefined();
+    expect(prisma.userBlock.findMany).not.toHaveBeenCalled();
   });
 });
 
 describe('getNearbyProviders — excludeUserId', () => {
-  it('adds userId: { not: ... } to the geo query when excludeUserId is set', async () => {
+  beforeEach(() => {
+    (prisma.userBlock.findMany as jest.Mock).mockResolvedValue([]);
+  });
+
+  it('adds userId: { notIn: [viewer] } to the geo query when excludeUserId is set', async () => {
     (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
     (prisma.review.groupBy as jest.Mock).mockResolvedValueOnce([]);
 
@@ -594,6 +625,26 @@ describe('getNearbyProviders — excludeUserId', () => {
     });
 
     const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
-    expect(call.where.userId).toEqual({ not: 'user-A' });
+    expect(call.where.userId).toEqual({ notIn: ['user-A'] });
+  });
+
+  it('also excludes providers the viewer blocked, while staying inside the search area', async () => {
+    (prisma.userBlock.findMany as jest.Mock).mockResolvedValue([{ blockedId: 'user-B' }]);
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.review.groupBy as jest.Mock).mockResolvedValueOnce([]);
+
+    await getNearbyProviders({
+      latitude: 6.5244,
+      longitude: 3.3792,
+      excludeUserId: 'user-A',
+    });
+
+    const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(prisma.userBlock.findMany).toHaveBeenCalledWith({
+      where: { blockerId: 'user-A' },
+      select: { blockedId: true },
+    });
+    expect(call.where.userId).toEqual({ notIn: ['user-A', 'user-B'] });
+    expect(call.where.latitude).toEqual({ gte: expect.any(Number), lte: expect.any(Number) });
   });
 });

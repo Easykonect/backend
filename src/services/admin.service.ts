@@ -1,15 +1,17 @@
 /**
  * Admin Authentication Service
  * Separate authentication system for ADMIN and SUPER_ADMIN roles
- * 
+ *
  * Security features:
  * - Admin-only registration (invite-based by SUPER_ADMIN)
  * - Separate login endpoint
  * - Role verification on login
  * - Account lockout after failed attempts
+ * - Sessions stored and ended the same way as customer sessions
  * - Audit logging
  */
 
+import { randomUUID } from 'crypto';
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import {
@@ -17,7 +19,9 @@ import {
   comparePassword,
   generateToken,
   generateRefreshToken,
-  verifyToken,
+  verifyRefreshToken,
+  getTokenIssuedAtMs,
+  type JWTPayload,
 } from '@/lib/auth';
 import {
   generateOtp,
@@ -30,6 +34,24 @@ import { sendPasswordResetEmail, sendProfileUpdatedEmail, sendEmailChangeOtpEmai
 import { config } from '@/config';
 import { UserRole, AccountStatus } from '@/constants';
 import { passwordSchema } from '@/utils/validation';
+import {
+  isBanActive,
+  isIssuedAfter,
+  isTokenValid,
+  validateEmail,
+  validateName,
+  validatePhone,
+} from '@/utils/security';
+import { AdminAction } from '@prisma/client';
+import { createAuditLog } from './audit.service';
+import {
+  storeRefreshToken,
+  checkRefreshToken,
+  invalidateRefreshToken,
+  endAllSessions,
+  revokeAccessToken,
+} from './token.service';
+import { notifyAndPush } from './user-management.service';
 
 // ==================
 // Types
@@ -49,10 +71,10 @@ interface CreateAdminInput {
 }
 
 interface UpdateAdminInput {
-  firstName?: string;
-  lastName?: string;
-  phone?: string;
-  profilePhoto?: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  phone?: string | null;
+  profilePhoto?: string | null;
 }
 
 interface AdminForgotPasswordInput {
@@ -77,7 +99,7 @@ interface AdminChangePasswordInput {
 /**
  * Check if account is locked
  */
-const isAccountLocked = (lockoutUntil: Date | null): boolean => {
+const isAccountLocked = (lockoutUntil: Date | null): lockoutUntil is Date => {
   if (!lockoutUntil) return false;
   return new Date() < lockoutUntil;
 };
@@ -118,6 +140,63 @@ const formatAdminUser = (user: {
   updatedAt: user.updatedAt.toISOString(),
 });
 
+const invalidAdminCredentials = () =>
+  new GraphQLError('Invalid admin credentials', {
+    extensions: { code: 'INVALID_CREDENTIALS' },
+  });
+
+const invalidAdminToken = (message: string) =>
+  new GraphQLError(message, {
+    extensions: { code: 'INVALID_TOKEN' },
+  });
+
+const accountLocked = (lockoutUntil: Date) =>
+  new GraphQLError(
+    `Account is locked. Try again in ${Math.ceil((lockoutUntil.getTime() - Date.now()) / (1000 * 60))} minutes.`,
+    { extensions: { code: 'ACCOUNT_LOCKED' } }
+  );
+
+// Compared against when the email has no admin account, so that answer takes as
+// long as a wrong password does
+let dummyPasswordHash: Promise<string> | undefined;
+const getDummyPasswordHash = (): Promise<string> => {
+  dummyPasswordHash ??= hashPassword(randomUUID());
+  return dummyPasswordHash;
+};
+
+/**
+ * Count a wrong password toward the lockout. Returns the lockout end when this
+ * attempt locks the account.
+ */
+const recordFailedPassword = async (account: {
+  id: string;
+  failedLoginAttempts: number;
+}): Promise<Date | null> => {
+  const failedLoginAttempts = account.failedLoginAttempts + 1;
+  const lockoutUntil = failedLoginAttempts >= config.security.maxLoginAttempts
+    ? new Date(Date.now() + config.security.lockoutDurationMinutes * 60 * 1000)
+    : null;
+
+  await prisma.user.update({
+    where: { id: account.id },
+    data: { failedLoginAttempts, lockoutUntil },
+  });
+
+  return lockoutUntil;
+};
+
+/**
+ * Record an admin action that has already been saved. A failed log is reported
+ * in the server log but doesn't turn the saved action into an error.
+ */
+const recordAdminAction = async (entry: Parameters<typeof createAuditLog>[0]) => {
+  try {
+    await createAuditLog(entry);
+  } catch (error) {
+    console.error(`Failed to write ${entry.action} audit log:`, error);
+  }
+};
+
 // ==================
 // Admin Authentication Functions
 // ==================
@@ -135,31 +214,32 @@ export const adminLogin = async (input: AdminLoginInput, clientIp?: string) => {
     where: { email: normalizedEmail },
   });
 
-  if (!user) {
-    throw new GraphQLError('Invalid admin credentials', {
-      extensions: { code: 'INVALID_CREDENTIALS' },
-    });
+  // An email with no account, a deleted account, or a customer or provider
+  // account gets the same answer as a wrong password, after a password check of
+  // the same cost
+  if (!user || user.deletedAt || !isAdminRole(user.role)) {
+    await comparePassword(password, user?.password ?? (await getDummyPasswordHash()));
+    throw invalidAdminCredentials();
   }
 
-  // CRITICAL: Check if user has admin role
-  if (!isAdminRole(user.role)) {
-    throw new GraphQLError('Access denied. Admin credentials required.', {
-      extensions: { code: 'FORBIDDEN' },
-    });
+  // Verify password
+  const isValidPassword = await comparePassword(password, user.password);
+  const isLocked = isAccountLocked(user.lockoutUntil);
+
+  if (!isValidPassword) {
+    // Wrong passwords during a lockout aren't counted, so they don't extend it
+    if (!isLocked) {
+      await recordFailedPassword(user);
+    }
+
+    throw invalidAdminCredentials();
   }
 
-  // Check if account is locked
+  // The account's state is only revealed to someone who knows its password
   if (isAccountLocked(user.lockoutUntil)) {
-    const minutesLeft = Math.ceil(
-      (user.lockoutUntil!.getTime() - Date.now()) / (1000 * 60)
-    );
-    throw new GraphQLError(
-      `Account is locked. Try again in ${minutesLeft} minutes.`,
-      { extensions: { code: 'ACCOUNT_LOCKED' } }
-    );
+    throw accountLocked(user.lockoutUntil);
   }
 
-  // Check if account is active
   if (user.status === AccountStatus.SUSPENDED) {
     throw new GraphQLError('Your admin account has been suspended.', {
       extensions: { code: 'ACCOUNT_SUSPENDED' },
@@ -172,31 +252,14 @@ export const adminLogin = async (input: AdminLoginInput, clientIp?: string) => {
     });
   }
 
-  // Verify password
-  const isValidPassword = await comparePassword(password, user.password);
-
-  if (!isValidPassword) {
-    // Increment failed login attempts
-    const newFailedAttempts = user.failedLoginAttempts + 1;
-    const shouldLock = newFailedAttempts >= config.security.maxLoginAttempts;
-
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        failedLoginAttempts: newFailedAttempts,
-        lockoutUntil: shouldLock
-          ? new Date(Date.now() + config.security.lockoutDurationMinutes * 60 * 1000)
-          : null,
-      },
-    });
-
-    throw new GraphQLError('Invalid admin credentials', {
-      extensions: { code: 'INVALID_CREDENTIALS' },
+  if (isBanActive(user)) {
+    throw new GraphQLError('Your admin account has been banned.', {
+      extensions: { code: 'ACCOUNT_BANNED' },
     });
   }
 
   // Reset failed attempts and update login info
-  await prisma.user.update({
+  const admin = await prisma.user.update({
     where: { id: user.id },
     data: {
       failedLoginAttempts: 0,
@@ -208,17 +271,23 @@ export const adminLogin = async (input: AdminLoginInput, clientIp?: string) => {
 
   // Generate tokens with admin flag
   const tokenPayload = {
-    userId: user.id,
-    email: user.email,
-    role: user.role,
+    userId: admin.id,
+    email: admin.email,
+    role: admin.role,
     isAdmin: true,
   };
 
   const accessToken = generateToken(tokenPayload);
   const refreshToken = generateRefreshToken(tokenPayload);
 
+  // Stored so adminRefreshToken accepts it until adminLogout or a password change revokes it
+  await storeRefreshToken(admin.id, refreshToken, {
+    deviceInfo: 'admin-dashboard',
+    ipAddress: clientIp,
+  });
+
   return {
-    admin: formatAdminUser(user),
+    admin: formatAdminUser(admin),
     accessToken,
     refreshToken,
   };
@@ -228,11 +297,16 @@ export const adminLogin = async (input: AdminLoginInput, clientIp?: string) => {
  * Create Admin (SUPER_ADMIN only)
  * Invite-based admin creation
  */
-// TODO(audit): `creatorId` is supplied by the resolver but not recorded anywhere.
-// Persist it (or write an audit log) so admin creation is attributable.
-export const createAdmin = async (input: CreateAdminInput, _creatorId: string) => {
-  const { email, password, firstName, lastName, role } = input;
-  const normalizedEmail = email.toLowerCase().trim();
+export const createAdmin = async (
+  input: CreateAdminInput,
+  creatorId: string,
+  creatorRole: string = UserRole.SUPER_ADMIN,
+  ipAddress?: string
+) => {
+  const { password, role } = input;
+  const normalizedEmail = validateEmail(input.email);
+  const firstName = validateName(input.firstName, 'First name');
+  const lastName = validateName(input.lastName, 'Last name');
 
   // Validate password
   const passwordValidation = passwordSchema.safeParse(password);
@@ -257,7 +331,7 @@ export const createAdmin = async (input: CreateAdminInput, _creatorId: string) =
   const hashedPassword = await hashPassword(password);
 
   // Create admin user (already verified since it's invite-based)
-  await prisma.user.create({
+  const createdAdmin = await prisma.user.create({
     data: {
       email: normalizedEmail,
       password: hashedPassword,
@@ -267,6 +341,16 @@ export const createAdmin = async (input: CreateAdminInput, _creatorId: string) =
       status: AccountStatus.ACTIVE,
       isEmailVerified: true, // Admin accounts are pre-verified
     },
+  });
+
+  await recordAdminAction({
+    action: AdminAction.CREATE_ADMIN,
+    targetType: 'User',
+    targetId: createdAdmin.id,
+    performedBy: creatorId,
+    performedByRole: creatorRole,
+    newValue: { email: normalizedEmail, role, status: AccountStatus.ACTIVE },
+    ipAddress,
   });
 
   // TODO: Send welcome email to new admin
@@ -373,7 +457,8 @@ export const adminResetPassword = async (input: AdminResetPasswordInput) => {
   // Hash new password
   const hashedPassword = await hashPassword(newPassword);
 
-  // Update password
+  // Update password. Saving the sign-out time with it keeps every earlier
+  // session ended even if the token store is unavailable.
   await prisma.user.update({
     where: { id: user.id },
     data: {
@@ -382,8 +467,12 @@ export const adminResetPassword = async (input: AdminResetPasswordInput) => {
       passwordResetExpiry: null,
       failedLoginAttempts: 0,
       lockoutUntil: null,
+      tokenInvalidatedAt: new Date(),
     },
   });
+
+  // Anyone signed in with the old password is signed out
+  await endAllSessions(user.id);
 
   return {
     success: true,
@@ -416,10 +505,22 @@ export const adminChangePassword = async (adminId: string, input: AdminChangePas
     });
   }
 
+  // The sign-in lockout applies here too, so a signed-in session can't be used
+  // to keep guessing the password
+  if (isAccountLocked(admin.lockoutUntil)) {
+    throw accountLocked(admin.lockoutUntil);
+  }
+
   // Verify current password
   const isValidPassword = await comparePassword(currentPassword, admin.password);
 
   if (!isValidPassword) {
+    const lockoutUntil = await recordFailedPassword(admin);
+
+    if (lockoutUntil) {
+      throw accountLocked(lockoutUntil);
+    }
+
     throw new GraphQLError('Current password is incorrect', {
       extensions: { code: 'INVALID_PASSWORD' },
     });
@@ -428,76 +529,121 @@ export const adminChangePassword = async (adminId: string, input: AdminChangePas
   // Hash new password
   const hashedPassword = await hashPassword(newPassword);
 
-  // Update password
+  // Update password, with the sign-out time for every earlier session
   await prisma.user.update({
     where: { id: adminId },
     data: {
       password: hashedPassword,
+      failedLoginAttempts: 0,
+      lockoutUntil: null,
+      tokenInvalidatedAt: new Date(),
     },
   });
 
+  // Sign out on every device, this one included
+  await endAllSessions(adminId);
+
   return {
     success: true,
-    message: 'Password changed successfully.',
+    message: 'Password changed successfully. Please login again on all devices.',
   };
 };
 
 /**
  * Admin Refresh Token
+ * Checked the same way as a customer refresh token, and it must come from adminLogin
  */
 export const adminRefreshToken = async (refreshToken: string) => {
+  let decoded: JWTPayload & { isAdmin?: boolean };
+
   try {
-    const decoded = verifyToken(refreshToken) as {
-      userId: string;
-      email: string;
-      role: string;
-      isAdmin?: boolean;
-    };
+    decoded = verifyRefreshToken(refreshToken);
+  } catch {
+    throw invalidAdminToken('Invalid or expired token');
+  }
 
-    // Verify this is an admin token
-    if (!decoded.isAdmin || !isAdminRole(decoded.role)) {
-      throw new GraphQLError('Invalid admin token', {
-        extensions: { code: 'INVALID_TOKEN' },
-      });
-    }
+  // Verify this is an admin token
+  if (!decoded.isAdmin || !isAdminRole(decoded.role)) {
+    throw invalidAdminToken('Invalid admin token');
+  }
 
-    // Fetch current admin data
-    const admin = await prisma.user.findUnique({
-      where: { id: decoded.userId },
-    });
+  // Only a token stored at sign-in, and not revoked since by adminLogout or a
+  // password change, is accepted
+  const record = await checkRefreshToken(refreshToken);
 
-    if (!admin || !isAdminRole(admin.role)) {
-      throw new GraphQLError('Admin not found', {
-        extensions: { code: 'NOT_FOUND' },
-      });
-    }
+  if (record.status === 'revoked') {
+    throw invalidAdminToken('Refresh token has been invalidated');
+  }
 
-    if (admin.status !== AccountStatus.ACTIVE) {
-      throw new GraphQLError('Admin account is not active', {
-        extensions: { code: 'ACCOUNT_INACTIVE' },
-      });
-    }
+  if (record.status === 'unavailable') {
+    // Signed and unexpired; the account checks below still apply
+    console.warn(`Token store unavailable: accepting a signed admin refresh token for user ${decoded.userId}`);
+  } else if (record.userId !== decoded.userId) {
+    throw invalidAdminToken('Refresh token has been invalidated');
+  }
 
-    // Generate new access token
-    const tokenPayload = {
-      userId: admin.id,
-      email: admin.email,
-      role: admin.role,
-      isAdmin: true,
-    };
+  if (decoded.iat && !(await isTokenValid(decoded.userId, decoded.iat, decoded.iatMs))) {
+    throw invalidAdminToken('Refresh token has been invalidated');
+  }
 
-    const accessToken = generateToken(tokenPayload);
+  // Fetch current admin data
+  const admin = await prisma.user.findUnique({
+    where: { id: decoded.userId },
+  });
 
-    return {
-      accessToken,
-      admin: formatAdminUser(admin),
-    };
-  } catch (error) {
-    if (error instanceof GraphQLError) throw error;
-    throw new GraphQLError('Invalid or expired token', {
-      extensions: { code: 'INVALID_TOKEN' },
+  if (!admin || admin.deletedAt || !isAdminRole(admin.role)) {
+    throw new GraphQLError('Admin not found', {
+      extensions: { code: 'NOT_FOUND' },
     });
   }
+
+  if (admin.status !== AccountStatus.ACTIVE || isBanActive(admin)) {
+    throw new GraphQLError('Admin account is not active', {
+      extensions: { code: 'ACCOUNT_INACTIVE' },
+    });
+  }
+
+  // Sessions ended by a password change or reset, or by a ban
+  if (
+    admin.tokenInvalidatedAt &&
+    !isIssuedAfter(getTokenIssuedAtMs(decoded), admin.tokenInvalidatedAt.getTime())
+  ) {
+    throw invalidAdminToken('Refresh token has been invalidated');
+  }
+
+  // Generate new access token
+  const tokenPayload = {
+    userId: admin.id,
+    email: admin.email,
+    role: admin.role,
+    isAdmin: true,
+  };
+
+  const accessToken = generateToken(tokenPayload);
+
+  return {
+    accessToken,
+    admin: formatAdminUser(admin),
+  };
+};
+
+/**
+ * Admin logout: revoke the refresh token and the access token the request was
+ * made with, as the customer logout does
+ */
+export const adminLogout = async (
+  refreshToken?: string | null,
+  session?: { payload: JWTPayload; accessToken?: string | null }
+): Promise<{ success: boolean; message: string }> => {
+  await Promise.all([
+    session ? revokeAccessToken(session.payload, session.accessToken ?? undefined) : undefined,
+    refreshToken ? invalidateRefreshToken(refreshToken) : undefined,
+  ]);
+
+  return {
+    success: true,
+    message: 'Admin logged out successfully',
+  };
 };
 
 /**
@@ -533,12 +679,41 @@ export const updateAdminProfile = async (adminId: string, input: UpdateAdminInpu
     });
   }
 
-  // Track which fields are actually changing for the notification email
+  // Values are validated only when they differ from the saved ones, so a form
+  // that sends back an unchanged value still saves
+  const changes: { firstName?: string; lastName?: string; phone?: string | null; profilePhoto?: string | null } = {};
+  // Which fields are actually changing, for the notification email
   const changedFields: string[] = [];
-  if (input.firstName && input.firstName !== admin.firstName) changedFields.push('First Name');
-  if (input.lastName && input.lastName !== admin.lastName) changedFields.push('Last Name');
-  if (input.phone !== undefined && input.phone !== admin.phone) changedFields.push('Phone Number');
-  if (input.profilePhoto !== undefined && input.profilePhoto !== admin.profilePhoto) changedFields.push('Profile Photo');
+
+  if (input.firstName && input.firstName !== admin.firstName) {
+    const firstName = validateName(input.firstName, 'First name');
+    if (firstName !== admin.firstName) {
+      changes.firstName = firstName;
+      changedFields.push('First Name');
+    }
+  }
+
+  if (input.lastName && input.lastName !== admin.lastName) {
+    const lastName = validateName(input.lastName, 'Last name');
+    if (lastName !== admin.lastName) {
+      changes.lastName = lastName;
+      changedFields.push('Last Name');
+    }
+  }
+
+  if (input.phone !== undefined && input.phone !== admin.phone) {
+    // null or an empty string removes the number
+    const phone = input.phone?.trim() ? validatePhone(input.phone) : null;
+    if (phone !== admin.phone) {
+      changes.phone = phone;
+      changedFields.push('Phone Number');
+    }
+  }
+
+  if (input.profilePhoto !== undefined && input.profilePhoto !== admin.profilePhoto) {
+    changes.profilePhoto = input.profilePhoto;
+    changedFields.push('Profile Photo');
+  }
 
   if (changedFields.length === 0) {
     return formatAdminUser(admin);
@@ -546,12 +721,7 @@ export const updateAdminProfile = async (adminId: string, input: UpdateAdminInpu
 
   const updatedAdmin = await prisma.user.update({
     where: { id: adminId },
-    data: {
-      ...(input.firstName && { firstName: input.firstName }),
-      ...(input.lastName && { lastName: input.lastName }),
-      ...(input.phone !== undefined && { phone: input.phone }),
-      ...(input.profilePhoto !== undefined && { profilePhoto: input.profilePhoto }),
-    },
+    data: changes,
   });
 
   // Send profile update notification email (non-blocking)
@@ -565,7 +735,7 @@ export const updateAdminProfile = async (adminId: string, input: UpdateAdminInpu
  * Sends an OTP to the NEW email address to confirm ownership
  */
 export const adminRequestEmailChange = async (adminId: string, newEmail: string) => {
-  const normalizedEmail = newEmail.toLowerCase().trim();
+  const normalizedEmail = validateEmail(newEmail);
 
   const admin = await prisma.user.findUnique({
     where: { id: adminId },
@@ -605,8 +775,6 @@ export const adminRequestEmailChange = async (adminId: string, newEmail: string)
     data: {
       emailVerifyToken: hashedOtp,
       emailVerifyExpiry: otpExpiry,
-      // Store the pending new email in passwordResetToken field temporarily
-      // (reusing an available nullable field to avoid a schema migration)
       pendingEmail: normalizedEmail,
     },
   });
@@ -733,7 +901,13 @@ export const getAdminById = async (adminId: string) => {
 /**
  * Suspend Admin
  */
-export const suspendAdmin = async (adminId: string, reason: string, suspenderId: string) => {
+export const suspendAdmin = async (
+  adminId: string,
+  reason: string,
+  suspenderId: string,
+  suspenderRole: string = UserRole.SUPER_ADMIN,
+  ipAddress?: string
+) => {
   const admin = await prisma.user.findUnique({
     where: { id: adminId },
   });
@@ -765,7 +939,18 @@ export const suspendAdmin = async (adminId: string, reason: string, suspenderId:
     },
   });
 
-  // TODO: Log suspension reason
+  // Record who suspended the admin and why
+  await recordAdminAction({
+    action: AdminAction.SUSPEND_USER,
+    targetType: 'User',
+    targetId: adminId,
+    performedBy: suspenderId,
+    performedByRole: suspenderRole,
+    previousValue: { status: admin.status },
+    newValue: { status: AccountStatus.SUSPENDED },
+    reason,
+    ipAddress,
+  });
 
   return {
     success: true,
@@ -776,7 +961,12 @@ export const suspendAdmin = async (adminId: string, reason: string, suspenderId:
 /**
  * Activate Admin
  */
-export const activateAdmin = async (adminId: string) => {
+export const activateAdmin = async (
+  adminId: string,
+  activatorId: string,
+  activatorRole: string = UserRole.SUPER_ADMIN,
+  ipAddress?: string
+) => {
   const admin = await prisma.user.findUnique({
     where: { id: adminId },
   });
@@ -794,6 +984,17 @@ export const activateAdmin = async (adminId: string) => {
     },
   });
 
+  await recordAdminAction({
+    action: AdminAction.ACTIVATE_USER,
+    targetType: 'User',
+    targetId: adminId,
+    performedBy: activatorId,
+    performedByRole: activatorRole,
+    previousValue: { status: admin.status },
+    newValue: { status: AccountStatus.ACTIVE },
+    ipAddress,
+  });
+
   return {
     success: true,
     message: `Admin ${admin.email} has been activated.`,
@@ -803,7 +1004,13 @@ export const activateAdmin = async (adminId: string) => {
 /**
  * Update Admin Role
  */
-export const updateAdminRole = async (adminId: string, newRole: 'ADMIN' | 'SUPER_ADMIN', updaterId: string) => {
+export const updateAdminRole = async (
+  adminId: string,
+  newRole: 'ADMIN' | 'SUPER_ADMIN',
+  updaterId: string,
+  updaterRole: string = UserRole.SUPER_ADMIN,
+  ipAddress?: string
+) => {
   const admin = await prisma.user.findUnique({
     where: { id: adminId },
   });
@@ -821,11 +1028,33 @@ export const updateAdminRole = async (adminId: string, newRole: 'ADMIN' | 'SUPER
     });
   }
 
+  // A Super Admin can't be demoted, just as they can't be suspended or deleted
+  if (admin.role === UserRole.SUPER_ADMIN) {
+    throw new GraphQLError('Cannot change the role of a Super Admin', {
+      extensions: { code: 'FORBIDDEN' },
+    });
+  }
+
+  if (admin.role === newRole) {
+    return formatAdminUser(admin);
+  }
+
   const updatedAdmin = await prisma.user.update({
     where: { id: adminId },
     data: {
       role: newRole,
     },
+  });
+
+  await recordAdminAction({
+    action: AdminAction.UPDATE_USER_ROLE,
+    targetType: 'User',
+    targetId: adminId,
+    performedBy: updaterId,
+    performedByRole: updaterRole,
+    previousValue: { role: admin.role },
+    newValue: { role: newRole },
+    ipAddress,
   });
 
   return formatAdminUser(updatedAdmin);
@@ -834,7 +1063,12 @@ export const updateAdminRole = async (adminId: string, newRole: 'ADMIN' | 'SUPER
 /**
  * Delete Admin
  */
-export const deleteAdmin = async (adminId: string, deleterId: string) => {
+export const deleteAdmin = async (
+  adminId: string,
+  deleterId: string,
+  deleterRole: string = UserRole.SUPER_ADMIN,
+  ipAddress?: string
+) => {
   const admin = await prisma.user.findUnique({
     where: { id: adminId },
   });
@@ -863,6 +1097,16 @@ export const deleteAdmin = async (adminId: string, deleterId: string) => {
     where: { id: adminId },
   });
 
+  await recordAdminAction({
+    action: AdminAction.DELETE_USER,
+    targetType: 'User',
+    targetId: adminId,
+    performedBy: deleterId,
+    performedByRole: deleterRole,
+    previousValue: { email: admin.email, role: admin.role, status: admin.status },
+    ipAddress,
+  });
+
   return {
     success: true,
     message: `Admin ${admin.email} has been deleted.`,
@@ -876,15 +1120,19 @@ export const deleteAdmin = async (adminId: string, deleterId: string) => {
 /**
  * Suspend User
  */
-// TODO(audit): `reason` is required by the GraphQL schema but is currently
-// discarded — see the TODOs below. `user-management.service.banUser` is the
-// audited equivalent and should probably supersede this.
-export const suspendUser = async (userId: string, _reason: string) => {
+export const suspendUser = async (
+  userId: string,
+  reason: string,
+  adminId: string,
+  adminRole: string = UserRole.ADMIN,
+  ipAddress?: string
+) => {
   const user = await prisma.user.findUnique({
     where: { id: userId },
   });
 
-  if (!user) {
+  // A deleted account has nothing left to suspend
+  if (!user || user.deletedAt) {
     throw new GraphQLError('User not found', {
       extensions: { code: 'NOT_FOUND' },
     });
@@ -904,8 +1152,31 @@ export const suspendUser = async (userId: string, _reason: string) => {
     },
   });
 
-  // TODO: Send suspension notification email
-  // TODO: Log suspension reason
+  await recordAdminAction({
+    action: AdminAction.SUSPEND_USER,
+    targetType: 'User',
+    targetId: userId,
+    performedBy: adminId,
+    performedByRole: adminRole,
+    previousValue: { status: user.status },
+    newValue: { status: AccountStatus.SUSPENDED },
+    reason,
+    ipAddress,
+  });
+
+  // A suspended account can't open in-app notifications, so the push is what they see
+  if (user.status !== AccountStatus.SUSPENDED) {
+    const shownReason = reason.trim();
+    await notifyAndPush(
+      userId,
+      'ACCOUNT_SUSPENDED',
+      'Account Suspended',
+      shownReason
+        ? `Your account has been suspended. Reason: ${shownReason}`
+        : 'Your account has been suspended. Please contact support.',
+      { reason: shownReason },
+    );
+  }
 
   return {
     success: true,
@@ -916,7 +1187,12 @@ export const suspendUser = async (userId: string, _reason: string) => {
 /**
  * Activate User
  */
-export const activateUser = async (userId: string) => {
+export const activateUser = async (
+  userId: string,
+  adminId: string,
+  adminRole: string = UserRole.ADMIN,
+  ipAddress?: string
+) => {
   const user = await prisma.user.findUnique({
     where: { id: userId },
   });
@@ -934,6 +1210,13 @@ export const activateUser = async (userId: string) => {
     });
   }
 
+  // A deleted account's personal data is gone and it can't be used again
+  if (user.deletedAt) {
+    throw new GraphQLError('This account has been deleted and cannot be reactivated', {
+      extensions: { code: 'ACCOUNT_DELETED' },
+    });
+  }
+
   await prisma.user.update({
     where: { id: userId },
     data: {
@@ -941,13 +1224,29 @@ export const activateUser = async (userId: string) => {
     },
   });
 
+  await recordAdminAction({
+    action: AdminAction.ACTIVATE_USER,
+    targetType: 'User',
+    targetId: userId,
+    performedBy: adminId,
+    performedByRole: adminRole,
+    previousValue: { status: user.status },
+    newValue: { status: AccountStatus.ACTIVE },
+    ipAddress,
+  });
+
+  // Tell the user when a suspension or deactivation is lifted
+  if (user.status === AccountStatus.SUSPENDED || user.status === AccountStatus.DEACTIVATED) {
+    await notifyAndPush(
+      userId,
+      'ACCOUNT_ACTIVATED',
+      'Account Reactivated',
+      'Your account has been reactivated. You can now access your account.',
+    );
+  }
+
   return {
     success: true,
     message: `User ${user.email} has been activated.`,
   };
 };
-
-/**
- * Admin logout - invalidate refresh token
- */
-export { invalidateRefreshToken as adminLogout } from './token.service';

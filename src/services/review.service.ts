@@ -1,18 +1,33 @@
 /**
  * Review Service
  * Handles review and rating operations
- * 
+ *
  * Features:
  * - Create review after completed booking
  * - Provider response to reviews
  * - Get provider reviews with average rating
  * - User's reviews
+ *
+ * Reviews and responses are screened for blocked language and contact
+ * details. A review hidden by moderation keeps its rating, so reporting a
+ * review can't change a provider's score, but its text is not shown.
+ *
+ * An admin can remove a review (deleteReview). It stays stored with who
+ * removed it and why, but is left out of every list, count and rating, and
+ * its booking can't be reviewed again.
  */
 
+import { AdminAction, type Prisma } from '@prisma/client';
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
 import { BookingStatus } from '@/constants';
+import { assertAcceptableText } from '@/lib/content-filter';
+import { logger } from '@/lib/logger';
 import { sanitizeBasic, validateRating } from '@/utils/security';
+import { createAuditLog } from '@/services/audit.service';
+import { notifyReviewReceived, notifyReviewResponse } from '@/services/notification.service';
+import { sendPushToUser, sendReviewPush } from '@/services/push.service';
+import { assertTermsAccepted } from './terms.service';
 
 // ==================
 // Types
@@ -21,14 +36,30 @@ import { sanitizeBasic, validateRating } from '@/utils/security';
 interface CreateReviewInput {
   bookingId: string;
   rating: number;
-  comment?: string;
+  comment?: string | null;
 }
 
 interface ReviewFiltersInput {
   providerId?: string;
-  rating?: number;
-  hasResponse?: boolean;
+  rating?: number | null;
+  hasResponse?: boolean | null;
 }
+
+// ==================
+// Constants
+// ==================
+
+// Lengths are counted after the text is cleaned
+const MAX_COMMENT_LENGTH = 1000;
+const MIN_RESPONSE_LENGTH = 10;
+const MAX_RESPONSE_LENGTH = 1000;
+const MAX_DELETION_REASON_LENGTH = 500;
+
+// Reviews an admin hasn't removed. Reviews saved before removal existed have no
+// deletedAt at all, which matching null alone would miss.
+const NOT_DELETED: Prisma.ReviewWhereInput = {
+  OR: [{ deletedAt: null }, { deletedAt: { isSet: false } }],
+};
 
 // ==================
 // Helper Functions
@@ -40,8 +71,9 @@ interface ReviewFiltersInput {
 const formatReviewResponse = (review: any) => ({
   id: review.id,
   rating: review.rating,
-  comment: review.comment,
-  response: review.response,
+  comment: review.isHidden ? null : review.comment,
+  response: review.isHidden ? null : review.response,
+  isHidden: Boolean(review.isHidden),
   respondedAt: review.respondedAt?.toISOString() || null,
   createdAt: review.createdAt.toISOString(),
   updatedAt: review.updatedAt.toISOString(),
@@ -65,10 +97,70 @@ const formatReviewResponse = (review: any) => ({
     scheduledDate: review.booking.scheduledDate.toISOString().split('T')[0],
     service: review.booking.service ? {
       id: review.booking.service.id,
-      title: review.booking.service.title,
+      // Services are named; ReviewService calls it title
+      title: review.booking.service.name,
     } : null,
   } : null,
 });
+
+const reviewNotFound = () =>
+  new GraphQLError('Review not found', {
+    extensions: { code: 'NOT_FOUND' },
+  });
+
+const assertCommentLength = (comment: string | undefined) => {
+  if (comment && comment.length > MAX_COMMENT_LENGTH) {
+    throw new GraphQLError(`Your review must be at most ${MAX_COMMENT_LENGTH} characters`, {
+      extensions: { code: 'INVALID_INPUT' },
+    });
+  }
+};
+
+/**
+ * Tell the provider about a new review. The review is already saved, so
+ * failures are logged rather than returned.
+ */
+const announceNewReview = async (
+  providerUserId: string,
+  reviewId: string,
+  rating: number,
+  reviewerName: string,
+  serviceName: string
+) => {
+  try {
+    await notifyReviewReceived(providerUserId, reviewId, rating, reviewerName);
+  } catch (err) {
+    logger.error('Failed to write review notification', { reviewId, err });
+  }
+
+  try {
+    await sendReviewPush(providerUserId, reviewerName, rating, serviceName, { reviewId });
+  } catch (err) {
+    logger.error('Failed to send review push', { reviewId, err });
+  }
+};
+
+/**
+ * Tell the reviewer the provider replied. Failures are logged: the reply is
+ * already saved.
+ */
+const announceResponse = async (reviewerUserId: string, reviewId: string, providerName: string) => {
+  try {
+    await notifyReviewResponse(reviewerUserId, reviewId, providerName);
+  } catch (err) {
+    logger.error('Failed to write review response notification', { reviewId, err });
+  }
+
+  try {
+    await sendPushToUser(reviewerUserId, {
+      title: 'Provider Responded to Your Review',
+      message: `${providerName} has responded to your review`,
+      data: { type: 'REVIEW', reviewId },
+    });
+  } catch (err) {
+    logger.error('Failed to send review response push', { reviewId, err });
+  }
+};
 
 // ==================
 // Review Functions
@@ -82,6 +174,10 @@ export const createReview = async (userId: string, input: CreateReviewInput) => 
 
   // Validate and sanitize rating
   const validatedRating = validateRating(rating);
+
+  const sanitizedComment = comment ? sanitizeBasic(comment) : undefined;
+  assertCommentLength(sanitizedComment);
+  assertAcceptableText(sanitizedComment, 'Your review');
 
   // Get booking
   const booking = await prisma.booking.findUnique({
@@ -114,16 +210,19 @@ export const createReview = async (userId: string, input: CreateReviewInput) => 
     });
   }
 
-  // Check if already reviewed
+  // Check if already reviewed. A review an admin removed still counts.
   if (booking.review) {
-    throw new GraphQLError('You have already reviewed this booking', {
-      extensions: { code: 'ALREADY_REVIEWED' },
-    });
+    throw new GraphQLError(
+      booking.review.deletedAt
+        ? "This booking's review was removed by Easykonnet, so it can't be reviewed again"
+        : 'You have already reviewed this booking',
+      { extensions: { code: 'ALREADY_REVIEWED' } }
+    );
   }
 
+  await assertTermsAccepted(userId);
+
   // Create review
-  const sanitizedComment = comment ? sanitizeBasic(comment) : undefined;
-  
   const review = await prisma.review.create({
     data: {
       bookingId,
@@ -143,6 +242,14 @@ export const createReview = async (userId: string, input: CreateReviewInput) => 
     },
   });
 
+  await announceNewReview(
+    booking.provider.userId,
+    review.id,
+    validatedRating,
+    `${booking.user.firstName} ${booking.user.lastName}`.trim() || 'A customer',
+    booking.service.name
+  );
+
   return formatReviewResponse(review);
 };
 
@@ -158,10 +265,8 @@ export const respondToReview = async (providerId: string, reviewId: string, resp
     },
   });
 
-  if (!review) {
-    throw new GraphQLError('Review not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+  if (!review || review.deletedAt) {
+    throw reviewNotFound();
   }
 
   // Check if provider owns the review
@@ -178,15 +283,24 @@ export const respondToReview = async (providerId: string, reviewId: string, resp
     });
   }
 
-  // Validate response
-  if (!response || response.trim().length < 10) {
-    throw new GraphQLError('Response must be at least 10 characters', {
+  // Cleaned first, so markup and spaces don't count towards the length
+  const sanitizedResponse = sanitizeBasic(response ?? '');
+
+  if (sanitizedResponse.length < MIN_RESPONSE_LENGTH) {
+    throw new GraphQLError(`Response must be at least ${MIN_RESPONSE_LENGTH} characters`, {
       extensions: { code: 'INVALID_RESPONSE' },
     });
   }
 
-  // Sanitize response
-  const sanitizedResponse = sanitizeBasic(response.trim());
+  if (sanitizedResponse.length > MAX_RESPONSE_LENGTH) {
+    throw new GraphQLError(`Response must be at most ${MAX_RESPONSE_LENGTH} characters`, {
+      extensions: { code: 'INVALID_RESPONSE' },
+    });
+  }
+
+  assertAcceptableText(sanitizedResponse, 'Your response');
+
+  await assertTermsAccepted(review.provider.userId);
 
   // Update review with response
   const updatedReview = await prisma.review.update({
@@ -205,6 +319,11 @@ export const respondToReview = async (providerId: string, reviewId: string, resp
       },
     },
   });
+
+  // A hidden review's reply isn't shown, so there's nothing to tell the reviewer
+  if (!updatedReview.isHidden) {
+    await announceResponse(review.userId, reviewId, review.provider.businessName);
+  }
 
   return formatReviewResponse(updatedReview);
 };
@@ -226,10 +345,8 @@ export const getReviewById = async (reviewId: string) => {
     },
   });
 
-  if (!review) {
-    throw new GraphQLError('Review not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+  if (!review || review.deletedAt) {
+    throw reviewNotFound();
   }
 
   return formatReviewResponse(review);
@@ -246,16 +363,20 @@ export const getProviderReviews = async (
   const { page, limit } = pagination;
   const skip = (page - 1) * limit;
 
-  // Build where clause
-  const where: any = { providerId };
+  const conditions: Prisma.ReviewWhereInput[] = [NOT_DELETED];
 
-  if (filters.rating) {
-    where.rating = filters.rating;
+  if (filters.hasResponse === true) {
+    conditions.push({ response: { isSet: true, not: null } });
+  } else if (filters.hasResponse === false) {
+    // No reply: a null reply, or no reply field saved at all
+    conditions.push({ OR: [{ response: null }, { response: { isSet: false } }] });
   }
 
-  if (filters.hasResponse !== undefined) {
-    where.response = filters.hasResponse ? { not: null } : null;
-  }
+  const where: Prisma.ReviewWhereInput = {
+    providerId,
+    ...(filters.rating ? { rating: filters.rating } : {}),
+    AND: conditions,
+  };
 
   const [reviews, total] = await Promise.all([
     prisma.review.findMany({
@@ -298,10 +419,11 @@ export const getUserReviews = async (
 ) => {
   const { page, limit } = pagination;
   const skip = (page - 1) * limit;
+  const where: Prisma.ReviewWhereInput = { userId, AND: [NOT_DELETED] };
 
   const [reviews, total] = await Promise.all([
     prisma.review.findMany({
-      where: { userId },
+      where,
       include: {
         user: true,
         provider: {
@@ -315,7 +437,7 @@ export const getUserReviews = async (
       take: limit,
       orderBy: { createdAt: 'desc' },
     }),
-    prisma.review.count({ where: { userId } }),
+    prisma.review.count({ where }),
   ]);
 
   const totalPages = Math.ceil(total / limit);
@@ -335,8 +457,10 @@ export const getUserReviews = async (
  * Get provider's average rating and review stats
  */
 export const getProviderRatingStats = async (providerId: string) => {
+  const where: Prisma.ReviewWhereInput = { providerId, AND: [NOT_DELETED] };
+
   const stats = await prisma.review.aggregate({
-    where: { providerId },
+    where,
     _avg: { rating: true },
     _count: { id: true },
   });
@@ -344,7 +468,7 @@ export const getProviderRatingStats = async (providerId: string) => {
   // Get rating distribution
   const ratingDistribution = await prisma.review.groupBy({
     by: ['rating'],
-    where: { providerId },
+    where,
     _count: { rating: true },
   });
 
@@ -375,14 +499,11 @@ export const getServiceReviews = async (
 ) => {
   const { page, limit } = pagination;
   const skip = (page - 1) * limit;
+  const where: Prisma.ReviewWhereInput = { booking: { serviceId }, AND: [NOT_DELETED] };
 
   const [reviews, total] = await Promise.all([
     prisma.review.findMany({
-      where: {
-        booking: {
-          serviceId,
-        },
-      },
+      where,
       include: {
         user: true,
         provider: {
@@ -396,13 +517,7 @@ export const getServiceReviews = async (
       take: limit,
       orderBy: { createdAt: 'desc' },
     }),
-    prisma.review.count({
-      where: {
-        booking: {
-          serviceId,
-        },
-      },
-    }),
+    prisma.review.count({ where }),
   ]);
 
   const totalPages = Math.ceil(total / limit);
@@ -419,22 +534,70 @@ export const getServiceReviews = async (
 };
 
 /**
- * Delete a review (admin only)
+ * Remove a review (admin only). The review is kept, marked with when, by whom
+ * and why it was removed, and an audit log entry records what it said.
  */
-export const deleteReview = async (reviewId: string) => {
+export const deleteReview = async (
+  reviewId: string,
+  admin?: { id: string; role: string },
+  reason?: string | null
+) => {
   const review = await prisma.review.findUnique({
     where: { id: reviewId },
   });
 
-  if (!review) {
-    throw new GraphQLError('Review not found', {
-      extensions: { code: 'NOT_FOUND' },
+  if (!review || review.deletedAt) {
+    throw reviewNotFound();
+  }
+
+  const deletionReason = reason ? sanitizeBasic(reason) : '';
+
+  if (deletionReason.length > MAX_DELETION_REASON_LENGTH) {
+    throw new GraphQLError(`The reason must be at most ${MAX_DELETION_REASON_LENGTH} characters`, {
+      extensions: { code: 'INVALID_INPUT' },
     });
   }
 
-  await prisma.review.delete({
-    where: { id: reviewId },
+  const deletedAt = new Date();
+
+  // Conditional, so a review removed twice at the same moment is logged once
+  const { count } = await prisma.review.updateMany({
+    where: { id: reviewId, AND: [NOT_DELETED] },
+    data: {
+      deletedAt,
+      deletedBy: admin?.id ?? null,
+      deletionReason: deletionReason || null,
+    },
   });
+
+  if (count === 0) {
+    throw reviewNotFound();
+  }
+
+  if (admin) {
+    try {
+      await createAuditLog({
+        action: AdminAction.DELETE_REVIEW,
+        targetType: 'Review',
+        targetId: reviewId,
+        performedBy: admin.id,
+        performedByRole: admin.role,
+        previousValue: {
+          rating: review.rating,
+          comment: review.comment,
+          response: review.response,
+          isHidden: Boolean(review.isHidden),
+          userId: review.userId,
+          providerId: review.providerId,
+          bookingId: review.bookingId,
+        },
+        newValue: { deletedAt: deletedAt.toISOString() },
+        reason: deletionReason || undefined,
+      });
+    } catch (err) {
+      logger.error('Failed to write review deletion audit log', { reviewId, err });
+    }
+  }
 
   return {
     success: true,
@@ -448,7 +611,7 @@ export const deleteReview = async (reviewId: string) => {
 export const updateReview = async (
   userId: string,
   reviewId: string,
-  input: { rating?: number; comment?: string }
+  input: { rating?: number | null; comment?: string | null }
 ) => {
   const review = await prisma.review.findUnique({
     where: { id: reviewId },
@@ -463,10 +626,8 @@ export const updateReview = async (
     },
   });
 
-  if (!review) {
-    throw new GraphQLError('Review not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+  if (!review || review.deletedAt) {
+    throw reviewNotFound();
   }
 
   // Check if user owns the review
@@ -484,17 +645,21 @@ export const updateReview = async (
     });
   }
 
-  // Validate rating if provided
-  if (input.rating !== undefined && (input.rating < 1 || input.rating > 5)) {
-    throw new GraphQLError('Rating must be between 1 and 5', {
-      extensions: { code: 'INVALID_RATING' },
-    });
+  // Build update data
+  const updateData: Prisma.ReviewUpdateInput = {};
+
+  if (input.rating !== undefined) {
+    // Same rule and error as createReview; null is refused like any other bad rating
+    updateData.rating = validateRating(input.rating ?? Number.NaN);
   }
 
-  // Build update data
-  const updateData: any = {};
-  if (input.rating !== undefined) updateData.rating = input.rating;
-  if (input.comment !== undefined) updateData.comment = input.comment;
+  if (input.comment !== undefined) {
+    const sanitizedComment = sanitizeBasic(input.comment ?? '');
+    assertCommentLength(sanitizedComment);
+    assertAcceptableText(sanitizedComment, 'Your review');
+    await assertTermsAccepted(userId);
+    updateData.comment = sanitizedComment;
+  }
 
   const updatedReview = await prisma.review.update({
     where: { id: reviewId },
@@ -546,7 +711,9 @@ export const canReviewBooking = async (userId: string, bookingId: string) => {
   if (booking.review) {
     return {
       canReview: false,
-      reason: 'You have already reviewed this booking',
+      reason: booking.review.deletedAt
+        ? "This booking's review was removed by Easykonnet"
+        : 'You have already reviewed this booking',
     };
   }
 

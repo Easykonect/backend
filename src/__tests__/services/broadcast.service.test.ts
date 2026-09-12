@@ -172,7 +172,7 @@ describe('broadcastNotification — ROLE target + allowedRoles gate', () => {
 // ==================
 
 describe('broadcastNotification — ALL target', () => {
-  it('uses sendPushToAll segment when broadcasting across the full allowedRoles set', async () => {
+  it('pushes to the resolved recipients when SUPER_ADMIN broadcasts to everyone', async () => {
     (prisma.user.findMany as jest.Mock).mockResolvedValueOnce([
       { id: 'u1' },
       { id: 'u2' },
@@ -184,11 +184,15 @@ describe('broadcastNotification — ALL target', () => {
       title: 'Announcement',
       message: 'big news',
       target: { mode: 'ALL' },
-      allowedRoles: SUPER_ADMIN_ROLES, // length 3 → triggers segment broadcast
+      allowedRoles: SUPER_ADMIN_ROLES,
     });
 
-    expect(sendPushToAll).toHaveBeenCalled();
-    expect(sendPushToUsers).not.toHaveBeenCalled();
+    // Never the OneSignal "All" segment: it reaches opted-out and banned users
+    expect(sendPushToUsers).toHaveBeenCalledWith(
+      ['u1', 'u2', 'a1'],
+      expect.anything()
+    );
+    expect(sendPushToAll).not.toHaveBeenCalled();
   });
 
   it('uses sendPushToUsers when ADMIN sends ALL (only 2 roles allowed)', async () => {
@@ -291,5 +295,95 @@ describe('broadcastNotification — fan-out resilience', () => {
 
     expect(result.pushDelivery).toBe('failed');
     expect(result.pushError).toMatch(/OneSignal 500/);
+  });
+});
+
+// ==================
+// Banned accounts, push data and linked notifications
+// ==================
+
+describe('broadcastNotification — recipients and delivery details', () => {
+  type Target = Parameters<typeof broadcastNotification>[0]['target'];
+
+  const notBanned = {
+    OR: [
+      { bannedAt: null },
+      { bannedAt: { isSet: false } },
+      { bannedUntil: { isSet: true, not: null, lte: expect.any(Date) } },
+    ],
+  };
+
+  it.each<[string, Target]>([
+    ['USER_IDS', { mode: 'USER_IDS', userIds: ['u1'] }],
+    ['ROLE', { mode: 'ROLE', roles: ['SERVICE_USER'] }],
+    ['ALL', { mode: 'ALL' }],
+  ])('%s leaves out accounts with a ban in force', async (_mode, target) => {
+    (prisma.user.findMany as jest.Mock).mockResolvedValueOnce([]);
+
+    await broadcastNotification({ title: 't', message: 'm', target, allowedRoles: ADMIN_ROLES });
+
+    const userQuery = (prisma.user.findMany as jest.Mock).mock.calls[0][0];
+    expect(userQuery.where).toEqual(expect.objectContaining({ status: 'ACTIVE', ...notBanned }));
+  });
+
+  it('LOCATION leaves out providers whose account has a ban in force', async () => {
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+
+    await broadcastNotification({
+      title: 't',
+      message: 'm',
+      target: { mode: 'LOCATION', state: 'Lagos' },
+      allowedRoles: ADMIN_ROLES,
+    });
+
+    const providerQuery = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(providerQuery.where.user).toEqual({ status: 'ACTIVE', role: { in: ADMIN_ROLES }, ...notBanned });
+  });
+
+  it('keeps SYSTEM_ANNOUNCEMENT as the push type when the metadata has a type key', async () => {
+    (prisma.user.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'u1' }]);
+    (prisma.notification.createMany as jest.Mock).mockResolvedValueOnce({ count: 1 });
+
+    await broadcastNotification({
+      title: 't',
+      message: 'm',
+      target: { mode: 'USER_IDS', userIds: ['u1'] },
+      allowedRoles: ADMIN_ROLES,
+      metadata: { type: 'PROMO', screen: 'offers' },
+    });
+
+    expect(sendPushToUsers).toHaveBeenCalledWith(
+      ['u1'],
+      expect.objectContaining({ data: { type: 'SYSTEM_ANNOUNCEMENT', screen: 'offers' } })
+    );
+  });
+
+  it("sends each recipient's notification over the socket, and its ID with the push", async () => {
+    (prisma.user.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'u1' }, { id: 'u2' }]);
+    (prisma.notification.createMany as jest.Mock).mockResolvedValueOnce({ count: 2 });
+
+    await broadcastNotification({
+      title: 'Lagos meetup',
+      message: 'see you Saturday',
+      target: { mode: 'USER_IDS', userIds: ['u1', 'u2'] },
+      allowedRoles: ADMIN_ROLES,
+      metadata: { screen: 'events' },
+    });
+
+    const rows = (prisma.notification.createMany as jest.Mock).mock.calls[0][0].data;
+    expect(emitToUser).toHaveBeenCalledWith('u1', 'notification:new', {
+      id: rows[0].id,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Lagos meetup',
+      message: 'see you Saturday',
+      entityType: 'broadcast',
+      entityId: null,
+      metadata: { screen: 'events' },
+      createdAt: rows[0].createdAt.toISOString(),
+    });
+    expect(sendPushToUsers).toHaveBeenCalledWith(
+      ['u1', 'u2'],
+      expect.objectContaining({ notificationIds: { u1: rows[0].id, u2: rows[1].id } })
+    );
   });
 });

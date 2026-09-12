@@ -5,11 +5,16 @@
 
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './schemas';
-import { resolvers } from './resolvers';
+import { resolvers as baseResolvers } from './resolvers';
+import { dateAwareFieldResolver, withRequestGuards } from './request-guards';
+
+// ID checks, pagination limits and ISO dates for every operation
+export const resolvers = withRequestGuards(baseResolvers);
 
 export const apolloServer = new ApolloServer({
   typeDefs,
   resolvers,
+  fieldResolver: dateAwareFieldResolver,
 });
 
-export { typeDefs, resolvers };
+export { typeDefs, dateAwareFieldResolver };

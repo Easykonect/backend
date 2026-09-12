@@ -1,7 +1,7 @@
 /**
  * Provider Service
  * Handles SERVICE_PROVIDER specific operations
- * 
+ *
  * Features:
  * - Upgrade from SERVICE_USER to SERVICE_PROVIDER
  * - Provider profile management
@@ -9,16 +9,38 @@
  */
 
 import { GraphQLError } from 'graphql';
+import type { Prisma, User } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import { UserRole, AccountStatus, VerificationStatus } from '@/constants';
 import { generateToken, generateRefreshToken } from '@/lib/auth';
 import { storeRefreshToken } from './token.service';
-import { 
-  sendProviderApprovedEmail, 
+import {
+  sendProviderApprovedEmail,
   sendProviderRejectedEmail,
-  sendProviderSubmissionEmail 
+  sendProviderSubmissionEmail
 } from '@/lib/email';
-import { sanitizeStrict, sanitizeBasic, validateName, validateText, MAX_LENGTHS } from '@/utils/security';
+import {
+  sanitizeStrict,
+  sanitizeBasic,
+  validateBusinessName,
+  validateText,
+  validateUrl,
+  MAX_LENGTHS,
+} from '@/utils/security';
+import { assertAcceptableText } from '@/lib/content-filter';
+import { flagContent } from './report.service';
+import { notifyVerificationApproved, notifyVerificationRejected } from './notification.service';
+import { sendVerificationPush } from './push.service';
+import {
+  formatProviderProfile,
+  loadProviderStats,
+  notifySafely,
+  recordModeration,
+  validateModerationReason,
+  type ModerationActor,
+  type ProviderRecord,
+  type ProviderStats,
+} from './provider-profile.service';
 
 // ==================
 // Types
@@ -42,8 +64,9 @@ interface UpdateProviderProfileInput {
   city?: string;
   state?: string;
   country?: string;
-  latitude?: number;
-  longitude?: number;
+  latitude?: number | null;
+  longitude?: number | null;
+  profilePhoto?: string | null;
 }
 
 // ==================
@@ -53,7 +76,11 @@ interface UpdateProviderProfileInput {
 /**
  * Format user with provider profile
  */
-const formatUserWithProvider = (user: any, provider: any = null) => ({
+const formatUserWithProvider = (
+  user: User,
+  provider: ProviderRecord | null = null,
+  stats?: ProviderStats
+) => ({
   id: user.id,
   email: user.email,
   firstName: user.firstName,
@@ -66,24 +93,40 @@ const formatUserWithProvider = (user: any, provider: any = null) => ({
   isEmailVerified: user.isEmailVerified,
   pushEnabled: user.pushEnabled ?? true,
   lastLoginAt: user.lastLoginAt ? user.lastLoginAt.toISOString() : null,
-  providerProfile: provider ? {
-    id: provider.id,
-    businessName: provider.businessName,
-    businessDescription: provider.businessDescription,
-    verificationStatus: provider.verificationStatus,
-    address: provider.address,
-    city: provider.city,
-    state: provider.state,
-    country: provider.country,
-    latitude: provider.latitude,
-    longitude: provider.longitude,
-    documents: provider.documents,
-    createdAt: provider.createdAt.toISOString(),
-    updatedAt: provider.updatedAt.toISOString(),
-  } : null,
+  providerProfile: provider ? formatProviderProfile(provider, stats) : null,
   createdAt: user.createdAt.toISOString(),
   updatedAt: user.updatedAt.toISOString(),
 });
+
+/**
+ * Format a user with their provider profile's rating and like counts
+ */
+const formatWithStats = async (user: User, provider: ProviderRecord | null) => {
+  if (!provider) return formatUserWithProvider(user);
+
+  const stats = await loadProviderStats([provider.id]);
+  return formatUserWithProvider(user, provider, stats.get(provider.id));
+};
+
+/**
+ * A business address: required, plain text, at most 255 characters
+ */
+const validateAddress = (address: string | null | undefined): string => {
+  const sanitized = sanitizeStrict(address ?? '');
+
+  if (!sanitized) {
+    throw new GraphQLError('Address is required', {
+      extensions: { code: 'INVALID_INPUT' },
+    });
+  }
+
+  return validateText(sanitized, 'Address', 1, MAX_LENGTHS.SHORT_TEXT);
+};
+
+const providerNotFound = () =>
+  new GraphQLError('Provider not found', {
+    extensions: { code: 'NOT_FOUND' },
+  });
 
 // ==================
 // Provider Functions
@@ -96,14 +139,16 @@ export const becomeProvider = async (userId: string, input: BecomeProviderInput)
   const { businessName, businessDescription, address, city, state, country, latitude, longitude } = input;
 
   // Sanitize and validate inputs
-  const sanitizedBusinessName = validateName(businessName, 'Business name');
+  const sanitizedBusinessName = validateBusinessName(businessName, 'Business name');
   const sanitizedDescription = businessDescription
     ? validateText(sanitizeBasic(businessDescription), 'Business description', 10, 250)
     : undefined;
-  const sanitizedAddress = validateText(sanitizeStrict(address), 'Address', 0, MAX_LENGTHS.SHORT_TEXT);
-  const sanitizedCity = validateName(city, 'City');
-  const sanitizedState = validateName(state, 'State');
-  const sanitizedCountry = validateName(country, 'Country');
+  assertAcceptableText(sanitizedBusinessName, 'Business name');
+  assertAcceptableText(sanitizedDescription, 'Business description');
+  const sanitizedAddress = validateAddress(address);
+  const sanitizedCity = validateBusinessName(city, 'City');
+  const sanitizedState = validateBusinessName(state, 'State');
+  const sanitizedCountry = validateBusinessName(country, 'Country');
 
   // Find user
   const user = await prisma.user.findUnique({
@@ -172,7 +217,7 @@ export const becomeProvider = async (userId: string, input: BecomeProviderInput)
       },
     });
 
-    return [updated, newProvider];
+    return [updated, newProvider] as const;
   });
 
   const tokenPayload = {
@@ -187,7 +232,7 @@ export const becomeProvider = async (userId: string, input: BecomeProviderInput)
   await storeRefreshToken(updatedUser.id, refreshToken, { deviceInfo: 'web' });
 
   return {
-    user: formatUserWithProvider(updatedUser, provider),
+    user: await formatWithStats(updatedUser, provider),
     accessToken,
     refreshToken,
   };
@@ -216,42 +261,91 @@ export const updateProviderProfile = async (userId: string, input: UpdateProvide
     });
   }
 
+  const currentProvider = user.provider;
+
   // Build update data with sanitization
-  const updateData: any = {};
-  
+  const updateData: Prisma.ServiceProviderUpdateInput = {};
+
   if (input.businessName !== undefined) {
-    updateData.businessName = validateName(input.businessName, 'Business name');
+    const businessName = validateBusinessName(input.businessName, 'Business name');
+    assertAcceptableText(businessName, 'Business name');
+    updateData.businessName = businessName;
   }
   if (input.businessDescription !== undefined) {
-    updateData.businessDescription = validateText(
+    const businessDescription = validateText(
       sanitizeBasic(input.businessDescription),
       'Business description',
       10,
       250
     );
+    assertAcceptableText(businessDescription, 'Business description');
+    updateData.businessDescription = businessDescription;
   }
   if (input.address !== undefined) {
-    updateData.address = validateText(sanitizeStrict(input.address), 'Address', 0, MAX_LENGTHS.SHORT_TEXT);
+    updateData.address = validateAddress(input.address);
   }
   if (input.city !== undefined) {
-    updateData.city = validateName(input.city, 'City');
+    updateData.city = validateBusinessName(input.city, 'City');
   }
   if (input.state !== undefined) {
-    updateData.state = validateName(input.state, 'State');
+    updateData.state = validateBusinessName(input.state, 'State');
   }
   if (input.country !== undefined) {
-    updateData.country = validateName(input.country, 'Country');
+    updateData.country = validateBusinessName(input.country, 'Country');
   }
   if (input.latitude !== undefined) updateData.latitude = input.latitude;
   if (input.longitude !== undefined) updateData.longitude = input.longitude;
 
-  // Update provider
-  const updatedProvider = await prisma.serviceProvider.update({
-    where: { id: user.provider.id },
-    data: updateData,
-  });
+  // The photo belongs to the account; an empty value removes it
+  let profilePhoto: string | null | undefined;
+  if (input.profilePhoto !== undefined) {
+    profilePhoto = input.profilePhoto ? validateUrl(input.profilePhoto) : null;
+  }
 
-  return formatUserWithProvider(user, updatedProvider);
+  const updatedUser =
+    profilePhoto !== undefined && profilePhoto !== user.profilePhoto
+      ? await prisma.user.update({
+          where: { id: userId },
+          data: { profilePhoto },
+        })
+      : user;
+
+  // Update provider
+  const updatedProvider =
+    Object.keys(updateData).length > 0
+      ? await prisma.serviceProvider.update({
+          where: { id: currentProvider.id },
+          data: updateData,
+        })
+      : currentProvider;
+
+  // A verified profile stays public when edited, so admins get to check the
+  // new name and description
+  const profileChanged =
+    updatedProvider.businessName !== currentProvider.businessName ||
+    updatedProvider.businessDescription !== currentProvider.businessDescription;
+
+  if (currentProvider.verificationStatus === VerificationStatus.VERIFIED && profileChanged) {
+    await flagContent({
+      targetType: 'PROVIDER',
+      targetId: currentProvider.id,
+      targetUserId: userId,
+      reason: 'OTHER',
+      details: 'Automatic: verified business profile edited',
+      snapshot: {
+        before: {
+          businessName: currentProvider.businessName,
+          businessDescription: currentProvider.businessDescription,
+        },
+        after: {
+          businessName: updatedProvider.businessName,
+          businessDescription: updatedProvider.businessDescription,
+        },
+      },
+    });
+  }
+
+  return formatWithStats(updatedUser, updatedProvider);
 };
 
 /**
@@ -269,7 +363,7 @@ export const getUserWithProvider = async (userId: string) => {
     });
   }
 
-  return formatUserWithProvider(user, user.provider);
+  return formatWithStats(user, user.provider);
 };
 
 // ==================
@@ -303,9 +397,10 @@ export const getPendingProviders = async (pagination: { page: number; limit: num
   ]);
 
   const totalPages = Math.ceil(total / limit);
+  const stats = await loadProviderStats(providers.map((p) => p.id));
 
   return {
-    items: providers.map((p) => formatUserWithProvider(p.user, p)),
+    items: providers.map((p) => formatUserWithProvider(p.user, p, stats.get(p.id))),
     total,
     page,
     limit,
@@ -315,19 +410,22 @@ export const getPendingProviders = async (pagination: { page: number; limit: num
   };
 };
 
+const notPendingVerification = () =>
+  new GraphQLError('Only providers pending verification can be approved', {
+    extensions: { code: 'NOT_PENDING' },
+  });
+
 /**
- * Approve Provider
+ * Approve Provider. Only a provider who submitted for verification (PENDING)
+ * can be approved.
  */
-export const approveProvider = async (providerId: string) => {
+export const approveProvider = async (providerId: string, actor?: ModerationActor) => {
   const provider = await prisma.serviceProvider.findUnique({
     where: { id: providerId },
-    include: { user: true },
   });
 
   if (!provider) {
-    throw new GraphQLError('Provider not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw providerNotFound();
   }
 
   if (provider.verificationStatus === VerificationStatus.VERIFIED) {
@@ -336,19 +434,39 @@ export const approveProvider = async (providerId: string) => {
     });
   }
 
-  const updatedProvider = await prisma.serviceProvider.update({
-    where: { id: providerId },
+  if (provider.verificationStatus !== VerificationStatus.PENDING) {
+    throw notPendingVerification();
+  }
+
+  // Only while it's still pending, in case another admin decided meanwhile
+  const { count } = await prisma.serviceProvider.updateMany({
+    where: { id: providerId, verificationStatus: VerificationStatus.PENDING },
     data: {
       verificationStatus: VerificationStatus.VERIFIED,
+      rejectionReason: null,
     },
+  });
+
+  if (count === 0) {
+    throw notPendingVerification();
+  }
+
+  const updatedProvider = await prisma.serviceProvider.findUnique({
+    where: { id: providerId },
     include: { user: true },
   });
+
+  if (!updatedProvider) {
+    throw providerNotFound();
+  }
+
+  const { user } = updatedProvider;
 
   // Send approval notification email
   try {
     await sendProviderApprovedEmail(
-      updatedProvider.user.email,
-      updatedProvider.user.firstName,
+      user.email,
+      user.firstName,
       updatedProvider.businessName
     );
   } catch (error) {
@@ -356,52 +474,92 @@ export const approveProvider = async (providerId: string) => {
     // Don't throw - the provider is still approved
   }
 
-  return formatUserWithProvider(updatedProvider.user, updatedProvider);
+  await notifySafely('verification approval notification', () => notifyVerificationApproved(user.id));
+  await notifySafely('verification approval push notification', () => sendVerificationPush(user.id, 'approved'));
+  await recordModeration(actor, {
+    action: 'VERIFY_PROVIDER',
+    targetType: 'Provider',
+    targetId: providerId,
+    previousValue: { verificationStatus: provider.verificationStatus },
+    newValue: { verificationStatus: VerificationStatus.VERIFIED },
+  });
+
+  return formatWithStats(user, updatedProvider);
 };
 
 /**
- * Reject Provider
+ * Reject Provider. The reason is saved on the profile and sent to the provider.
  */
-export const rejectProvider = async (providerId: string, reason: string) => {
+export const rejectProvider = async (providerId: string, reason: string, actor?: ModerationActor) => {
+  const safeReason = validateModerationReason(reason);
+
   const provider = await prisma.serviceProvider.findUnique({
     where: { id: providerId },
-    include: { user: true },
   });
 
   if (!provider) {
-    throw new GraphQLError('Provider not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw providerNotFound();
   }
 
-  if (provider.verificationStatus === VerificationStatus.VERIFIED) {
-    throw new GraphQLError('Cannot reject an already verified provider', {
+  const alreadyVerified = () =>
+    new GraphQLError('Cannot reject an already verified provider', {
       extensions: { code: 'ALREADY_VERIFIED' },
     });
+
+  if (provider.verificationStatus === VerificationStatus.VERIFIED) {
+    throw alreadyVerified();
   }
 
-  const updatedProvider = await prisma.serviceProvider.update({
-    where: { id: providerId },
+  const { count } = await prisma.serviceProvider.updateMany({
+    where: { id: providerId, verificationStatus: { not: VerificationStatus.VERIFIED } },
     data: {
       verificationStatus: VerificationStatus.REJECTED,
+      rejectionReason: safeReason,
     },
+  });
+
+  if (count === 0) {
+    throw alreadyVerified();
+  }
+
+  const updatedProvider = await prisma.serviceProvider.findUnique({
+    where: { id: providerId },
     include: { user: true },
   });
+
+  if (!updatedProvider) {
+    throw providerNotFound();
+  }
+
+  const { user } = updatedProvider;
 
   // Send rejection notification email with reason
   try {
     await sendProviderRejectedEmail(
-      updatedProvider.user.email,
-      updatedProvider.user.firstName,
+      user.email,
+      user.firstName,
       updatedProvider.businessName,
-      reason
+      safeReason
     );
   } catch (error) {
     console.error('Failed to send provider rejection email:', error);
     // Don't throw - the provider is still rejected
   }
 
-  return formatUserWithProvider(updatedProvider.user, updatedProvider);
+  await notifySafely('verification rejection notification', () => notifyVerificationRejected(user.id, safeReason));
+  await notifySafely('verification rejection push notification', () =>
+    sendVerificationPush(user.id, 'rejected', safeReason)
+  );
+  await recordModeration(actor, {
+    action: 'REJECT_PROVIDER',
+    targetType: 'Provider',
+    targetId: providerId,
+    previousValue: { verificationStatus: provider.verificationStatus },
+    newValue: { verificationStatus: VerificationStatus.REJECTED },
+    reason: safeReason,
+  });
+
+  return formatWithStats(user, updatedProvider);
 };
 
 /**
@@ -442,7 +600,8 @@ export const submitForVerification = async (userId: string) => {
     });
   }
 
-  // Validate required fields before submission
+  // Validate required fields before submission (profiles saved before the
+  // address became required can still have an empty one)
   if (!user.provider.businessName || !user.provider.address || !user.provider.city) {
     throw new GraphQLError('Please complete your business profile before submitting for verification. Required: businessName, address, city', {
       extensions: { code: 'INCOMPLETE_PROFILE' },
@@ -470,7 +629,7 @@ export const submitForVerification = async (userId: string) => {
     // Don't throw - the submission is still recorded
   }
 
-  return formatUserWithProvider(updatedProvider.user, updatedProvider);
+  return formatWithStats(updatedProvider.user, updatedProvider);
 };
 
 /**
@@ -496,7 +655,7 @@ export const getVerificationStatus = async (userId: string) => {
 
   return {
     status: user.provider.verificationStatus,
-    canSubmit: user.provider.verificationStatus === VerificationStatus.UNVERIFIED || 
+    canSubmit: user.provider.verificationStatus === VerificationStatus.UNVERIFIED ||
                user.provider.verificationStatus === VerificationStatus.REJECTED,
     message: getVerificationStatusMessage(user.provider.verificationStatus),
   };
@@ -526,7 +685,8 @@ const getVerificationStatusMessage = (status: string): string => {
 
 /**
  * Switch active role between SERVICE_USER and SERVICE_PROVIDER
- * Only available for users who have a provider profile
+ * Only available for SERVICE_PROVIDER accounts with a provider profile, the
+ * same rule as myActiveRole's canSwitch
  */
 export const switchActiveRole = async (userId: string, targetRole: string) => {
   // Validate target role
@@ -548,8 +708,7 @@ export const switchActiveRole = async (userId: string, targetRole: string) => {
     });
   }
 
-  // Check if user has provider profile (required to switch roles)
-  if (!user.provider) {
+  if (user.role !== UserRole.SERVICE_PROVIDER || !user.provider) {
     throw new GraphQLError('You must be a registered provider to switch roles. Use becomeProvider first.', {
       extensions: { code: 'NOT_PROVIDER' },
     });
@@ -564,18 +723,12 @@ export const switchActiveRole = async (userId: string, targetRole: string) => {
   }
 
   // Update active role
-  await prisma.user.update({
+  const updatedUser = await prisma.user.update({
     where: { id: userId },
-    data: { activeRole: targetRole as any },
+    data: { activeRole: targetRole === UserRole.SERVICE_USER ? UserRole.SERVICE_USER : UserRole.SERVICE_PROVIDER },
   });
 
-  // Fetch with provider for response
-  const userWithProvider = await prisma.user.findUnique({
-    where: { id: userId },
-    include: { provider: true },
-  });
-
-  return formatUserWithProvider(userWithProvider, userWithProvider?.provider);
+  return formatWithStats(updatedUser, user.provider);
 };
 
 /**
@@ -601,7 +754,7 @@ export const getActiveRole = async (userId: string) => {
     activeRole,
     canSwitch,
     hasProviderProfile: user.provider !== null,
-    message: canSwitch 
+    message: canSwitch
       ? `You are currently in ${activeRole} mode. You can switch to ${activeRole === UserRole.SERVICE_PROVIDER ? UserRole.SERVICE_USER : UserRole.SERVICE_PROVIDER} mode.`
       : 'You cannot switch roles. Only registered providers can switch between user and provider modes.',
   };

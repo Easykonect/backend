@@ -131,10 +131,12 @@ export const typeDefs = gql`
   enum WalletTransactionSource {
     REFUND
     BOOKING_PAYMENT
-    EARNING
+    SERVICE_EARNING
     WITHDRAWAL
+    WITHDRAWAL_REVERSAL
     ADMIN_ADJUSTMENT
-    PAYOUT
+    EARNING @deprecated(reason: "Use SERVICE_EARNING")
+    PAYOUT @deprecated(reason: "Use WITHDRAWAL")
   }
 
   # Withdrawal status
@@ -148,11 +150,12 @@ export const typeDefs = gql`
 
   # Payout frequency for providers
   enum PayoutFrequency {
-    INSTANT
     DAILY
     WEEKLY
     BIWEEKLY
     MONTHLY
+    MANUAL
+    INSTANT @deprecated(reason: "Not supported; use DAILY or MANUAL")
   }
 
   # Admin actions for audit logging
@@ -160,14 +163,66 @@ export const typeDefs = gql`
     BAN_USER
     UNBAN_USER
     RESTRICT_USER
-    REMOVE_RESTRICTION
+    UNRESTRICT_USER
     SUSPEND_USER
     ACTIVATE_USER
     PROCESS_WITHDRAWAL
     REJECT_WITHDRAWAL
-    ADJUST_WALLET
-    RESOLVE_DISPUTE
     PROCESS_REFUND
+    RESOLVE_DISPUTE
+    ADJUST_WALLET
+    UPDATE_USER_ROLE
+    DELETE_USER
+    VERIFY_PROVIDER
+    REJECT_PROVIDER
+    APPROVE_SERVICE
+    REJECT_SERVICE
+    SUSPEND_SERVICE
+    UPDATE_PLATFORM_SETTINGS
+    RESOLVE_REPORT
+    VIEW_REPORTED_CONVERSATION
+    CREATE_ADMIN
+    DELETE_REVIEW
+    REMOVE_RESTRICTION @deprecated(reason: "Use UNRESTRICT_USER")
+  }
+
+  # What a report is about
+  enum ReportTargetType {
+    USER
+    MESSAGE
+    CONVERSATION
+    REVIEW
+    SERVICE
+    PROVIDER
+  }
+
+  enum ReportReason {
+    HARASSMENT
+    HATE
+    SEXUAL_CONTENT
+    VIOLENCE
+    SCAM
+    OFF_PLATFORM_PAYMENT
+    SPAM
+    IMPERSONATION
+    OTHER
+  }
+
+  enum ReportStatus {
+    OPEN
+    ACTIONED
+    DISMISSED
+  }
+
+  # What an admin decided to do about a report
+  enum ModerationAction {
+    DISMISS
+    # Removes a message, hides a review's text, or suspends a service
+    REMOVE_CONTENT
+    WARN_USER
+    RESTRICT_USER
+    BAN_USER
+    SUSPEND_SERVICE
   }
 
   # ==================
@@ -192,6 +247,8 @@ export const typeDefs = gql`
     totalReviews: Int
     likeCount: Int
     isLiked: Boolean
+    # Why an admin last rejected verification. Only returned to the provider and admins; null once approved
+    rejectionReason: String
     createdAt: String!
     updatedAt: String!
   }
@@ -219,6 +276,10 @@ export const typeDefs = gql`
     price: Float!
     duration: Int!
     status: ServiceStatus!
+    # Why an admin last sent it back to DRAFT; null once approved. Only returned to the provider and admins
+    rejectionReason: String
+    # Why an admin suspended it. Only returned to the provider and admins
+    suspensionReason: String
     images: [String!]!
     createdAt: String!
     updatedAt: String!
@@ -265,6 +326,9 @@ export const typeDefs = gql`
     transactionRef: String
     paidAt: String
     refundedAt: String
+    # Set when part or all of the payment was refunded to the customer's wallet
+    refundAmount: Float
+    refundReason: String
     createdAt: String!
     updatedAt: String!
   }
@@ -275,6 +339,9 @@ export const typeDefs = gql`
     rating: Int!
     comment: String
     response: String
+    # True when moderators hid the review's text. The rating still counts;
+    # comment and response are null while hidden.
+    isHidden: Boolean!
     respondedAt: String
     createdAt: String!
     updatedAt: String!
@@ -287,7 +354,8 @@ export const typeDefs = gql`
     id: ID!
     firstName: String!
     lastName: String!
-    email: String!
+    # Only returned to the reviewer and admins; null for everyone else
+    email: String
   }
 
   type ReviewProvider {
@@ -572,6 +640,9 @@ export const typeDefs = gql`
     hasNextPage: Boolean!
     hasPreviousPage: Boolean!
     radiusKm: Float!
+    # Every provider within this distance (km) is included. Smaller than radiusKm
+    # only when the area has too many providers to search at once.
+    coveredRadiusKm: Float
     searchLocation: SearchLocation!
   }
 
@@ -592,6 +663,10 @@ export const typeDefs = gql`
     evidence: [String!]!
     status: DisputeStatus!
     raisedByRole: UserRole!
+    # User ID of the admin who took the dispute under review; null for everyone but admins
+    reviewedBy: ID
+    # When an admin took the dispute under review
+    reviewStartedAt: String
     resolution: DisputeResolution
     resolutionNotes: String
     refundAmount: Float
@@ -681,8 +756,12 @@ export const typeDefs = gql`
     pendingBookings: Int!
     completedBookings: Int!
     cancelledBookings: Int!
+    # providerBookingStats only: the provider's share, after commission and any
+    # refund, of paid COMPLETED bookings, whether released yet or still held
     totalRevenue: Float
+    # myBookingStats only
     totalSpent: Float
+    # providerBookingStats only: completed / all bookings x 100, one decimal place
     completionRate: Float
   }
 
@@ -926,6 +1005,29 @@ export const typeDefs = gql`
     limit: Int
   }
 
+  input CreateReportInput {
+    targetType: ReportTargetType!
+    # ID of the user, message, conversation, review, service or provider profile
+    targetId: ID!
+    reason: ReportReason!
+    # What happened, up to 1000 characters
+    details: String
+  }
+
+  input ReportFiltersInput {
+    status: ReportStatus
+    targetType: ReportTargetType
+    reason: ReportReason
+  }
+
+  input ResolveReportInput {
+    action: ModerationAction!
+    # Why, for the audit log (at least 5 characters)
+    notes: String!
+    # Days, 1-365. RESTRICT_USER defaults to 7; BAN_USER without it is permanent
+    durationDays: Int
+  }
+
   # Input for upgrading a SERVICE_USER to SERVICE_PROVIDER
   input BecomeProviderInput {
     businessName: String!
@@ -1009,6 +1111,8 @@ export const typeDefs = gql`
     POPULARITY_DESC
     NEWEST
     NAME_ASC
+    # Nearest first (nearbyProviders only; providers treats it as NEWEST)
+    NEAREST
   }
 
   input ProviderFiltersInput {
@@ -1112,8 +1216,9 @@ export const typeDefs = gql`
 
   input InitializePaymentInput {
     bookingId: ID!
-    # Legacy/web flow: a final URL Paystack should redirect to after checkout.
-    # Ignored for native apps — use returnDeepLink instead.
+    # Web flow: the page Paystack should redirect to after checkout. Must be on
+    # the Easykonnet website (the FRONTEND_URL or BACKEND_URL origin), otherwise
+    # INVALID_RETURN_LINK. Ignored when returnDeepLink is set.
     callbackUrl: String
     # Native app flow: the deep link the bridge should bounce back to once
     # Paystack redirects to the backend (e.g. "easykonnect://payment-callback").
@@ -1124,6 +1229,7 @@ export const typeDefs = gql`
 
   input RefundInput {
     paymentId: ID!
+    # Naira. Omit to refund everything not yet refunded
     amount: Float
     reason: String!
   }
@@ -1154,7 +1260,12 @@ export const typeDefs = gql`
 
   input SetPayoutScheduleInput {
     frequency: PayoutFrequency!
+    # Required for WEEKLY and BIWEEKLY (0 = Sunday)
+    dayOfWeek: Int
+    # Required for MONTHLY (1-28)
+    dayOfMonth: Int
     minimumAmount: Float
+    bankAccountId: ID
   }
 
   input WalletTransactionFiltersInput {
@@ -1168,6 +1279,8 @@ export const typeDefs = gql`
     status: WithdrawalStatus
     startDate: String
     endDate: String
+    # Only this provider's withdrawals (admin lists; myWithdrawals ignores it)
+    providerId: ID
   }
 
   # ==================
@@ -1233,6 +1346,10 @@ export const typeDefs = gql`
     searchTerm: String
     startDate: String
     endDate: String
+    # Provider profile filters: accounts without a provider profile never match
+    verificationStatus: VerificationStatus
+    city: String
+    state: String
   }
 
   input AuditLogFiltersInput {
@@ -1305,13 +1422,24 @@ export const typeDefs = gql`
     message: String!
   }
 
-  # Signed upload parameters (for client-side uploads)
+  # Signed upload parameters (for client-side uploads). POST the file to uploadUrl
+  # with every other field except cloudName, using Cloudinary's parameter names.
   type SignedUploadParams {
     signature: String!
     timestamp: Int!
     cloudName: String!
     apiKey: String!
     folder: String!
+    # Sent as public_id
+    publicId: String
+    # Sent as allowed_formats (comma-separated)
+    allowedFormats: String
+    # Sent as type: upload, or authenticated for verification documents
+    type: String
+    # Sent as overwrite (always false)
+    overwrite: Boolean
+    # Cloudinary upload endpoint for this kind of file
+    uploadUrl: String
   }
 
   # Upload statistics (Admin)
@@ -1319,6 +1447,8 @@ export const typeDefs = gql`
     totalProfiles: Int!
     totalServiceImages: Int!
     totalDocuments: Int!
+    # Images in provider galleries
+    totalProviderImages: Int
   }
 
   # ==================
@@ -1349,6 +1479,8 @@ export const typeDefs = gql`
     updatedAt: String!
     otherParticipant: ConversationParticipant
     unreadCount: Int
+    # Whether the signed-in user archived this conversation
+    isArchived: Boolean
   }
 
   # Paginated Conversations
@@ -1385,6 +1517,8 @@ export const typeDefs = gql`
     readAt: String
     replyToId: ID
     isDeleted: Boolean!
+    # Hidden from the other participants until an admin reviews the reports on it
+    isHidden: Boolean
     createdAt: String!
     updatedAt: String!
     sender: MessageSender
@@ -1562,16 +1696,19 @@ export const typeDefs = gql`
     hasNextPage: Boolean!
   }
 
-  # Payment statistics
+  # Payment statistics, all time. Money totals are naira over COMPLETED
+  # payments, after partial refunds.
   type PaymentStats {
     totalPayments: Int!
     completedPayments: Int!
     pendingPayments: Int!
     failedPayments: Int!
     refundedPayments: Int!
+    # What completed payments kept after refunds: totalCommission + totalProviderPayouts
     totalRevenue: Float!
     totalCommission: Float!
     totalProviderPayouts: Float!
+    # The current rate for new bookings, as a percentage
     commissionRate: Float!
   }
 
@@ -1580,7 +1717,121 @@ export const typeDefs = gql`
     totalEarnings: Float!
     thisMonthEarnings: Float!
     completedJobs: Int!
+    # The commission charged on your paid bookings (commission / amount kept, as
+    # a percentage), or the current rate for new bookings if you have none
     commissionRate: Float!
+  }
+
+  # Platform settings a Super Admin can change
+  type PlatformSettings {
+    # Commission taken from each new booking, as a percentage (7 means 7%).
+    # Existing bookings keep the commission they were created with.
+    commissionRate: Float!
+    updatedAt: String
+    updatedBy: ID
+  }
+
+  # ==================
+  # Safety: blocking, reporting and community terms
+  # ==================
+
+  type BlockedUserProfile {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    profilePhoto: String
+  }
+
+  type BlockedUser {
+    # The block's ID
+    id: ID!
+    user: BlockedUserProfile!
+    reason: String
+    blockedAt: String!
+  }
+
+  type PaginatedBlockedUsers {
+    items: [BlockedUser!]!
+    total: Int!
+    page: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+  }
+
+  # A report, as the person who made it sees it
+  type MyReport {
+    id: ID!
+    targetType: ReportTargetType!
+    targetId: ID!
+    reason: ReportReason!
+    details: String
+    status: ReportStatus!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type PaginatedMyReports {
+    items: [MyReport!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  type ReportUserSummary {
+    id: ID!
+    firstName: String!
+    lastName: String!
+    email: String!
+    role: UserRole!
+    status: AccountStatus!
+  }
+
+  # A report, as admins see it
+  type Report {
+    id: ID!
+    targetType: ReportTargetType!
+    targetId: ID!
+    reason: ReportReason!
+    details: String
+    status: ReportStatus!
+    # Raised by the content filter rather than a person
+    automated: Boolean!
+    # JSON copy of the content at the time it was reported
+    snapshot: String!
+    action: ModerationAction
+    resolutionNotes: String
+    handledBy: ID
+    handledAt: String
+    # Null for automated reports
+    reporter: ReportUserSummary
+    # The person whose account or content was reported
+    targetUser: ReportUserSummary
+    # Open reports about the same content, including this one
+    openReportCount: Int!
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type PaginatedReports {
+    items: [Report!]!
+    total: Int!
+    page: Int!
+    limit: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  type TermsStatus {
+    # The version users need to accept
+    currentVersion: String!
+    acceptedVersion: String
+    acceptedAt: String
+    # True until the user accepts currentVersion
+    mustAccept: Boolean!
   }
 
   # Bank information
@@ -1603,9 +1854,10 @@ export const typeDefs = gql`
     bankId: Int
   }
 
-  # Bank suggestion based on account number
+  # Banks a 10-digit account number can belong to, by its NUBAN check digit
   type BankSuggestion {
     possibleBanks: [Bank!]!
+    # NONE, MEDIUM (one bank) or LOW (several banks)
     confidence: String!
   }
 
@@ -1617,6 +1869,8 @@ export const typeDefs = gql`
   type Wallet {
     id: ID!
     balance: Float!
+    # Providers: their share of paid bookings still held in escrow, not yet
+    # released to this wallet. Always 0 for customers.
     pendingBalance: Float!
     isLocked: Boolean!
     lockReason: String
@@ -1687,6 +1941,25 @@ export const typeDefs = gql`
     processedAt: String
     createdAt: String!
     updatedAt: String!
+    # The provider profile the withdrawal belongs to
+    providerId: ID
+    # When the withdrawal was requested
+    requestedAt: String
+    # When Paystack confirmed the transfer; kept if the bank later returns it
+    completedAt: String
+    # Who asked for it. Admins see any provider; a provider only sees themselves.
+    provider: WithdrawalProvider
+  }
+
+  # The provider behind a withdrawal
+  type WithdrawalProvider {
+    # Provider profile id
+    id: ID!
+    userId: ID!
+    businessName: String
+    firstName: String
+    lastName: String
+    email: String
   }
 
   type BankAccountSnapshot {
@@ -1718,10 +1991,18 @@ export const typeDefs = gql`
     id: ID!
     frequency: PayoutFrequency!
     minimumAmount: Float!
+    # When the payout job next runs on one of this schedule's payout days
+    # (08:00 Lagos time); null when paused or MANUAL
     nextPayoutDate: String
     isActive: Boolean!
     createdAt: String!
     updatedAt: String!
+    # 0 (Sunday) to 6 for WEEKLY and BIWEEKLY schedules, otherwise null
+    dayOfWeek: Int
+    # 1 to 28 for MONTHLY schedules, otherwise null
+    dayOfMonth: Int
+    # The account payouts go to; null means the default account at the time
+    bankAccountId: ID
   }
 
   type ScheduledPayout {
@@ -1734,6 +2015,9 @@ export const typeDefs = gql`
     processedAt: String
     failureReason: String
     createdAt: String!
+    # Set when the job skipped this payout day (status CANCELLED):
+    # WALLET_LOCKED, BELOW_MINIMUM or NO_BANK_ACCOUNT
+    skipReason: String
   }
 
   type PaginatedScheduledPayouts {
@@ -1745,9 +2029,13 @@ export const typeDefs = gql`
   }
 
   type PendingEarnings {
+    # Earnings not yet credited to the wallet, including those about to be
     totalPending: Float!
+    # What can be withdrawn now: the wallet balance, or 0 while a withdrawal holds the wallet
     availableNow: Float!
+    # Earnings still held, with no release time yet or one in the future
     pendingClearance: Float!
+    # The earliest future release time among pendingClearance earnings
     nextAvailableDate: String
   }
 
@@ -1755,21 +2043,27 @@ export const typeDefs = gql`
   # Payment Analytics Types
   # ==================
 
+  # A provider's earnings from the COMPLETED payments paid in the period (naira)
   type ProviderEarningsReport {
     period: String!
     startDate: String!
     endDate: String!
+    # What customers paid for those bookings, before commission and refunds
     totalEarnings: Float!
     completedJobs: Int!
+    # The platform's commission on them, after refunds
     commissionPaid: Float!
+    # What you receive: totalEarnings - commissionPaid - refunds on those payments
     netEarnings: Float!
     withdrawnAmount: Float!
+    # The part of netEarnings not yet released to your wallet
     pendingBalance: Float!
     breakdown: [EarningsBreakdownItem!]!
   }
 
   type EarningsBreakdownItem {
     date: String!
+    # Net earnings for the day or month
     earnings: Float!
     jobs: Int!
   }
@@ -1777,6 +2071,7 @@ export const typeDefs = gql`
   type AdminPaymentAnalytics {
     period: String!
     totalTransactions: Int!
+    # What the payments paid in the period kept after refunds (naira)
     totalVolume: Float!
     totalCommission: Float!
     totalRefunds: Float!
@@ -1795,7 +2090,9 @@ export const typeDefs = gql`
   type TopEarningProvider {
     providerId: ID!
     businessName: String!
+    # Earnings released to the provider's wallet in the period (naira)
     totalEarnings: Float!
+    # Bookings whose earnings were released in the period
     completedJobs: Int!
   }
 
@@ -1861,6 +2158,9 @@ export const typeDefs = gql`
     success: Boolean!
     message: String!
     user: ManagedUser
+    # restrictUser only: the account's open bookings (as customer or provider), which continue
+    pendingBookingsCount: Int
+    warning: String
   }
 
   # Admin audit log
@@ -2071,8 +2371,8 @@ export const typeDefs = gql`
     # Service Queries (Public & Provider)
     # ==================
     
-    # Get all service categories
-    categories(pagination: PaginationInput): PaginatedCategories!
+    # Get service categories. Active ones only, unless an admin sets includeInactive
+    categories(pagination: PaginationInput, includeInactive: Boolean): PaginatedCategories!
     
     # Get category by ID
     category(id: ID!): ServiceCategory
@@ -2089,7 +2389,7 @@ export const typeDefs = gql`
     # Get provider verification status
     myVerificationStatus: VerificationStatusResponse!
 
-    # Get own provider profile (for SERVICE_PROVIDER role) - includes full services list
+    # Get own account with its provider profile (SERVICE_PROVIDER only). Services aren't included; use myServices
     myProviderProfile: User!
 
     # Get current active role status (for role switching)
@@ -2248,8 +2548,9 @@ export const typeDefs = gql`
     # Messaging Queries
     # ==================
 
-    # Get user's conversations
-    myConversations(pagination: PaginationInput): PaginatedConversations!
+    # Get user's conversations: the inbox, or with archived: true the
+    # conversations the user archived
+    myConversations(pagination: PaginationInput, archived: Boolean): PaginatedConversations!
 
     # Get conversation by ID
     conversation(id: ID!): Conversation
@@ -2312,11 +2613,33 @@ export const typeDefs = gql`
     # Get provider's earnings summary
     myEarnings: ProviderEarnings!
 
-    # Get all payments (Admin)
+    # Get all payments (Super Admin)
     allPayments(filters: PaymentFiltersInput, pagination: PaginationInput): PaginatedPayments!
 
-    # Get payment statistics (Admin)
+    # Get payment statistics (Super Admin)
     paymentStats: PaymentStats!
+
+    # Platform settings, including the commission rate (Admin)
+    platformSettings: PlatformSettings!
+
+    # People you've blocked
+    myBlockedUsers(pagination: PaginationInput): PaginatedBlockedUsers!
+
+    # Reports you've made
+    myReports(pagination: PaginationInput): PaginatedMyReports!
+
+    # Which community terms you've accepted
+    termsStatus: TermsStatus!
+
+    # The report queue. With status OPEN, oldest first (Admin)
+    reports(filters: ReportFiltersInput, pagination: PaginationInput): PaginatedReports!
+
+    # One report (Admin)
+    report(id: ID!): Report!
+
+    # The conversation a message or conversation report is about, including
+    # deleted and hidden messages. Every view is audit-logged (Admin)
+    reportedConversationMessages(reportId: ID!, pagination: PaginationInput): PaginatedMessages!
 
     # List available banks for payout
     banks: [Bank!]!
@@ -2324,7 +2647,7 @@ export const typeDefs = gql`
     # Verify bank account details
     verifyBankAccount(accountNumber: String!, bankCode: String!): BankAccountVerification!
 
-    # Suggest banks based on account number prefix
+    # Suggest the banks a 10-digit account number is valid for (NUBAN check digit)
     suggestBankFromAccountNumber(accountNumber: String!): BankSuggestion!
 
     # ==================
@@ -2380,10 +2703,11 @@ export const typeDefs = gql`
     # Get admin payment analytics (Admin)
     adminPaymentAnalytics(input: AdminAnalyticsInput!): AdminPaymentAnalytics!
 
-    # Get top earning providers (Admin)
+    # Providers with the most earnings released to their wallets in the period
+    # (default ALL_TIME), highest first; limit defaults to 10, at most 100 (Admin)
     topEarningProviders(limit: Int, period: AnalyticsPeriod): [TopEarningProvider!]!
 
-    # Get refund statistics (Admin)
+    # Get refund statistics (Super Admin)
     refundStats(period: AnalyticsPeriod): RefundStats!
 
     # ==================
@@ -2456,8 +2780,8 @@ export const typeDefs = gql`
     requestEmailChange(input: RequestEmailChangeInput!): MessageResponse!
     confirmEmailChange(input: ConfirmEmailChangeInput!): User!
     
-    # Delete own account
-    deleteAccount: MessageResponse!
+    # Delete own account (removes personal data). Pass the password to confirm it.
+    deleteAccount(password: String): MessageResponse!
 
     # ==================
     # Service Provider (Upgrade & Management)
@@ -2520,8 +2844,8 @@ export const typeDefs = gql`
     # Complete service - marks booking as COMPLETED (PROVIDER only)
     completeService(id: ID!): Booking!
     
-    # Confirm service delivery - starts 24-hour dispute window (USER only)
-    # After 24 hours without dispute, payment is automatically released to provider
+    # Confirm service delivery (USER only). The payment is released to the provider
+    # 24 hours later; either party can raise a dispute until it is released
     confirmServiceDelivery(bookingId: ID!): Booking!
 
     # ==================
@@ -2541,7 +2865,7 @@ export const typeDefs = gql`
     # Verify payment status (User)
     verifyPayment(transactionRef: String!): PaymentVerificationResponse!
 
-    # Process refund (Admin)
+    # Refund all or part of a payment to the customer's wallet (Super Admin)
     processRefund(input: RefundInput!): RefundResponse!
 
     # ==================
@@ -2588,13 +2912,14 @@ export const typeDefs = gql`
     # Withdrawal Mutations (Admin)
     # ==================
 
-    # Process a pending withdrawal (Admin)
+    # Process a pending withdrawal (Super Admin)
     processWithdrawal(id: ID!): WithdrawalResult!
 
-    # Reject a withdrawal (Admin)
+    # Reject a pending withdrawal (Super Admin)
     rejectWithdrawal(id: ID!, reason: String!): WithdrawalResult!
 
-    # Retry a failed withdrawal (Admin)
+    # Start a new transfer attempt for a PENDING withdrawal whose last attempt
+    # failed (Super Admin). FAILED withdrawals are final and can't be retried.
     retryWithdrawal(id: ID!): WithdrawalResult!
 
     # ==================
@@ -2613,8 +2938,11 @@ export const typeDefs = gql`
     # Remove restriction from user/provider
     removeRestriction(userId: ID!): UserManagementResult!
 
-    # Adjust wallet balance (Admin)
+    # Credit (positive amount) or debit (negative) a customer's or provider's wallet (Super Admin)
     adjustWalletBalance(userId: ID!, amount: Float!, reason: String!): Wallet!
+
+    # Set the commission rate for new bookings, as a percentage: 7.5 means 7.5% (Super Admin)
+    updateCommissionRate(rate: Float!): PlatformSettings!
 
     # Broadcast a notification (push + in-app + socket) to users/providers.
     # ADMIN or SUPER_ADMIN. Cannot target the ADMIN role from this endpoint
@@ -2638,8 +2966,10 @@ export const typeDefs = gql`
     # Respond to a review (Provider)
     respondToReview(reviewId: ID!, response: String!): Review!
 
-    # Delete a review (Admin)
-    deleteReview(id: ID!): MessageResponse!
+    # Remove a review (Admin). It no longer appears or counts anywhere, and its
+    # booking can't be reviewed again. The optional reason is kept with the
+    # review and in the audit log.
+    deleteReview(id: ID!, reason: String): MessageResponse!
 
     # ==================
     # Favourite Management (User)
@@ -2719,6 +3049,9 @@ export const typeDefs = gql`
     # Upload provider documents
     uploadProviderDocuments(files: [FileUploadInput!]!): MultipleUploadResponse!
 
+    # Save provider documents uploaded straight to Cloudinary with getDocumentUploadParams
+    addProviderDocuments(documentUrls: [String!]!): MultipleUploadResponse!
+
     # Remove provider document
     removeProviderDocument(documentUrl: String!): MessageResponse!
 
@@ -2735,14 +3068,38 @@ export const typeDefs = gql`
     # Mark messages as read
     markMessagesAsRead(conversationId: ID!, messageIds: [ID!]): MessageResponse!
 
-    # Archive a conversation
+    # Archive a conversation for yourself only
     archiveConversation(conversationId: ID!): MessageResponse!
+
+    # Bring a conversation you archived back into your inbox
+    unarchiveConversation(conversationId: ID!): MessageResponse!
 
     # Delete a message (soft delete, own messages only)
     deleteMessage(messageId: ID!): MessageResponse!
 
     # Start a support chat with admin
     startSupportChat(input: StartSupportChatInput!): Conversation!
+
+    # ==================
+    # Safety Mutations
+    # ==================
+
+    # Block a user. Neither of you can message or book the other, and their
+    # listings are hidden from you. They aren't told.
+    blockUser(userId: ID!, reason: String): MessageResponse!
+
+    # Unblock a user
+    unblockUser(userId: ID!): MessageResponse!
+
+    # Report a user or their content. Reporting the same thing again returns
+    # your open report.
+    createReport(input: CreateReportInput!): MyReport!
+
+    # Accept the community terms, passing TermsStatus.currentVersion
+    acceptTerms(version: String!): TermsStatus!
+
+    # Decide a report. Applies to every open report about the same content (Admin)
+    resolveReport(id: ID!, input: ResolveReportInput!): Report!
 
     # ==================
     # Notification Mutations
@@ -2770,8 +3127,9 @@ export const typeDefs = gql`
     # Register device for push notifications (OneSignal Player ID)
     registerPushToken(playerId: String!): PushTokenResult!
 
-    # Unregister device from push notifications
-    unregisterPushToken: PushTokenResult!
+    # Unregister device from push notifications. With playerId, only that
+    # device; without it, every device on the account
+    unregisterPushToken(playerId: String): PushTokenResult!
 
     # Update push notification preference
     updatePushPreference(enabled: Boolean!): PushTokenResult!
@@ -2878,7 +3236,7 @@ export const typeDefs = gql`
     # Service Moderation (Admin)
     # ==================
     
-    # Approve service
+    # Approve a service pending approval, or reinstate a suspended one (Admin)
     approveService(serviceId: ID!): Service!
     
     # Reject service

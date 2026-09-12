@@ -54,7 +54,15 @@ export interface NotificationJobData {
 }
 
 export interface BackgroundJobData {
-  jobType: 'CLEANUP_OLD_NOTIFICATIONS' | 'CLEANUP_OLD_MESSAGES' | 'SEND_DAILY_DIGEST' | 'ANALYTICS_SNAPSHOT' | 'UNLOCK_STALE_WALLETS' | 'PROCESS_AUTOMATIC_PAYMENT_RELEASES';
+  jobType:
+    | 'CLEANUP_OLD_NOTIFICATIONS'
+    | 'CLEANUP_OLD_MESSAGES'
+    | 'SEND_DAILY_DIGEST'
+    | 'ANALYTICS_SNAPSHOT'
+    | 'UNLOCK_STALE_WALLETS'
+    | 'PROCESS_AUTOMATIC_PAYMENT_RELEASES'
+    | 'RECONCILE_WITHDRAWALS'
+    | 'PROCESS_SCHEDULED_PAYOUTS';
   data?: Record<string, unknown>;
 }
 
@@ -193,13 +201,15 @@ class QueueManager {
   }
 
   /**
-   * Add a job with scheduling (cron pattern)
+   * Add a job with scheduling (cron pattern). With a time zone the pattern
+   * runs in that zone instead of the server's.
    */
   async addScheduledJob<T>(
     queueName: string,
     data: T,
     cronPattern: string,
-    jobId: string
+    jobId: string,
+    options: { timezone?: string } = {}
   ): Promise<void> {
     const queue = this.queues.get(queueName);
     if (!queue) {
@@ -207,15 +217,21 @@ class QueueManager {
       return;
     }
 
+    const { timezone } = options;
+
     await queue.add(queueName, data, {
       ...defaultJobOptions,
-      repeat: {
-        pattern: cronPattern,
-      },
+      repeat: timezone ? { pattern: cronPattern, tz: timezone } : { pattern: cronPattern },
       jobId,
     });
 
-    console.log(`📅 Scheduled job ${jobId} with pattern: ${cronPattern}`);
+    // BullMQ keys a repeatable job by its time zone as well as its id, so the
+    // same job scheduled earlier without one would keep running alongside it
+    if (timezone) {
+      await queue.removeRepeatable(queueName, { pattern: cronPattern }, jobId);
+    }
+
+    console.log(`📅 Scheduled job ${jobId} with pattern: ${cronPattern}${timezone ? ` (${timezone})` : ''}`);
   }
 
   /**

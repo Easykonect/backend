@@ -3,12 +3,51 @@
  * Handles user management business logic
  */
 
+import { randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
+import { AdminAction, Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
-import { ErrorCode, ErrorMessage } from '@/constants';
+import { config } from '@/config';
+import {
+  ErrorCode,
+  ErrorMessage,
+  AccountStatus,
+  BookingStatus,
+  DisputeStatus,
+  PaymentStatus,
+  ServiceStatus,
+} from '@/constants';
+import { hashPassword } from '@/lib/auth';
+import { withTransaction } from '@/lib/transaction';
 import { generateOtp, hashOtp, verifyOtp, getOtpExpiry, isOtpExpired } from '@/lib/otp';
 import { sendProfileUpdatedEmail, sendEmailChangeOtpEmail } from '@/lib/email';
 import { validateName, validatePhone, validateUrl, validateEmail } from '@/utils/security';
+import { assertAcceptableText } from '@/lib/content-filter';
+import { createAuditLog } from './audit.service';
+import { confirmAccountPassword } from './auth.service';
+import { endAllSessions } from './token.service';
+import { unregisterPushToken } from './push.service';
+import { deleteUserFiles, getUserFileUrls } from './upload.service';
+
+/**
+ * User fields returned by operations that respond with a User
+ */
+const USER_SELECT = {
+  id: true,
+  email: true,
+  firstName: true,
+  lastName: true,
+  phone: true,
+  profilePhoto: true,
+  role: true,
+  activeRole: true,
+  status: true,
+  isEmailVerified: true,
+  pushEnabled: true,
+  lastLoginAt: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
 
 /**
  * Get user by ID
@@ -16,22 +55,7 @@ import { validateName, validatePhone, validateUrl, validateEmail } from '@/utils
 export const getUserById = async (id: string) => {
   const user = await prisma.user.findUnique({
     where: { id },
-    select: {
-      id: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      role: true,
-      activeRole: true,
-      phone: true,
-      profilePhoto: true,
-      status: true,
-      isEmailVerified: true,
-      pushEnabled: true,
-      lastLoginAt: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+    select: USER_SELECT,
   });
 
   if (!user) {
@@ -60,18 +84,7 @@ export const getUsers = async (pagination: { page: number; limit: number }) => {
       skip,
       take: limit,
       orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        role: true,
-        phone: true,
-        profilePhoto: true,
-        status: true,
-        isEmailVerified: true,
-        createdAt: true,
-      },
+      select: USER_SELECT,
     }),
     prisma.user.count(),
   ]);
@@ -95,7 +108,7 @@ export const updateUserProfile = async (
   data: {
     firstName?: string;
     lastName?: string;
-    phone?: string;
+    phone?: string | null;
     profilePhoto?: string;
   }
 ) => {
@@ -108,24 +121,27 @@ export const updateUserProfile = async (
 
   // Track changed fields for notification email
   const changedFields: string[] = [];
-  
+
   // Sanitize and validate inputs
   let sanitizedFirstName: string | undefined;
   let sanitizedLastName: string | undefined;
-  let sanitizedPhone: string | undefined;
+  let sanitizedPhone: string | null | undefined;
   let sanitizedProfilePhoto: string | undefined;
-  
+
   if (data.firstName) {
     sanitizedFirstName = validateName(data.firstName, 'First name');
+    assertAcceptableText(sanitizedFirstName, 'First name');
     if (sanitizedFirstName !== current.firstName) changedFields.push('First Name');
   }
   if (data.lastName) {
     sanitizedLastName = validateName(data.lastName, 'Last name');
+    assertAcceptableText(sanitizedLastName, 'Last name');
     if (sanitizedLastName !== current.lastName) changedFields.push('Last Name');
   }
   if (data.phone !== undefined) {
-    sanitizedPhone = data.phone ? validatePhone(data.phone) : '';
-    if (sanitizedPhone !== current.phone) changedFields.push('Phone Number');
+    // Stored as +234 followed by 10 digits, like register; empty removes it
+    sanitizedPhone = data.phone?.trim() ? validatePhone(data.phone) : null;
+    if (sanitizedPhone !== (current.phone || null)) changedFields.push('Phone Number');
   }
   if (data.profilePhoto !== undefined) {
     sanitizedProfilePhoto = data.profilePhoto ? validateUrl(data.profilePhoto) : '';
@@ -144,19 +160,7 @@ export const updateUserProfile = async (
       ...(sanitizedPhone !== undefined && { phone: sanitizedPhone }),
       ...(sanitizedProfilePhoto !== undefined && { profilePhoto: sanitizedProfilePhoto }),
     },
-    select: {
-      id: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      phone: true,
-      profilePhoto: true,
-      role: true,
-      status: true,
-      isEmailVerified: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+    select: USER_SELECT,
   });
 
   // Non-blocking profile update notification
@@ -164,6 +168,11 @@ export const updateUserProfile = async (
 
   return user;
 };
+
+const emailInUseError = (message: string) =>
+  new GraphQLError(message, {
+    extensions: { code: 'USER_ALREADY_EXISTS' },
+  });
 
 /**
  * Request Email Change
@@ -189,9 +198,7 @@ export const requestEmailChange = async (userId: string, newEmail: string) => {
   // Check new email is not already taken
   const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
   if (existing) {
-    throw new GraphQLError('This email address is already in use', {
-      extensions: { code: 'USER_ALREADY_EXISTS' },
-    });
+    throw emailInUseError('This email address is already in use');
   }
 
   // Generate OTP and stage the new email
@@ -211,9 +218,11 @@ export const requestEmailChange = async (userId: string, newEmail: string) => {
   // Send OTP to the new email
   await sendEmailChangeOtpEmail(normalizedEmail, user.firstName, otp);
 
+  const minutes = config.otp.expiryMinutes;
+
   return {
     success: true,
-    message: `A confirmation code has been sent to ${normalizedEmail}. It expires in 10 minutes.`,
+    message: `A confirmation code has been sent to ${normalizedEmail}. It expires in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
   };
 };
 
@@ -250,28 +259,46 @@ export const confirmEmailChange = async (userId: string, otp: string) => {
   const oldEmail = user.email;
   const newEmail = user.pendingEmail;
 
-  const updatedUser = await prisma.user.update({
-    where: { id: userId },
-    data: {
-      email: newEmail,
-      pendingEmail: null,
-      emailVerifyToken: null,
-      emailVerifyExpiry: null,
-    },
-    select: {
-      id: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      phone: true,
-      profilePhoto: true,
-      role: true,
-      status: true,
-      isEmailVerified: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+  // The address isn't held while the code is pending, so another account may
+  // have taken it since. The pending change is then cancelled.
+  const takenMessage =
+    'This email address is now used by another account. Please request a change to a different address.';
+  const cancelPendingChange = () =>
+    prisma.user.update({
+      where: { id: userId },
+      data: { pendingEmail: null, emailVerifyToken: null, emailVerifyExpiry: null },
+    });
+
+  const taken = await prisma.user.findUnique({
+    where: { email: newEmail },
+    select: { id: true },
   });
+
+  if (taken && taken.id !== userId) {
+    await cancelPendingChange();
+    throw emailInUseError(takenMessage);
+  }
+
+  let updatedUser;
+  try {
+    updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        email: newEmail,
+        pendingEmail: null,
+        emailVerifyToken: null,
+        emailVerifyExpiry: null,
+      },
+      select: USER_SELECT,
+    });
+  } catch (error) {
+    // Taken between the check and the update
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      await cancelPendingChange();
+      throw emailInUseError(takenMessage);
+    }
+    throw error;
+  }
 
   // Notify old email of the change
   sendProfileUpdatedEmail(oldEmail, user.firstName, ['Email Address']).catch(() => {});
@@ -279,96 +306,292 @@ export const confirmEmailChange = async (userId: string, otp: string) => {
   return updatedUser;
 };
 
+// ==================
+// Account Deletion
+// ==================
+
+const ACTIVE_BOOKING_STATUSES = [
+  BookingStatus.PENDING,
+  BookingStatus.ACCEPTED,
+  BookingStatus.IN_PROGRESS,
+];
+const OPEN_DISPUTE_STATUSES = [DisputeStatus.OPEN, DisputeStatus.UNDER_REVIEW];
+const PAYOUT_IN_PROGRESS_STATUSES: ('PENDING' | 'PROCESSING')[] = ['PENDING', 'PROCESSING'];
+
 /**
- * Delete user (Admin only)
+ * A deleted account's email: unique, and unable to receive mail (.invalid is a
+ * reserved domain), so the real address is free to register again
  */
-export const deleteUser = async (id: string) => {
+export const deletedAccountEmail = (userId: string): string =>
+  `deleted-${userId}@deleted.easykonnet.invalid`;
+
+const formatNaira = (kobo: number): string =>
+  `₦${(kobo / 100).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+type DeletionRequester = 'self' | 'admin';
+
+const deletionBlocked = (
+  requester: DeletionRequester,
+  code: string,
+  messages: { self: string; admin: string }
+) => new GraphQLError(messages[requester], { extensions: { code } });
+
+/**
+ * Refuse to delete an account that still has business in progress, which would
+ * otherwise be left with no one to act on it: active bookings, open disputes,
+ * withdrawals or payouts being processed, earnings on hold, or wallet money
+ */
+const assertAccountCanBeDeleted = async (userId: string, requester: DeletionRequester) => {
+  const provider = await prisma.serviceProvider.findUnique({
+    where: { userId },
+    select: { id: true },
+  });
+
+  const bookingParty: Prisma.BookingWhereInput[] = provider
+    ? [{ userId }, { providerId: provider.id }]
+    : [{ userId }];
+
+  const [activeBookings, openDisputes, wallet, withdrawalsInProgress, payoutsInProgress, earningsOnHold] =
+    await Promise.all([
+      prisma.booking.count({
+        where: { status: { in: ACTIVE_BOOKING_STATUSES }, OR: bookingParty },
+      }),
+      prisma.dispute.count({
+        where: {
+          status: { in: OPEN_DISPUTE_STATUSES },
+          OR: [{ raisedById: userId }, { booking: { is: { OR: bookingParty } } }],
+        },
+      }),
+      prisma.wallet.findUnique({
+        where: { userId },
+        select: { balance: true, pendingBalance: true },
+      }),
+      provider
+        ? prisma.withdrawal.count({
+            where: { providerId: provider.id, status: { in: PAYOUT_IN_PROGRESS_STATUSES } },
+          })
+        : 0,
+      provider
+        ? prisma.scheduledPayout.count({
+            where: { providerId: provider.id, status: { in: PAYOUT_IN_PROGRESS_STATUSES } },
+          })
+        : 0,
+      // Completed and paid, but not yet released to the provider's wallet
+      provider
+        ? prisma.booking.count({
+            where: {
+              providerId: provider.id,
+              status: BookingStatus.COMPLETED,
+              OR: [{ paymentReleasedAt: null }, { paymentReleasedAt: { isSet: false } }],
+              payment: { is: { status: PaymentStatus.COMPLETED } },
+            },
+          })
+        : 0,
+    ]);
+
+  if (activeBookings > 0) {
+    throw deletionBlocked(requester, 'HAS_ACTIVE_BOOKINGS', {
+      self: 'You have bookings that are pending, accepted or in progress. Complete or cancel them before deleting your account.',
+      admin: 'This user has bookings that are pending, accepted or in progress. They must be completed or cancelled first.',
+    });
+  }
+
+  if (openDisputes > 0) {
+    throw deletionBlocked(requester, 'HAS_OPEN_DISPUTES', {
+      self: 'You have a dispute that is still open. It must be resolved before you can delete your account.',
+      admin: 'This user has a dispute that is still open. Resolve it first.',
+    });
+  }
+
+  if (withdrawalsInProgress + payoutsInProgress > 0) {
+    throw deletionBlocked(requester, 'HAS_PENDING_WITHDRAWALS', {
+      self: 'You have a withdrawal or payout that is still being processed. Wait for it to finish before deleting your account.',
+      admin: 'This user has a withdrawal or payout that is still being processed.',
+    });
+  }
+
+  if (earningsOnHold > 0 || (wallet?.pendingBalance ?? 0) > 0) {
+    throw deletionBlocked(requester, 'HAS_PENDING_EARNINGS', {
+      self: 'Some of your earnings are still on hold. Wait until they reach your wallet and withdraw them before deleting your account.',
+      admin: 'This user has earnings that are still on hold.',
+    });
+  }
+
+  if ((wallet?.balance ?? 0) > 0) {
+    const amount = formatNaira(wallet?.balance ?? 0);
+    throw deletionBlocked(requester, 'WALLET_BALANCE_NOT_EMPTY', {
+      self: `Your wallet still has ${amount}. Withdraw or use it before deleting your account, or contact support for help.`,
+      admin: `This user's wallet still has ${amount}.`,
+    });
+  }
+};
+
+/**
+ * Delete an account by removing its personal data and making it unusable. The
+ * records other people and the books rely on stay (bookings, reviews, payments,
+ * wallet history, messages), now showing "Deleted User". A provider's profile is
+ * scrubbed and its services hidden, and every session ends.
+ */
+const anonymiseAccount = async (userId: string) => {
+  const deletedAt = new Date();
+  const unusablePassword = await hashPassword(randomBytes(32).toString('hex'));
+
+  // Detach the device from OneSignal while its ID is still on the account
+  try {
+    await unregisterPushToken(userId);
+  } catch (error) {
+    console.error('Failed to remove push registration for a deleted account:', error);
+  }
+
+  // Note the account's files before the transaction clears their URLs
+  const fileUrls = await getUserFileUrls(userId);
+
+  await withTransaction(async (tx) => {
+    const provider = await tx.serviceProvider.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+
+    if (provider) {
+      // The image files are deleted below, so their URLs go too
+      await tx.service.updateMany({
+        where: { providerId: provider.id },
+        data: { status: ServiceStatus.INACTIVE, images: [] },
+      });
+      await tx.providerBankAccount.deleteMany({ where: { providerId: provider.id } });
+      await tx.payoutSchedule.updateMany({
+        where: { providerId: provider.id },
+        data: { isActive: false, bankAccountId: null },
+      });
+      await tx.serviceProvider.update({
+        where: { id: provider.id },
+        data: {
+          businessName: 'Deleted provider',
+          businessDescription: null,
+          address: '',
+          latitude: null,
+          longitude: null,
+          images: [],
+          documents: [],
+        },
+      });
+    }
+
+    await tx.favourite.deleteMany({ where: { userId } });
+    await tx.providerLike.deleteMany({ where: { userId } });
+    await tx.userSettings.deleteMany({ where: { userId } });
+    await tx.notification.deleteMany({ where: { userId } });
+
+    await tx.user.update({
+      where: { id: userId },
+      data: {
+        email: deletedAccountEmail(userId),
+        firstName: 'Deleted',
+        lastName: 'User',
+        phone: null,
+        profilePhoto: null,
+        password: unusablePassword,
+        status: AccountStatus.DEACTIVATED,
+        activeRole: null,
+        pendingEmail: null,
+        emailVerifyToken: null,
+        emailVerifyExpiry: null,
+        passwordResetToken: null,
+        passwordResetExpiry: null,
+        oneSignalPlayerId: null,
+        oneSignalPlayerIds: [],
+        pushEnabled: false,
+        failedLoginAttempts: 0,
+        lockoutUntil: null,
+        lastLoginIp: null,
+        deactivatedAt: deletedAt,
+        deactivationReason: null,
+        deletedAt,
+        tokenInvalidatedAt: deletedAt,
+      },
+    });
+  });
+
+  // Delete the account's files from Cloudinary (best effort, never throws)
+  await deleteUserFiles(userId, fileUrls);
+
+  // Revoke stored refresh tokens and reject earlier access tokens
+  await endAllSessions(userId);
+};
+
+/**
+ * Delete user (Admin only). Admin accounts can only be removed through
+ * deleteAdmin, which protects Super Admins.
+ */
+export const deleteUser = async (
+  id: string,
+  adminId: string,
+  adminRole: string,
+  ipAddress?: string
+) => {
+  if (id === adminId) {
+    throw new GraphQLError('You cannot delete your own account', {
+      extensions: { code: 'FORBIDDEN' },
+    });
+  }
+
   const user = await prisma.user.findUnique({
     where: { id },
   });
 
-  if (!user) {
-    throw new GraphQLError(ErrorMessage[ErrorCode.USER_NOT_FOUND], {
-      extensions: { code: ErrorCode.USER_NOT_FOUND },
+  // Same code as the other admin user operations
+  if (!user || user.deletedAt) {
+    throw new GraphQLError('User not found', {
+      extensions: { code: ErrorCode.NOT_FOUND },
     });
   }
 
-  // Check if user has provider profile
-  const provider = await prisma.serviceProvider.findUnique({
-    where: { userId: id },
-  });
-
-  // Delete in transaction
-  await prisma.$transaction(async (tx) => {
-    if (provider) {
-      // Delete provider's services first
-      await tx.service.deleteMany({
-        where: { providerId: provider.id },
-      });
-      // Delete provider profile
-      await tx.serviceProvider.delete({
-        where: { id: provider.id },
-      });
-    }
-    // Delete user
-    await tx.user.delete({
-      where: { id },
+  if (user.role === 'ADMIN' || user.role === 'SUPER_ADMIN') {
+    throw new GraphQLError('Admin accounts can only be removed with deleteAdmin', {
+      extensions: { code: 'FORBIDDEN' },
     });
+  }
+
+  await assertAccountCanBeDeleted(id, 'admin');
+  await anonymiseAccount(id);
+
+  await createAuditLog({
+    action: 'DELETE_USER' as AdminAction,
+    targetType: 'User',
+    targetId: id,
+    performedBy: adminId,
+    performedByRole: adminRole,
+    previousValue: { email: user.email, role: user.role, status: user.status },
+    ipAddress,
   });
 
   return { success: true, message: 'User deleted successfully' };
 };
 
 /**
- * Delete own account
+ * Delete own account. When the app sends the password it must be right, and
+ * wrong passwords count toward the sign-in lockout.
  */
-export const deleteOwnAccount = async (userId: string) => {
+export const deleteOwnAccount = async (userId: string, password?: string | null) => {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    include: {
-      provider: {
-        include: {
-          _count: {
-            select: {
-              bookings: true,
-            },
-          },
-        },
-      },
-    },
   });
 
-  if (!user) {
+  if (!user || user.deletedAt) {
     throw new GraphQLError(ErrorMessage[ErrorCode.USER_NOT_FOUND], {
       extensions: { code: ErrorCode.USER_NOT_FOUND },
     });
   }
 
-  // Check for active bookings if provider
-  if (user.provider && user.provider._count.bookings > 0) {
-    throw new GraphQLError(
-      'Cannot delete account with active bookings. Please complete or cancel pending bookings first.',
-      { extensions: { code: 'HAS_ACTIVE_BOOKINGS' } }
-    );
+  if (password !== undefined && password !== null) {
+    await confirmAccountPassword(user, password, {
+      code: 'INVALID_PASSWORD',
+      message: 'Password is incorrect',
+    });
   }
 
-  // Delete in transaction
-  await prisma.$transaction(async (tx) => {
-    if (user.provider) {
-      // Delete provider's services
-      await tx.service.deleteMany({
-        where: { providerId: user.provider.id },
-      });
-      // Delete provider profile
-      await tx.serviceProvider.delete({
-        where: { id: user.provider.id },
-      });
-    }
-    // Delete user
-    await tx.user.delete({
-      where: { id: userId },
-    });
-  });
+  await assertAccountCanBeDeleted(userId, 'self');
+  await anonymiseAccount(userId);
 
   return {
     success: true,
@@ -585,9 +808,9 @@ export const getProviderLikeCount = async (providerId: string) => {
  */
 export const getMyLikedProviders = async (
   userId: string,
-  pagination: { page: number; limit: number } = { page: 1, limit: 10 }
+  pagination: { page?: number; limit?: number } = {}
 ) => {
-  const { page, limit } = pagination;
+  const { page = 1, limit = 10 } = pagination;
   const skip = (page - 1) * limit;
 
   const [likes, total] = await Promise.all([
@@ -606,7 +829,8 @@ export const getMyLikedProviders = async (
             },
             _count: {
               select: {
-                reviews: true,
+                // Removed reviews don't count; older reviews have no deletedAt field
+                reviews: { where: { OR: [{ deletedAt: null }, { deletedAt: { isSet: false } }] } },
                 likes: true,
               },
             },
@@ -623,6 +847,12 @@ export const getMyLikedProviders = async (
   const totalPages = Math.ceil(total / limit);
 
   return {
+    total,
+    page,
+    limit,
+    totalPages,
+    hasNextPage: page < totalPages,
+    hasPreviousPage: page > 1,
     items: likes.map((like) => ({
       id: like.id,
       likedAt: like.createdAt.toISOString(),

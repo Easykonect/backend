@@ -1,26 +1,32 @@
 /**
  * Authentication Service
  * Handles user authentication with email verification
- * 
+ *
  * Security features:
  * - Email verification with 6-digit OTP
- * - Account lockout after failed attempts
+ * - Account lockout after failed attempts, at sign-in and when a signed-in user
+ *   confirms their password
  * - Rate limiting ready
  * - Secure password hashing
  * - JWT with refresh tokens
  * - Login activity tracking
  * - Input validation with Zod
- * - Refresh token storage and invalidation
+ * - Refresh token storage and invalidation, and access token revocation at sign-out
+ * - Sign-in and password reset responses that don't reveal whether an email is registered
  */
 
+import { randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
+import type { Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import {
   hashPassword,
   comparePassword,
   generateToken,
   generateRefreshToken,
-  verifyToken,
+  verifyRefreshToken,
+  getTokenIssuedAtMs,
+  type JWTPayload,
 } from '@/lib/auth';
 import {
   generateOtp,
@@ -36,22 +42,32 @@ import {
 } from '@/lib/email';
 import { config } from '@/config';
 import { ErrorCode, ErrorMessage, UserRole, AccountStatus } from '@/constants';
+import { assertAcceptableText } from '@/lib/content-filter';
+import { getClientIp as getProxiedClientIp } from '@/middleware/rate-limit.middleware';
 import {
   registerUserSchema,
   loginSchema,
   passwordSchema,
 } from '@/utils/validation';
-import { storeRefreshToken, validateRefreshToken, invalidateRefreshToken } from './token.service';
-import { 
-  validateName, 
-  validateEmail as validateEmailSecurity, 
-  validatePhone, 
+import {
+  storeRefreshToken,
+  checkRefreshToken,
+  invalidateRefreshToken,
+  endAllSessions,
+  revokeAccessToken,
+} from './token.service';
+import {
+  validateName,
+  validateEmail as validateEmailSecurity,
+  validatePhone,
   validatePassword as validatePasswordSecurity,
   enforceRateLimit,
   incrementRateLimit,
   resetRateLimit,
-  invalidateAllUserTokens,
+  isTokenValid,
+  isIssuedAfter,
   logSecurityEvent,
+  isBanActive,
 } from '@/utils/security';
 
 // ==================
@@ -63,7 +79,7 @@ interface RegisterInput {
   password: string;
   firstName: string;
   lastName: string;
-  phone?: string;
+  phone?: string | null;
 }
 
 interface LoginInput {
@@ -94,6 +110,11 @@ interface ResetPasswordInput {
 // Helper Functions
 // ==================
 
+const REGISTRATION_MESSAGE =
+  'Registration successful! Please check your email for the verification code.';
+const FORGOT_PASSWORD_MESSAGE =
+  'If an account exists with this email, a password reset code has been sent.';
+
 /**
  * Check if account is locked
  */
@@ -103,24 +124,18 @@ const isAccountLocked = (lockoutUntil: Date | null): boolean => {
 };
 
 /**
- * Get client IP from request (for logging)
+ * Admin accounts sign in, refresh and reset passwords with the admin operations only
  */
-export const getClientIp = (request?: Request): string => {
-  if (!request) return 'unknown';
-  
-  // Check various headers for IP (common in proxied environments)
-  const forwardedFor = request.headers.get('x-forwarded-for');
-  if (forwardedFor) {
-    return forwardedFor.split(',')[0].trim();
-  }
-  
-  const realIp = request.headers.get('x-real-ip');
-  if (realIp) {
-    return realIp;
-  }
-  
-  return 'unknown';
-};
+const isAdminRole = (role: string): boolean =>
+  role === UserRole.ADMIN || role === UserRole.SUPER_ADMIN;
+
+/**
+ * Get client IP from request (for logging). Uses the same trusted-proxy rule as
+ * rate limiting, so a client can't put a made-up address in login alerts and
+ * audit logs.
+ */
+export const getClientIp = (request?: Request): string =>
+  request ? getProxiedClientIp(request) : 'unknown';
 
 /**
  * Validate input and throw GraphQL error if invalid
@@ -134,6 +149,171 @@ const validateInput = <T>(schema: { safeParse: (data: unknown) => { success: boo
     });
   }
   return result.data as T;
+};
+
+const invalidCredentialsError = (extensions: Record<string, unknown> = {}) =>
+  new GraphQLError(ErrorMessage[ErrorCode.INVALID_CREDENTIALS], {
+    extensions: { code: ErrorCode.INVALID_CREDENTIALS, ...extensions },
+  });
+
+/**
+ * The account is still locked from earlier failed attempts
+ */
+const accountLockedError = (lockoutUntil: Date) =>
+  new GraphQLError(
+    `Account is locked due to too many failed attempts. Please try again in ${Math.ceil(
+      (lockoutUntil.getTime() - Date.now()) / (1000 * 60)
+    )} minutes.`,
+    { extensions: { code: 'ACCOUNT_LOCKED' } }
+  );
+
+/**
+ * This failed attempt locked the account
+ */
+const lockedNowError = () =>
+  new GraphQLError(
+    `Account locked due to too many failed attempts. Please try again in ${config.security.lockoutDurationMinutes} minutes.`,
+    { extensions: { code: 'ACCOUNT_LOCKED' } }
+  );
+
+/**
+ * A bcrypt hash of a random password, checked when there is no account the
+ * sign-in can use, so an unknown email takes as long as a wrong password
+ */
+let decoyPasswordHash: Promise<string> | undefined;
+const getDecoyPasswordHash = (): Promise<string> =>
+  (decoyPasswordHash ??= hashPassword(randomBytes(24).toString('hex')));
+
+type LockoutState = {
+  id: string;
+  failedLoginAttempts: number;
+  lockoutUntil: Date | null;
+};
+
+/**
+ * Count a wrong password toward the lockout. Once an earlier lockout has ended
+ * the count starts again, so a single wrong password doesn't lock the account
+ * straight back up.
+ */
+const recordFailedPassword = async (user: LockoutState) => {
+  const previousFailures =
+    user.lockoutUntil && !isAccountLocked(user.lockoutUntil) ? 0 : user.failedLoginAttempts;
+  const failedAttempts = previousFailures + 1;
+  const locked = failedAttempts >= config.security.maxLoginAttempts;
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      failedLoginAttempts: failedAttempts,
+      lockoutUntil: locked
+        ? new Date(Date.now() + config.security.lockoutDurationMinutes * 60 * 1000)
+        : null,
+    },
+  });
+
+  return {
+    locked,
+    attemptsRemaining: Math.max(0, config.security.maxLoginAttempts - failedAttempts),
+  };
+};
+
+/**
+ * Check a signed-in user's password before a sensitive change (changing the
+ * password, deleting the account). Wrong passwords count toward the same
+ * lockout as sign-in, and a locked account can't make the change until the
+ * lockout ends.
+ */
+export const confirmAccountPassword = async (
+  user: LockoutState & { password: string },
+  password: string,
+  wrongPassword: { code: string; message: string }
+): Promise<void> => {
+  if (isAccountLocked(user.lockoutUntil)) {
+    throw accountLockedError(user.lockoutUntil as Date);
+  }
+
+  if (await comparePassword(password, user.password)) {
+    return;
+  }
+
+  const { locked } = await recordFailedPassword(user);
+
+  logSecurityEvent('AUTH_FAILURE', {
+    userId: user.id,
+    reason: 'Wrong password confirming an account change',
+  });
+
+  if (locked) {
+    throw lockedNowError();
+  }
+
+  throw new GraphQLError(wrongPassword.message, {
+    extensions: { code: wrongPassword.code },
+  });
+};
+
+/**
+ * Every User field the API returns, for responses that include the account
+ */
+const USER_RESPONSE_SELECT = {
+  id: true,
+  email: true,
+  firstName: true,
+  lastName: true,
+  phone: true,
+  profilePhoto: true,
+  role: true,
+  activeRole: true,
+  status: true,
+  isEmailVerified: true,
+  pushEnabled: true,
+  lastLoginAt: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+type UserResponseRecord = Prisma.UserGetPayload<{ select: typeof USER_RESPONSE_SELECT }>;
+
+const formatUserResponse = (user: UserResponseRecord) => ({
+  id: user.id,
+  email: user.email,
+  firstName: user.firstName,
+  lastName: user.lastName,
+  phone: user.phone,
+  profilePhoto: user.profilePhoto,
+  role: user.role,
+  activeRole: user.activeRole ?? user.role,
+  status: user.status,
+  isEmailVerified: user.isEmailVerified,
+  pushEnabled: user.pushEnabled ?? true,
+  lastLoginAt: user.lastLoginAt ? user.lastLoginAt.toISOString() : null,
+  createdAt: user.createdAt,
+  updatedAt: user.updatedAt,
+});
+
+/**
+ * Issue an access and refresh token pair, storing the refresh token so
+ * `refreshToken` accepts it
+ */
+const startSession = async (
+  user: { id: string; email: string; role: JWTPayload['role'] },
+  clientIp?: string
+) => {
+  const tokenPayload: JWTPayload = {
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+  };
+
+  const accessToken = generateToken(tokenPayload);
+  const refreshToken = generateRefreshToken(tokenPayload);
+
+  await storeRefreshToken(user.id, refreshToken, {
+    deviceInfo: 'web',
+    ipAddress: clientIp,
+  });
+
+  return { accessToken, refreshToken };
 };
 
 // ==================
@@ -153,8 +333,10 @@ export const registerUser = async (input: RegisterInput) => {
   const sanitizedEmail = validateEmailSecurity(email);
   const sanitizedFirstName = validateName(firstName, 'First name');
   const sanitizedLastName = validateName(lastName, 'Last name');
-  const sanitizedPhone = phone ? validatePhone(phone) : undefined;
-  
+  assertAcceptableText(sanitizedFirstName, 'First name');
+  assertAcceptableText(sanitizedLastName, 'Last name');
+  const sanitizedPhone = phone?.trim() ? validatePhone(phone) : undefined;
+
   // Validate password strength
   validatePasswordSecurity(password);
 
@@ -171,34 +353,28 @@ export const registerUser = async (input: RegisterInput) => {
   });
 
   if (existingUser) {
-    // If user exists but email not verified, allow re-registration
-    if (!existingUser.isEmailVerified) {
-      // Generate new OTP
+    // An unverified account gets a new code, but its password and details stay
+    // as they are: only the owner of the email can finish that sign-up
+    if (!existingUser.isEmailVerified && !isAdminRole(existingUser.role)) {
       const otp = generateOtp();
-      const hashedOtp = hashOtp(otp);
-      const otpExpiry = getOtpExpiry();
 
-      // Update user with new OTP and possibly new details
-      const hashedPassword = await hashPassword(password);
-      
       await prisma.user.update({
         where: { id: existingUser.id },
         data: {
-          password: hashedPassword,
-          firstName: sanitizedFirstName,
-          lastName: sanitizedLastName,
-          phone: sanitizedPhone,
-          emailVerifyToken: hashedOtp,
-          emailVerifyExpiry: otpExpiry,
+          emailVerifyToken: hashOtp(otp),
+          emailVerifyExpiry: getOtpExpiry(),
         },
       });
 
-      // Send verification email
-      await sendVerificationEmail(normalizedEmail, sanitizedFirstName, otp);
+      const emailSent = await sendVerificationEmail(normalizedEmail, existingUser.firstName, otp);
+
+      if (!emailSent) {
+        console.error('Failed to send verification email to:', normalizedEmail);
+      }
 
       return {
         success: true,
-        message: 'Verification code sent to your email. Please check your inbox.',
+        message: REGISTRATION_MESSAGE,
         requiresVerification: true,
       };
     }
@@ -241,7 +417,7 @@ export const registerUser = async (input: RegisterInput) => {
 
   return {
     success: true,
-    message: 'Registration successful! Please check your email for the verification code.',
+    message: REGISTRATION_MESSAGE,
     requiresVerification: true,
   };
 };
@@ -306,46 +482,41 @@ export const verifyEmail = async (input: VerifyEmailInput) => {
   // Reset rate limits on success
   await resetRateLimit('OTP_VERIFY', normalizedEmail);
 
-  // Update user - mark as verified
+  // Verification activates a new account only: an account an admin suspended
+  // stays suspended
   const updatedUser = await prisma.user.update({
     where: { id: user.id },
     data: {
       isEmailVerified: true,
       emailVerifyToken: null,
       emailVerifyExpiry: null,
-      status: AccountStatus.ACTIVE,
+      ...(user.status === AccountStatus.PENDING && { status: AccountStatus.ACTIVE }),
     },
-    select: {
-      id: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      phone: true,
-      profilePhoto: true,
-      role: true,
-      status: true,
-      isEmailVerified: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+    select: USER_RESPONSE_SELECT,
   });
 
-  // Generate tokens
-  const tokenPayload = {
-    userId: updatedUser.id,
-    email: updatedUser.email,
-    role: updatedUser.role,
-  };
+  // No session for an account that can't be used: signing in shows the reason
+  if (
+    updatedUser.status !== AccountStatus.ACTIVE ||
+    isBanActive(user) ||
+    isAdminRole(user.role)
+  ) {
+    return {
+      success: true,
+      message: 'Email verified successfully! Please sign in to continue.',
+      user: formatUserResponse(updatedUser),
+      accessToken: null,
+      refreshToken: null,
+    };
+  }
 
-  const accessToken = generateToken(tokenPayload);
-  const refreshToken = generateRefreshToken(tokenPayload);
+  const tokens = await startSession(updatedUser);
 
   return {
     success: true,
     message: 'Email verified successfully!',
-    user: updatedUser,
-    accessToken,
-    refreshToken,
+    user: formatUserResponse(updatedUser),
+    ...tokens,
   };
 };
 
@@ -405,6 +576,11 @@ export const resendVerificationOtp = async (input: ResendOtpInput) => {
 
 /**
  * Login user
+ *
+ * The password is checked before anything about the account is revealed, so
+ * someone without it can't learn whether an email is registered, locked,
+ * unverified, suspended or deactivated. Signing in to a deactivated account
+ * reactivates it.
  */
 export const loginUser = async (input: LoginInput, clientIp?: string) => {
   // Validate input
@@ -414,79 +590,37 @@ export const loginUser = async (input: LoginInput, clientIp?: string) => {
 
   // Rate limiting - check before any database operations
   await enforceRateLimit('LOGIN', normalizedEmail);
-  
+
   // Find user
   const user = await prisma.user.findUnique({
     where: { email: normalizedEmail },
   });
 
-  if (!user) {
-    // Increment rate limit even for non-existent users (prevent enumeration)
+  // No account this sign-in can use: admins sign in with adminLogin, and deleted
+  // accounts can't sign in. Same error, and the same hashing work, as a wrong
+  // password; the admin account's failed-attempt count isn't touched.
+  if (!user || isAdminRole(user.role) || user.deletedAt) {
+    await comparePassword(password, await getDecoyPasswordHash());
     await incrementRateLimit('LOGIN', normalizedEmail);
-    logSecurityEvent('AUTH_FAILURE', { 
-      reason: 'User not found', 
+    logSecurityEvent('AUTH_FAILURE', {
+      userId: user?.id,
+      reason: !user
+        ? 'User not found'
+        : user.deletedAt
+          ? 'Deleted account'
+          : 'Admin account used the customer sign-in',
       input: { email: normalizedEmail },
       ip: clientIp,
     });
-    throw new GraphQLError(ErrorMessage[ErrorCode.INVALID_CREDENTIALS], {
-      extensions: { code: ErrorCode.INVALID_CREDENTIALS },
-    });
+    throw invalidCredentialsError();
   }
 
-  // Check if account is locked
-  if (isAccountLocked(user.lockoutUntil)) {
-    const minutesLeft = Math.ceil(
-      (user.lockoutUntil!.getTime() - Date.now()) / (1000 * 60)
-    );
-    throw new GraphQLError(
-      `Account is locked due to too many failed attempts. Please try again in ${minutesLeft} minutes.`,
-      { extensions: { code: 'ACCOUNT_LOCKED' } }
-    );
-  }
-
-  // Check if email is verified
-  if (!user.isEmailVerified) {
-    throw new GraphQLError(
-      'Please verify your email before logging in. Check your inbox for the verification code.',
-      { extensions: { code: 'EMAIL_NOT_VERIFIED', requiresVerification: true } }
-    );
-  }
-
-  // Check if account is active
-  if (user.status === AccountStatus.SUSPENDED) {
-    throw new GraphQLError(
-      'Your account has been suspended. Please contact support.',
-      { extensions: { code: ErrorCode.USER_SUSPENDED } }
-    );
-  }
-
-  if (user.status === AccountStatus.DEACTIVATED) {
-    throw new GraphQLError(
-      'Your account has been deactivated.',
-      { extensions: { code: 'ACCOUNT_DEACTIVATED' } }
-    );
-  }
-
-  // Verify password
+  const lockedOut = isAccountLocked(user.lockoutUntil);
   const isValidPassword = await comparePassword(password, user.password);
 
   if (!isValidPassword) {
     // Increment rate limit for failed password
     await incrementRateLimit('LOGIN', normalizedEmail);
-    
-    // Increment failed login attempts
-    const newFailedAttempts = user.failedLoginAttempts + 1;
-    const shouldLock = newFailedAttempts >= config.security.maxLoginAttempts;
-
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        failedLoginAttempts: newFailedAttempts,
-        lockoutUntil: shouldLock
-          ? new Date(Date.now() + config.security.lockoutDurationMinutes * 60 * 1000)
-          : null,
-      },
-    });
 
     logSecurityEvent('AUTH_FAILURE', {
       userId: user.id,
@@ -494,72 +628,77 @@ export const loginUser = async (input: LoginInput, clientIp?: string) => {
       ip: clientIp,
     });
 
-    if (shouldLock) {
-      throw new GraphQLError(
-        `Account locked due to too many failed attempts. Please try again in ${config.security.lockoutDurationMinutes} minutes.`,
-        { extensions: { code: 'ACCOUNT_LOCKED' } }
-      );
+    // During a lockout a wrong password doesn't extend it or say it's in force
+    if (lockedOut) {
+      throw invalidCredentialsError();
     }
 
-    throw new GraphQLError(ErrorMessage[ErrorCode.INVALID_CREDENTIALS], {
-      extensions: { 
-        code: ErrorCode.INVALID_CREDENTIALS,
-        attemptsRemaining: config.security.maxLoginAttempts - newFailedAttempts,
-      },
+    const { locked, attemptsRemaining } = await recordFailedPassword(user);
+
+    if (locked) {
+      throw lockedNowError();
+    }
+
+    throw invalidCredentialsError({ attemptsRemaining });
+  }
+
+  // The password is right, so the account's state can be shown
+  if (lockedOut) {
+    throw accountLockedError(user.lockoutUntil as Date);
+  }
+
+  if (!user.isEmailVerified) {
+    throw new GraphQLError(
+      'Please verify your email before logging in. Check your inbox for the verification code.',
+      { extensions: { code: 'EMAIL_NOT_VERIFIED', requiresVerification: true } }
+    );
+  }
+
+  if (user.status === AccountStatus.SUSPENDED) {
+    throw new GraphQLError(
+      'Your account has been suspended. Please contact support.',
+      { extensions: { code: ErrorCode.USER_SUSPENDED } }
+    );
+  }
+
+  if (isBanActive(user)) {
+    throw new GraphQLError('Your account has been banned. Please contact support.', {
+      extensions: { code: 'ACCOUNT_BANNED' },
     });
   }
 
+  // Signing in reactivates an account its owner deactivated
+  const reactivate = user.status === AccountStatus.DEACTIVATED;
+
   // Reset failed attempts, rate limits, and update login info
   await resetRateLimit('LOGIN', normalizedEmail);
-  
-  await prisma.user.update({
+
+  const signedIn = await prisma.user.update({
     where: { id: user.id },
     data: {
       failedLoginAttempts: 0,
       lockoutUntil: null,
       lastLoginAt: new Date(),
       lastLoginIp: clientIp || 'unknown',
+      ...(reactivate && {
+        status: AccountStatus.ACTIVE,
+        deactivatedAt: null,
+        deactivationReason: null,
+      }),
     },
+    select: USER_RESPONSE_SELECT,
   });
 
   // Send login alert email (async, don't wait)
   if (clientIp && config.isProduction) {
-    sendLoginAlertEmail(user.email, user.firstName, clientIp).catch(console.error);
+    sendLoginAlertEmail(signedIn.email, signedIn.firstName, clientIp).catch(console.error);
   }
 
-  // Generate tokens
-  const tokenPayload = {
-    userId: user.id,
-    email: user.email,
-    role: user.role,
-  };
-
-  const accessToken = generateToken(tokenPayload);
-  const refreshToken = generateRefreshToken(tokenPayload);
-
-  // Store refresh token in Redis for validation and invalidation
-  await storeRefreshToken(user.id, refreshToken, {
-    deviceInfo: 'web',
-    ipAddress: clientIp,
-  });
+  const tokens = await startSession(signedIn, clientIp);
 
   return {
-    user: {
-      id: user.id,
-      email: user.email,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      phone: user.phone,
-      profilePhoto: user.profilePhoto,
-      role: user.role,
-      activeRole: user.activeRole || user.role,
-      status: user.status,
-      isEmailVerified: user.isEmailVerified,
-      createdAt: user.createdAt,
-      updatedAt: user.updatedAt,
-    },
-    accessToken,
-    refreshToken,
+    user: formatUserResponse(signedIn),
+    ...tokens,
   };
 };
 
@@ -579,11 +718,12 @@ export const forgotPassword = async (input: ForgotPasswordInput) => {
     where: { email: normalizedEmail },
   });
 
-  // Always return success to prevent email enumeration
-  if (!user) {
+  // Always return the same success to prevent email enumeration. Admin accounts
+  // reset their password with adminForgotPassword, so nothing is sent for them.
+  if (!user || isAdminRole(user.role) || user.deletedAt) {
     return {
       success: true,
-      message: 'If an account exists with this email, a password reset code has been sent.',
+      message: FORGOT_PASSWORD_MESSAGE,
     };
   }
 
@@ -606,7 +746,7 @@ export const forgotPassword = async (input: ForgotPasswordInput) => {
 
   return {
     success: true,
-    message: 'If an account exists with this email, a password reset code has been sent.',
+    message: FORGOT_PASSWORD_MESSAGE,
   };
 };
 
@@ -615,7 +755,7 @@ export const forgotPassword = async (input: ForgotPasswordInput) => {
  */
 export const resetPassword = async (input: ResetPasswordInput) => {
   const { email, otp, newPassword } = input;
-  
+
   // Validate new password strength
   const passwordValidation = passwordSchema.safeParse(newPassword);
   if (!passwordValidation.success) {
@@ -623,7 +763,7 @@ export const resetPassword = async (input: ResetPasswordInput) => {
       extensions: { code: 'VALIDATION_ERROR' },
     });
   }
-  
+
   const normalizedEmail = email.toLowerCase().trim();
 
   // Rate limiting for OTP verification
@@ -634,38 +774,27 @@ export const resetPassword = async (input: ResetPasswordInput) => {
     where: { email: normalizedEmail },
   });
 
-  if (!user) {
-    await incrementRateLimit('OTP_VERIFY', normalizedEmail);
-    throw new GraphQLError(ErrorMessage[ErrorCode.USER_NOT_FOUND], {
-      extensions: { code: ErrorCode.USER_NOT_FOUND },
-    });
-  }
+  // An unknown email, an admin account, no reset request and a wrong code all
+  // get the same error, so the response doesn't reveal whether the email is
+  // registered
+  const resetToken =
+    user && !isAdminRole(user.role) && !user.deletedAt ? user.passwordResetToken : null;
 
-  // Check if reset token exists
-  if (!user.passwordResetToken) {
-    throw new GraphQLError('No password reset request found. Please request a new one.', {
-      extensions: { code: 'RESET_NOT_FOUND' },
-    });
-  }
-
-  // Check if token expired
-  if (isOtpExpired(user.passwordResetExpiry)) {
-    throw new GraphQLError('Password reset code has expired. Please request a new one.', {
-      extensions: { code: 'RESET_EXPIRED' },
-    });
-  }
-
-  // Verify OTP
-  const isValidOtp = verifyOtp(otp, user.passwordResetToken);
-
-  if (!isValidOtp) {
+  if (!user || !resetToken || !verifyOtp(otp, resetToken)) {
     await incrementRateLimit('OTP_VERIFY', normalizedEmail);
     logSecurityEvent('AUTH_FAILURE', {
-      userId: user.id,
+      userId: user?.id,
       reason: 'Invalid password reset OTP',
     });
     throw new GraphQLError('Invalid reset code. Please try again.', {
       extensions: { code: 'INVALID_RESET_CODE' },
+    });
+  }
+
+  // Only someone holding the right code learns that it has expired
+  if (isOtpExpired(user.passwordResetExpiry)) {
+    throw new GraphQLError('Password reset code has expired. Please request a new one.', {
+      extensions: { code: 'RESET_EXPIRED' },
     });
   }
 
@@ -676,7 +805,7 @@ export const resetPassword = async (input: ResetPasswordInput) => {
   // Hash new password
   const hashedPassword = await hashPassword(newPassword);
 
-  // Update user
+  // Update user, ending every session (the timestamp keeps working while Redis is down)
   await prisma.user.update({
     where: { id: user.id },
     data: {
@@ -686,11 +815,12 @@ export const resetPassword = async (input: ResetPasswordInput) => {
       // Reset failed attempts on password change
       failedLoginAttempts: 0,
       lockoutUntil: null,
+      tokenInvalidatedAt: new Date(),
     },
   });
 
-  // Invalidate all existing tokens for this user (security measure)
-  await invalidateAllUserTokens(user.id);
+  // Revoke stored refresh tokens and reject earlier access tokens
+  await endAllSessions(user.id);
 
   return {
     success: true,
@@ -698,66 +828,78 @@ export const resetPassword = async (input: ResetPasswordInput) => {
   };
 };
 
+const refreshTokenError = (message: string) =>
+  new GraphQLError(message, {
+    extensions: { code: 'INVALID_REFRESH_TOKEN' },
+  });
+
 /**
  * Refresh access token
+ *
+ * The refresh token isn't rotated: the response has no field for a new one.
  */
 export const refreshAccessToken = async (refreshToken: string) => {
+  let payload: JWTPayload;
+
   try {
-    // First validate the token is not blacklisted
-    const storedUserId = await validateRefreshToken(refreshToken);
-    if (!storedUserId) {
-      throw new GraphQLError('Refresh token has been invalidated', {
-        extensions: { code: 'INVALID_REFRESH_TOKEN' },
-      });
-    }
-
-    const payload = verifyToken(refreshToken);
-
-    // Ensure the token belongs to the claimed user
-    if (payload.userId !== storedUserId) {
-      throw new GraphQLError('Token mismatch', {
-        extensions: { code: 'INVALID_REFRESH_TOKEN' },
-      });
-    }
-
-    // Find user to make sure they still exist and are active
-    const user = await prisma.user.findUnique({
-      where: { id: payload.userId },
-    });
-
-    if (!user || user.status !== AccountStatus.ACTIVE) {
-      throw new GraphQLError('Invalid refresh token', {
-        extensions: { code: 'INVALID_REFRESH_TOKEN' },
-      });
-    }
-
-    // Generate new access token
-    const tokenPayload = {
-      userId: user.id,
-      email: user.email,
-      role: user.role,
-    };
-
-    const accessToken = generateToken(tokenPayload);
-
-    return {
-      accessToken,
-      user: {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-        activeRole: user.activeRole || user.role,
-        status: user.status,
-      },
-    };
-  } catch (error) {
-    if (error instanceof GraphQLError) throw error;
-    throw new GraphQLError('Invalid or expired refresh token', {
-      extensions: { code: 'INVALID_REFRESH_TOKEN' },
-    });
+    payload = verifyRefreshToken(refreshToken);
+  } catch {
+    throw refreshTokenError('Invalid or expired refresh token');
   }
+
+  const record = await checkRefreshToken(refreshToken);
+
+  if (record.status === 'revoked') {
+    throw refreshTokenError('Refresh token has been invalidated');
+  }
+
+  if (record.status === 'unavailable') {
+    // Signed and unexpired; the account checks below still apply
+    console.warn(
+      `Token store unavailable: accepting a signed refresh token for user ${payload.userId}`
+    );
+  } else if (record.userId !== payload.userId) {
+    throw refreshTokenError('Token mismatch');
+  }
+
+  if (payload.iat && !(await isTokenValid(payload.userId, payload.iat, payload.iatMs))) {
+    throw refreshTokenError('Refresh token has been invalidated');
+  }
+
+  // Find user to make sure they still exist and are active
+  const user = await prisma.user.findUnique({
+    where: { id: payload.userId },
+  });
+
+  if (
+    !user ||
+    user.deletedAt ||
+    isAdminRole(user.role) ||
+    user.status !== AccountStatus.ACTIVE ||
+    isBanActive(user)
+  ) {
+    throw refreshTokenError('Invalid refresh token');
+  }
+
+  // Sessions ended by a password change or reset, deactivation, or an admin
+  if (
+    user.tokenInvalidatedAt &&
+    !isIssuedAfter(getTokenIssuedAtMs(payload), user.tokenInvalidatedAt.getTime())
+  ) {
+    throw refreshTokenError('Refresh token has been invalidated');
+  }
+
+  // Generate new access token
+  const accessToken = generateToken({
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+  });
+
+  return {
+    accessToken,
+    user: formatUserResponse(user),
+  };
 };
 
 /**
@@ -827,14 +969,11 @@ export const changePassword = async (
     });
   }
 
-  // Verify current password
-  const isValidPassword = await comparePassword(currentPassword, user.password);
-
-  if (!isValidPassword) {
-    throw new GraphQLError('Current password is incorrect', {
-      extensions: { code: 'INVALID_PASSWORD' },
-    });
-  }
+  // Verify current password (wrong attempts count toward the sign-in lockout)
+  await confirmAccountPassword(user, currentPassword, {
+    code: 'INVALID_PASSWORD',
+    message: 'Current password is incorrect',
+  });
 
   // Check if new password is same as current
   const isSamePassword = await comparePassword(newPassword, user.password);
@@ -847,17 +986,20 @@ export const changePassword = async (
   // Hash new password
   const hashedPassword = await hashPassword(newPassword);
 
-  // Update password
+  // Update password, ending every session (the timestamp keeps working while Redis is down)
   await prisma.user.update({
     where: { id: userId },
     data: {
       password: hashedPassword,
+      failedLoginAttempts: 0,
+      lockoutUntil: null,
+      tokenInvalidatedAt: new Date(),
     },
   });
 
-  // Invalidate all existing tokens for security
-  // This forces re-login on all devices after password change
-  await invalidateAllUserTokens(userId);
+  // Revoke stored refresh tokens and reject earlier access tokens: this forces
+  // re-login on all devices. Tokens issued from here on are unaffected.
+  await endAllSessions(userId);
 
   return {
     success: true,
@@ -866,13 +1008,18 @@ export const changePassword = async (
 };
 
 /**
- * Logout - invalidate refresh token
+ * Logout: revoke the access token the request was made with and, when the app
+ * passes it, the refresh token. Always succeeds.
  */
-export const logout = async (refreshToken?: string): Promise<{ success: boolean; message: string }> => {
-  if (refreshToken) {
-    await invalidateRefreshToken(refreshToken);
-  }
-  
+export const logout = async (
+  refreshToken?: string | null,
+  session?: { payload: JWTPayload; accessToken?: string | null }
+): Promise<{ success: boolean; message: string }> => {
+  await Promise.all([
+    session ? revokeAccessToken(session.payload, session.accessToken ?? undefined) : undefined,
+    refreshToken ? invalidateRefreshToken(refreshToken) : undefined,
+  ]);
+
   return {
     success: true,
     message: 'Logged out successfully.',
@@ -889,6 +1036,7 @@ const authService = {
   refreshAccessToken,
   getCurrentUser,
   changePassword,
+  confirmAccountPassword,
   logout,
   getClientIp,
 };

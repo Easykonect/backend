@@ -9,7 +9,8 @@ import { UserRole, AccountStatus, BookingStatus, PaymentStatus } from '@/constan
 /**
  * Common validation schemas
  */
-export const emailSchema = z.string().email('Invalid email address');
+// Surrounding spaces (often added by mobile keyboards and autofill) are ignored
+export const emailSchema = z.string().trim().email('Invalid email address');
 
 export const passwordSchema = z
   .string()
@@ -20,9 +21,32 @@ export const passwordSchema = z
   .regex(/[0-9]/, 'Password must contain at least one number')
   .regex(/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/, 'Password must contain at least one special character (!@#$%^&*()_+-=[]{};\':"|,.<>/?)');
 
+const PHONE_CHARACTERS = /^\+?[\d\s().-]+$/;
+const NIGERIAN_MOBILE = /^(?:\+?2340?|0)([789][01]\d{8})$/;
+const MAX_PHONE_INPUT_LENGTH = 30;
+
+/**
+ * Nigerian mobile numbers, accepted the same way by every operation: local
+ * (0803 123 4567) or international (+234 803 123 4567, 2348031234567,
+ * +234 (0) 803 123 4567). Spaces, dashes, dots and brackets may separate the
+ * digits. Returns the number as +234 followed by 10 digits, or null when it
+ * isn't a Nigerian mobile number.
+ */
+export const normalizeNigerianPhone = (phone: unknown): string | null => {
+  if (typeof phone !== 'string') return null;
+
+  const trimmed = phone.trim();
+  if (!trimmed || trimmed.length > MAX_PHONE_INPUT_LENGTH || !PHONE_CHARACTERS.test(trimmed)) {
+    return null;
+  }
+
+  const match = NIGERIAN_MOBILE.exec(trimmed.replace(/[\s().-]/g, ''));
+  return match ? `+234${match[1]}` : null;
+};
+
 export const phoneSchema = z
   .string()
-  .regex(/^\+?[1-9]\d{1,14}$/, 'Invalid phone number');
+  .refine((value) => normalizeNigerianPhone(value) !== null, 'Invalid phone number');
 
 export const objectIdSchema = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid ID');
 
@@ -63,7 +87,11 @@ export const registerUserSchema = z.object({
   password: passwordSchema,
   firstName: z.string().min(2, 'First name must be at least 2 characters'),
   lastName: z.string().min(2, 'Last name must be at least 2 characters'),
-  phone: phoneSchema.optional(),
+  // Optional: an empty string or null means no phone number
+  phone: z
+    .string()
+    .refine((value) => !value.trim() || normalizeNigerianPhone(value) !== null, 'Invalid phone number')
+    .nullish(),
 });
 
 export const registerProviderSchema = registerUserSchema.extend({

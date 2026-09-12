@@ -4,6 +4,7 @@
  */
 
 import { RateLimitConfig, getClientIp } from '@/middleware/rate-limit.middleware';
+import { config } from '@/config';
 import { NextRequest } from 'next/server';
 
 // Helper to create a mock NextRequest with headers
@@ -60,22 +61,51 @@ describe('Rate Limiting Middleware', () => {
       expect(ip).toBe('203.0.113.1');
     });
 
-    it('should use only the first IP from a list in x-forwarded-for', () => {
+    it('should use the entry added by the trusted proxy, not ones the client sent', () => {
+      // One trusted proxy (the default): the rightmost entry is the address it saw
       const req = createRequest({ 'x-forwarded-for': '203.0.113.1, 10.0.0.1, 172.16.0.1' });
       const ip = getClientIp(req);
-      expect(ip).toBe('203.0.113.1');
+      expect(ip).toBe('172.16.0.1');
     });
 
-    it('should fall back to x-real-ip when x-forwarded-for is absent', () => {
+    it('should ignore x-real-ip, which clients can set', () => {
       const req = createRequest({ 'x-real-ip': '203.0.113.2' });
       const ip = getClientIp(req);
-      expect(ip).toBe('203.0.113.2');
+      expect(ip).toBe('unknown');
     });
 
     it('should return unknown when no IP header is present', () => {
       const req = createRequest({});
       const ip = getClientIp(req);
       expect(ip).toBeTruthy(); // Should return some fallback
+    });
+
+    describe('with an edge client IP header (Render behind Cloudflare)', () => {
+      // The config object is read-only in its type; getClientIp reads it on every call
+      const security = config.security as { clientIpHeader: string };
+      const original = security.clientIpHeader;
+
+      beforeEach(() => {
+        security.clientIpHeader = 'true-client-ip';
+      });
+
+      afterEach(() => {
+        security.clientIpHeader = original;
+      });
+
+      it('should use the edge header, not X-Forwarded-For', () => {
+        // What Render forwards: anything the client sent, then the client, Cloudflare and Render
+        const req = createRequest({
+          'true-client-ip': '81.97.145.24',
+          'x-forwarded-for': '6.6.6.6, 81.97.145.24, 172.71.195.123, 10.226.90.65',
+        });
+        expect(getClientIp(req)).toBe('81.97.145.24');
+      });
+
+      it('should fall back to X-Forwarded-For when the edge header is missing', () => {
+        const req = createRequest({ 'x-forwarded-for': '203.0.113.1, 172.16.0.1' });
+        expect(getClientIp(req)).toBe('172.16.0.1');
+      });
     });
   });
 });

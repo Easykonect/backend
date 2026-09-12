@@ -19,11 +19,12 @@ jest.mock('@/lib/prisma', () => ({
 // Mock upload.service functions used internally
 jest.mock('@/services/upload.service', () => ({
   uploadMultipleFiles: jest.fn(),
-  deleteFile: jest.fn(),
+  deleteOwnedFile: jest.fn(),
+  discardUploads: jest.fn(),
 }));
 
 import prisma from '@/lib/prisma';
-import { uploadMultipleFiles, deleteFile } from '@/services/upload.service';
+import { uploadMultipleFiles, deleteOwnedFile, discardUploads } from '@/services/upload.service';
 import { uploadProviderImages, removeProviderImage } from '@/services/provider-image.service';
 
 // ==================
@@ -51,19 +52,20 @@ const mockFiles = [
 ];
 
 const mockUploadResults = [
-  { url: mockImageUrl2, publicId: 'providers/img2', format: 'jpg', bytes: 1024, resourceType: 'image' },
+  { url: mockImageUrl2, publicId: 'providers/img2', format: 'jpg', bytes: 1024, resourceType: 'image', type: 'upload' },
 ];
 
 const mockPrisma = prisma as jest.Mocked<typeof prisma>;
 const mockUploadMultipleFiles = uploadMultipleFiles as jest.Mock;
-const mockDeleteFile = deleteFile as jest.Mock;
+const mockDeleteOwnedFile = deleteOwnedFile as jest.Mock;
+const mockDiscardUploads = discardUploads as jest.Mock;
 
 // ==================
 // uploadProviderImages
 // ==================
 
 describe('uploadProviderImages', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => jest.resetAllMocks());
 
   it('should upload images and update provider', async () => {
     (mockPrisma.serviceProvider.findUnique as jest.Mock).mockResolvedValue(mockProviderEmpty);
@@ -86,6 +88,7 @@ describe('uploadProviderImages', () => {
       where: { userId: mockUserId },
       data: { images: [mockImageUrl2] },
     });
+    expect(mockDiscardUploads).not.toHaveBeenCalled();
   });
 
   it('should append to existing images', async () => {
@@ -104,11 +107,12 @@ describe('uploadProviderImages', () => {
     });
   });
 
-  it('should throw NOT_FOUND if provider does not exist', async () => {
+  it('should throw PROVIDER_NOT_FOUND if provider does not exist', async () => {
     (mockPrisma.serviceProvider.findUnique as jest.Mock).mockResolvedValue(null);
 
     await expect(uploadProviderImages(mockUserId, mockFiles)).rejects.toMatchObject({
-      extensions: { code: 'NOT_FOUND' },
+      message: 'Provider profile not found',
+      extensions: { code: 'PROVIDER_NOT_FOUND' },
     });
     expect(mockUploadMultipleFiles).not.toHaveBeenCalled();
   });
@@ -146,6 +150,15 @@ describe('uploadProviderImages', () => {
 
     await expect(uploadProviderImages(mockUserId, mockFiles)).rejects.toThrow(GraphQLError);
   });
+
+  it('should delete the uploaded files again if the gallery cannot be saved', async () => {
+    (mockPrisma.serviceProvider.findUnique as jest.Mock).mockResolvedValue(mockProviderEmpty);
+    mockUploadMultipleFiles.mockResolvedValue(mockUploadResults);
+    (mockPrisma.serviceProvider.update as jest.Mock).mockRejectedValue(new Error('write conflict'));
+
+    await expect(uploadProviderImages(mockUserId, [mockFiles[0]])).rejects.toThrow('write conflict');
+    expect(mockDiscardUploads).toHaveBeenCalledWith(mockUploadResults);
+  });
 });
 
 // ==================
@@ -153,11 +166,11 @@ describe('uploadProviderImages', () => {
 // ==================
 
 describe('removeProviderImage', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => jest.resetAllMocks());
 
-  it('should remove an image and delete from Cloudinary', async () => {
+  it('should remove the image, then delete the file from Cloudinary', async () => {
     (mockPrisma.serviceProvider.findUnique as jest.Mock).mockResolvedValue(mockProvider);
-    mockDeleteFile.mockResolvedValue(true);
+    mockDeleteOwnedFile.mockResolvedValue(true);
     (mockPrisma.serviceProvider.update as jest.Mock).mockResolvedValue({
       ...mockProvider,
       images: [],
@@ -166,20 +179,24 @@ describe('removeProviderImage', () => {
     const result = await removeProviderImage(mockUserId, mockImageUrl);
 
     expect(result).toBe(true);
-    expect(mockDeleteFile).toHaveBeenCalled();
     expect(mockPrisma.serviceProvider.update).toHaveBeenCalledWith({
       where: { userId: mockUserId },
       data: { images: [] },
     });
+    // Only files this provider uploaded are deleted; deleteOwnedFile checks that
+    expect(mockDeleteOwnedFile).toHaveBeenCalledWith(mockImageUrl, mockUserId);
+    expect((mockPrisma.serviceProvider.update as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      mockDeleteOwnedFile.mock.invocationCallOrder[0]
+    );
   });
 
-  it('should throw NOT_FOUND if provider does not exist', async () => {
+  it('should throw PROVIDER_NOT_FOUND if provider does not exist', async () => {
     (mockPrisma.serviceProvider.findUnique as jest.Mock).mockResolvedValue(null);
 
     await expect(removeProviderImage(mockUserId, mockImageUrl)).rejects.toMatchObject({
-      extensions: { code: 'NOT_FOUND' },
+      extensions: { code: 'PROVIDER_NOT_FOUND' },
     });
-    expect(mockDeleteFile).not.toHaveBeenCalled();
+    expect(mockDeleteOwnedFile).not.toHaveBeenCalled();
   });
 
   it('should throw IMAGE_NOT_FOUND if image is not in provider gallery', async () => {
@@ -190,34 +207,30 @@ describe('removeProviderImage', () => {
     ).rejects.toMatchObject({
       extensions: { code: 'IMAGE_NOT_FOUND' },
     });
-    expect(mockDeleteFile).not.toHaveBeenCalled();
+    expect(mockDeleteOwnedFile).not.toHaveBeenCalled();
   });
 
   it('should not update provider if image is not found', async () => {
     (mockPrisma.serviceProvider.findUnique as jest.Mock).mockResolvedValue(mockProvider);
 
-    try {
-      await removeProviderImage(mockUserId, 'https://other.com/image.jpg');
-    } catch {
-      // expected
-    }
+    await expect(removeProviderImage(mockUserId, 'https://other.com/image.jpg')).rejects.toThrow(GraphQLError);
 
     expect(mockPrisma.serviceProvider.update).not.toHaveBeenCalled();
   });
 
-  it('should skip Cloudinary delete if public_id cannot be extracted from URL', async () => {
-    const providerWithBadUrl = {
-      ...mockProvider,
-      images: ['https://invalid-url-no-version.com/image.jpg'],
-    };
-    (mockPrisma.serviceProvider.findUnique as jest.Mock).mockResolvedValue(providerWithBadUrl);
+  it('should still remove images whose files the provider did not upload', async () => {
+    const externalUrl = 'https://invalid-url-no-version.com/image.jpg';
+    (mockPrisma.serviceProvider.findUnique as jest.Mock).mockResolvedValue({ ...mockProvider, images: [externalUrl] });
+    mockDeleteOwnedFile.mockResolvedValue(false);
     (mockPrisma.serviceProvider.update as jest.Mock).mockResolvedValue({});
 
-    const result = await removeProviderImage(mockUserId, 'https://invalid-url-no-version.com/image.jpg');
+    const result = await removeProviderImage(mockUserId, externalUrl);
 
     expect(result).toBe(true);
-    expect(mockDeleteFile).not.toHaveBeenCalled();
-    expect(mockPrisma.serviceProvider.update).toHaveBeenCalled();
+    expect(mockPrisma.serviceProvider.update).toHaveBeenCalledWith({
+      where: { userId: mockUserId },
+      data: { images: [] },
+    });
   });
 
   it('should filter out only the removed image from the array', async () => {
@@ -226,7 +239,7 @@ describe('removeProviderImage', () => {
       images: [mockImageUrl, mockImageUrl2],
     };
     (mockPrisma.serviceProvider.findUnique as jest.Mock).mockResolvedValue(providerWithTwo);
-    mockDeleteFile.mockResolvedValue(true);
+    mockDeleteOwnedFile.mockResolvedValue(true);
     (mockPrisma.serviceProvider.update as jest.Mock).mockResolvedValue({});
 
     await removeProviderImage(mockUserId, mockImageUrl);

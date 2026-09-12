@@ -45,16 +45,14 @@ const redisOptions: RedisOptions = {
   
   // Smarter retry strategy with reduced logging
   retryStrategy: (times: number) => {
-    if (times > 10) {
-      logger.error('❌ Redis: Max retry attempts reached. Stopping reconnection.');
-      return null; // Stop retrying after 10 attempts
-    }
+    // Never give up: returning null would leave the process without Redis
+    // until it restarts. The backoff below is capped at 30 seconds.
     // Exponential backoff: 1s, 2s, 4s, 8s... up to 30 seconds
     const delay = Math.min(Math.pow(2, times) * 1000, 30000);
     
     // Only log every 5th attempt or first/last to reduce noise
-    if (times === 1 || times % 5 === 0 || times === 10) {
-      logger.warn(`🔄 Redis reconnecting in ${delay / 1000}s (attempt ${times}/10)`);
+    if (times === 1 || times % 5 === 0) {
+      logger.warn(`🔄 Redis reconnecting in ${delay / 1000}s (attempt ${times})`);
     }
     return delay;
   },
@@ -79,15 +77,53 @@ const redisOptions: RedisOptions = {
 // ===========================================
 // Main Redis Client (for general operations)
 // ===========================================
+// How long a caller waits for an in-flight connection, and for one command
+const READY_TIMEOUT_MS = 5000;
+const COMMAND_TIMEOUT_MS = 5000;
+
+/**
+ * Wait for a connecting or reconnecting client to become ready
+ */
+const waitForReady = (client: Redis): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (client.status === 'ready') return resolve();
+    const onReady = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      client.off('ready', onReady);
+      reject(new Error(`Redis is not ready (status: ${client.status})`));
+    }, READY_TIMEOUT_MS);
+    client.once('ready', onReady);
+  });
+
+/**
+ * Collect keys matching a pattern with SCAN (KEYS blocks Redis on large datasets)
+ */
+const scanKeys = async (client: Redis, pattern: string): Promise<string[]> => {
+  const keys: string[] = [];
+  let cursor = '0';
+  do {
+    const [next, batch] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+    cursor = next;
+    keys.push(...batch);
+  } while (cursor !== '0');
+  return keys;
+};
+
 class RedisClient {
   private static instance: Redis | null = null;
-  private static isConnecting = false;
 
   static getInstance(): Redis {
     if (!this.instance) {
       this.instance = new Redis(REDIS_URL, {
         ...redisOptions,
         lazyConnect: true,
+        // Fail commands during an outage instead of queueing them forever, so
+        // callers (rate limits, locks, token checks) error out quickly
+        maxRetriesPerRequest: 2,
+        commandTimeout: COMMAND_TIMEOUT_MS,
       });
 
       this.setupEventHandlers(this.instance, 'Main');
@@ -98,30 +134,28 @@ class RedisClient {
   static async connect(): Promise<Redis> {
     const client = this.getInstance();
     
-    if (this.isConnecting) {
-      // Wait for existing connection attempt
-      return new Promise((resolve) => {
-        const checkConnection = setInterval(() => {
-          if (client.status === 'ready') {
-            clearInterval(checkConnection);
-            resolve(client);
-          }
-        }, 100);
-      });
+    // A connection attempt is in flight, or ioredis is reconnecting after a
+    // drop: wait for it, with a timeout instead of polling forever
+    if (client.status !== 'ready' && client.status !== 'wait' && client.status !== 'end') {
+      await waitForReady(client);
+      return client;
     }
 
     if (client.status === 'ready') {
       return client;
     }
 
-    this.isConnecting = true;
+    // Start the lazy connection
     
     try {
       await client.connect();
-      this.isConnecting = false;
       return client;
     } catch (error) {
-      this.isConnecting = false;
+      // Another caller started connecting first
+      if (['connecting', 'connect'].includes(client.status)) {
+        await waitForReady(client);
+        return client;
+      }
       throw error;
     }
   }
@@ -303,7 +337,7 @@ export const cache = {
    */
   async delPattern(pattern: string): Promise<void> {
     const client = await RedisClient.connect();
-    const keys = await client.keys(pattern);
+    const keys = await scanKeys(client, pattern);
     
     if (keys.length > 0) {
       await client.del(...keys);
@@ -348,7 +382,9 @@ export const cache = {
 // User Presence Helpers
 // ===========================================
 export const presence = {
-  ONLINE_TTL: 300, // 5 minutes - user is considered online if active within this time
+  // A user counts as online for 3 minutes after connecting or sending `heartbeat`. Apps send
+  // `heartbeat` every 60 seconds while in the foreground; a user who stops expires on their own.
+  ONLINE_TTL: 180,
 
   /**
    * Mark a user as online
@@ -438,7 +474,7 @@ export const typing = {
   async getTypingUsers(conversationId: string): Promise<string[]> {
     const client = await RedisClient.connect();
     const pattern = `typing:${conversationId}:*`;
-    const keys = await client.keys(pattern);
+    const keys = await scanKeys(client, pattern);
     
     // Extract user IDs from keys
     return keys.map(key => key.split(':')[2]);
@@ -448,83 +484,215 @@ export const typing = {
 // ===========================================
 // Rate Limiting Helpers
 // ===========================================
+
+/**
+ * Sliding window on a sorted set in one atomic step: drop entries older than the
+ * window, count the rest, and add `cost` entries only if they fit under the limit.
+ * KEYS[1] = key; ARGV = limit, window (ms), now (ms), cost, unique member prefix.
+ * Returns {1 allowed | 0 limited, remaining, ms until enough entries leave the window}.
+ */
+const SLIDING_WINDOW_SCRIPT = `
+local limit = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local cost = tonumber(ARGV[4])
+
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - window)
+local count = redis.call('ZCARD', KEYS[1])
+
+if count + cost <= limit then
+  for i = 1, cost do
+    redis.call('ZADD', KEYS[1], now, ARGV[5] .. ':' .. i)
+  end
+  redis.call('PEXPIRE', KEYS[1], window)
+  local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+  return {1, limit - count - cost, tonumber(oldest[2]) + window - now}
+end
+
+local reset = window
+if cost <= limit then
+  -- The request fits once this many of the oldest entries have left the window
+  local index = count + cost - limit - 1
+  local blocking = redis.call('ZRANGE', KEYS[1], index, index, 'WITHSCORES')
+  reset = tonumber(blocking[2]) + window - now
+end
+return {0, math.max(limit - count, 0), reset}
+`;
+
+type RateLimitResult = { allowed: boolean; remaining: number; resetIn: number };
+
+// Fallback while Redis is unavailable: fixed windows in this process, capped in size
+const RATE_LIMIT_MEMORY_MAX_KEYS = 10000;
+// During an outage, try Redis again at most this often; other checks go straight to memory
+const RATE_LIMIT_REDIS_RETRY_MS = 5000;
+
+const memoryWindows = new Map<string, { count: number; resetAt: number }>();
+let slidingWindowSha: string | null = null;
+let rateLimitRedisDown = false;
+let lastRateLimitRedisAttempt = 0;
+
+const toResetSeconds = (ms: number): number => Math.max(1, Math.ceil(ms / 1000));
+
+const runSlidingWindow = async (
+  client: Redis,
+  key: string,
+  args: (string | number)[]
+): Promise<unknown> => {
+  if (slidingWindowSha) {
+    try {
+      return await client.evalsha(slidingWindowSha, 1, key, ...args);
+    } catch (error) {
+      // Redis restarted or its script cache was flushed: load the script again
+      if (!(error instanceof Error && error.message.includes('NOSCRIPT'))) throw error;
+    }
+  }
+  slidingWindowSha = String(await client.script('LOAD', SLIDING_WINDOW_SCRIPT));
+  return client.evalsha(slidingWindowSha, 1, key, ...args);
+};
+
+const pruneMemoryWindows = (now: number): void => {
+  for (const [key, window] of memoryWindows) {
+    if (window.resetAt <= now) memoryWindows.delete(key);
+  }
+  // Still full: drop the oldest windows (a Map iterates in insertion order)
+  for (const key of memoryWindows.keys()) {
+    if (memoryWindows.size < RATE_LIMIT_MEMORY_MAX_KEYS) break;
+    memoryWindows.delete(key);
+  }
+};
+
+const checkInMemory = (key: string, limit: number, windowMs: number, cost: number): RateLimitResult => {
+  const now = Date.now();
+  let window = memoryWindows.get(key);
+  if (!window || window.resetAt <= now) {
+    memoryWindows.delete(key);
+    if (memoryWindows.size >= RATE_LIMIT_MEMORY_MAX_KEYS) pruneMemoryWindows(now);
+    window = { count: 0, resetAt: now + windowMs };
+    memoryWindows.set(key, window);
+  }
+
+  const resetIn = toResetSeconds(window.resetAt - now);
+  if (window.count + cost > limit) {
+    return { allowed: false, remaining: Math.max(limit - window.count, 0), resetIn };
+  }
+  window.count += cost;
+  return { allowed: true, remaining: limit - window.count, resetIn };
+};
+
 export const rateLimit = {
   /**
-   * Check and increment rate limit
-   * Returns true if within limit, false if exceeded
+   * Count `cost` requests (default 1) against `key`, allowing at most `limit` per
+   * sliding window of `windowSeconds`, in one atomic Redis script. While Redis is
+   * unavailable the same limits are enforced in this process's memory.
+   * resetIn is in seconds (at least 1): when the key has room again.
    */
   async check(
-    key: string, 
-    limit: number, 
-    windowSeconds: number
-  ): Promise<{ allowed: boolean; remaining: number; resetIn: number }> {
-    const client = await RedisClient.connect();
-    const now = Date.now();
-    const windowStart = now - (windowSeconds * 1000);
-    
-    // Use sorted set for sliding window rate limiting
+    key: string,
+    limit: number,
+    windowSeconds: number,
+    cost = 1
+  ): Promise<RateLimitResult> {
     const redisKey = `ratelimit:${key}`;
-    
-    // Remove old entries
-    await client.zremrangebyscore(redisKey, 0, windowStart);
-    
-    // Count current requests
-    const count = await client.zcard(redisKey);
-    
-    if (count >= limit) {
-      // Get the oldest entry to calculate reset time
-      const oldest = await client.zrange(redisKey, 0, 0, 'WITHSCORES');
-      const resetIn = oldest.length > 1 
-        ? Math.ceil((parseInt(oldest[1]) + windowSeconds * 1000 - now) / 1000)
-        : windowSeconds;
-      
-      return { allowed: false, remaining: 0, resetIn };
+    const windowMs = windowSeconds * 1000;
+    const now = Date.now();
+
+    if (!rateLimitRedisDown || now - lastRateLimitRedisAttempt >= RATE_LIMIT_REDIS_RETRY_MS) {
+      lastRateLimitRedisAttempt = now;
+      try {
+        const client = await RedisClient.connect();
+        const reply = await runSlidingWindow(client, redisKey, [
+          limit,
+          windowMs,
+          now,
+          cost,
+          `${now}-${Math.random()}`,
+        ]);
+        if (!Array.isArray(reply) || reply.length !== 3) {
+          throw new Error('Unexpected reply from the rate limit script');
+        }
+        const [allowed, remaining, resetMs] = reply.map(Number);
+
+        if (rateLimitRedisDown) {
+          rateLimitRedisDown = false;
+          logger.info('✅ Rate limiting is using Redis again');
+        }
+        return { allowed: allowed === 1, remaining, resetIn: toResetSeconds(resetMs) };
+      } catch (error) {
+        if (!rateLimitRedisDown) {
+          rateLimitRedisDown = true;
+          logger.error(
+            '❌ Redis unavailable for rate limiting; enforcing limits in memory until it recovers:',
+            error instanceof Error ? error.message : error
+          );
+        }
+      }
     }
-    
-    // Add current request
-    await client.zadd(redisKey, now, `${now}-${Math.random()}`);
-    await client.expire(redisKey, windowSeconds);
-    
-    return { 
-      allowed: true, 
-      remaining: limit - count - 1, 
-      resetIn: windowSeconds 
-    };
+
+    return checkInMemory(redisKey, limit, windowMs, cost);
   },
 };
 
 // ===========================================
 // Session Management Helpers
 // ===========================================
+type RedisTransaction = { exec(): Promise<[error: Error | null, result: unknown][] | null> };
+
+/** Run a MULTI transaction, failing when it was aborted or any command in it failed */
+const execTransaction = async (transaction: RedisTransaction): Promise<unknown[]> => {
+  const results = await transaction.exec();
+  if (!results) throw new Error('Redis transaction was aborted');
+  return results.map(([error, result]) => {
+    if (error) throw error;
+    return result;
+  });
+};
+
 export const session = {
-  SESSION_TTL: 86400 * 7, // 7 days
+  // Socket records last 3 minutes. The server holding a socket refreshes its record every
+  // minute while it's connected, so records of sockets lost in a restart or crash expire
+  // on their own and can't keep a user from going offline.
+  SESSION_TTL: 180,
 
   /**
-   * Store socket session for a user
+   * Key of a user's sockets: a sorted set scored by when each socket's record expires (ms).
+   * The earlier `socket:user:<id>` sets had no per-socket expiry; they're no longer written.
+   */
+  socketsKey(userId: string): string {
+    return `sockets:user:${userId}`;
+  },
+
+  /**
+   * Store or refresh a socket's record for a user
    */
   async setSocket(userId: string, socketId: string): Promise<void> {
     const client = await RedisClient.connect();
-    const key = `socket:user:${userId}`;
-    await client.sadd(key, socketId);
-    await client.expire(key, this.SESSION_TTL);
+    const key = this.socketsKey(userId);
+    await execTransaction(
+      client
+        .multi()
+        .zadd(key, Date.now() + this.SESSION_TTL * 1000, socketId)
+        .expire(key, this.SESSION_TTL)
+    );
   },
 
   /**
-   * Get all socket IDs for a user
+   * Get the IDs of a user's sockets whose records haven't expired
    */
   async getSockets(userId: string): Promise<string[]> {
     const client = await RedisClient.connect();
-    const key = `socket:user:${userId}`;
-    return client.smembers(key);
+    const key = this.socketsKey(userId);
+    const [, members] = await execTransaction(
+      client.multi().zremrangebyscore(key, '-inf', Date.now()).zrange(key, 0, -1)
+    );
+    return Array.isArray(members) ? members.map(String) : [];
   },
 
   /**
-   * Remove a socket session
+   * Remove a socket's record
    */
   async removeSocket(userId: string, socketId: string): Promise<void> {
     const client = await RedisClient.connect();
-    const key = `socket:user:${userId}`;
-    await client.srem(key, socketId);
+    await client.zrem(this.socketsKey(userId), socketId);
   },
 
   /**
@@ -555,8 +723,8 @@ export const session = {
     if (sockets.length > 0) {
       await Promise.all(sockets.map(socketId => client.del(`socket:${socketId}`)));
     }
-    
-    await client.del(`socket:user:${userId}`);
+
+    await client.del(this.socketsKey(userId), `socket:user:${userId}`);
   },
 };
 

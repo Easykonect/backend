@@ -1,19 +1,13 @@
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
-import { uploadMultipleFiles, deleteFile } from './upload.service';
+import { uploadMultipleFiles, deleteOwnedFile, discardUploads } from './upload.service';
 
-/**
- * Extract Cloudinary public_id from URL
- */
-const extractPublicId = (url: string): string | null => {
-  try {
-    const regex = /\/v\d+\/(.+)\.\w+$/;
-    const match = url.match(regex);
-    return match ? match[1] : null;
-  } catch {
-    return null;
-  }
-};
+const MAX_GALLERY_IMAGES = 10;
+
+const providerNotFound = () =>
+  new GraphQLError('Provider profile not found', {
+    extensions: { code: 'PROVIDER_NOT_FOUND' },
+  });
 
 /**
  * Upload provider gallery images
@@ -27,29 +21,32 @@ export const uploadProviderImages = async (
   });
 
   if (!provider) {
-    throw new GraphQLError('Provider profile not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw providerNotFound();
   }
 
-  const maxImages = 10;
   const currentCount = provider.images.length;
-  if (currentCount + files.length > maxImages) {
+  if (currentCount + files.length > MAX_GALLERY_IMAGES) {
     throw new GraphQLError(
-      `Maximum ${maxImages} images allowed. You have ${currentCount} and are trying to add ${files.length}.`,
+      `Maximum ${MAX_GALLERY_IMAGES} images allowed. You have ${currentCount} and are trying to add ${files.length}.`,
       { extensions: { code: 'MAX_IMAGES_EXCEEDED' } }
     );
   }
 
-  const results = await uploadMultipleFiles(files, 'service', userId, maxImages);
+  const results = await uploadMultipleFiles(files, 'service', userId, MAX_GALLERY_IMAGES);
   const newUrls = results.map((r) => r.url);
 
-  await prisma.serviceProvider.update({
-    where: { userId },
-    data: {
-      images: [...provider.images, ...newUrls],
-    },
-  });
+  try {
+    await prisma.serviceProvider.update({
+      where: { userId },
+      data: {
+        images: [...provider.images, ...newUrls],
+      },
+    });
+  } catch (error) {
+    // Don't leave files on Cloudinary that nothing refers to
+    await discardUploads(results);
+    throw error;
+  }
 
   return newUrls;
 };
@@ -66,21 +63,13 @@ export const removeProviderImage = async (
   });
 
   if (!provider) {
-    throw new GraphQLError('Provider profile not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw providerNotFound();
   }
 
   if (!provider.images.includes(imageUrl)) {
     throw new GraphQLError('Image not found in provider gallery', {
       extensions: { code: 'IMAGE_NOT_FOUND' },
     });
-  }
-
-  // Delete from Cloudinary
-  const publicId = extractPublicId(imageUrl);
-  if (publicId) {
-    await deleteFile(publicId);
   }
 
   // Remove from provider
@@ -90,6 +79,9 @@ export const removeProviderImage = async (
       images: provider.images.filter((img) => img !== imageUrl),
     },
   });
+
+  // Delete from Cloudinary (only files this provider uploaded)
+  await deleteOwnedFile(imageUrl, userId);
 
   return true;
 };

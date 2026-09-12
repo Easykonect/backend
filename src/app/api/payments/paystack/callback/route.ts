@@ -6,11 +6,12 @@
  *   non-http(s) URL (e.g. "easykonnect://..."). When a native app passes
  *   `returnDeepLink` to `initializePayment`, the backend tells Paystack to
  *   redirect HERE (HTTPS, allowed) instead. This route then:
- *     1. Verifies the payment with Paystack (idempotent, also runs the
- *        Payment.status -> COMPLETED + Booking.status -> IN_PROGRESS update,
- *        in case the webhook hasn't landed yet).
+ *     1. Verifies the payment (idempotent, and applies it to the booking in
+ *        case the webhook hasn't landed yet). Our verification, not
+ *        Paystack's raw status, decides what the app is told.
  *     2. Recovers the original `returnDeepLink` from Paystack's transaction
- *        metadata (we stored it at initialize time).
+ *        metadata (we stored it at initialize time), and only follows it if
+ *        it leads into the app or to our own site.
  *     3. Returns a tiny HTML page that immediately navigates the user-agent
  *        to the deep link, dropping the user back into the app.
  *
@@ -22,8 +23,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyPayment } from '@/services/payment.service';
 import * as paystack from '@/lib/paystack';
 import { config } from '@/config';
+import { isAllowedReturnLink } from '@/lib/return-link';
 
 export const dynamic = 'force-dynamic';
+
+// Our payment references: letters, digits, dashes and underscores
+const REFERENCE_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
 
 function escapeHtml(input: string): string {
   return input
@@ -98,7 +103,8 @@ function renderBouncePage(deepLink: string, fallbackHref: string, status: 'succe
 
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
-  const reference = url.searchParams.get('reference') || url.searchParams.get('trxref') || '';
+  const rawReference = url.searchParams.get('reference') || url.searchParams.get('trxref') || '';
+  const reference = REFERENCE_PATTERN.test(rawReference) ? rawReference : '';
 
   // Default fallback if anything below fails: send the user to the frontend.
   const frontendFallback = `${config.platform.frontendUrl}/payment/callback${
@@ -115,30 +121,28 @@ export async function GET(request: NextRequest) {
   let returnDeepLink: string | null = null;
   let paymentStatus: 'success' | 'failed' = 'failed';
 
-  // 1. Pull metadata from Paystack so we know where to bounce the user.
-  //    We do this even if our local verify fails so the app still gets the
-  //    reference and can decide what to show.
+  // 1. Verify and apply the payment before the app reopens (idempotent —
+  //    webhook firing later is safe). Its result is what the app is told.
   try {
-    const verifyResp = await paystack.verifyTransaction(reference);
-    const meta = verifyResp?.data?.metadata as Record<string, any> | undefined;
-    if (meta && typeof meta.returnDeepLink === 'string' && meta.returnDeepLink.length > 0) {
-      returnDeepLink = meta.returnDeepLink;
-    }
-    if (verifyResp?.data?.status === 'success') {
-      paymentStatus = 'success';
-    }
-  } catch (err) {
-    console.error('Paystack callback bridge: verifyTransaction failed', err);
-  }
-
-  // 2. Run our own verifyPayment so Payment + Booking statuses are updated
-  //    before the app reopens (idempotent — webhook firing later is safe).
-  try {
-    await verifyPayment(reference);
+    const result = await verifyPayment(reference);
+    paymentStatus = result.verified ? 'success' : 'failed';
   } catch (err) {
     console.error('Paystack callback bridge: verifyPayment failed', err);
     // Continue — bouncing back to the app is more important than
     // surfacing this error here. The webhook will retry.
+  }
+
+  // 2. Pull metadata from Paystack so we know where to bounce the user.
+  //    We do this even if our verify failed so the app still gets the
+  //    reference and can decide what to show.
+  try {
+    const verifyResp = await paystack.verifyTransaction(reference);
+    const link = (verifyResp?.data?.metadata as Record<string, unknown> | undefined)?.returnDeepLink;
+    if (typeof link === 'string' && isAllowedReturnLink(link)) {
+      returnDeepLink = link;
+    }
+  } catch (err) {
+    console.error('Paystack callback bridge: verifyTransaction failed', err);
   }
 
   // 3. Build the deep link to bounce to. If we couldn't recover one from

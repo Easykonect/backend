@@ -58,31 +58,39 @@ const NOSQL_INJECTION_PATTERNS = [
 // ==========================================
 
 /**
- * Strict sanitization - removes ALL HTML tags
+ * Plain text for storage. HTML tags are removed and `<` `>` stay escaped, so the
+ * text can never form markup wherever it's shown. Everything else (&, quotes) is
+ * stored as typed, so "Hair & Makeup" doesn't come back as "Hair &amp; Makeup".
+ */
+const toPlainText = (input: string): string =>
+  sanitizeHtml(input.trim(), {
+    allowedTags: [],
+    allowedAttributes: {},
+    disallowedTagsMode: 'discard',
+  })
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&#x27;/g, "'")
+    .replace(/&amp;/g, '&');
+
+/**
+ * Strict sanitization - plain text, no HTML
  * Use for: names, titles, single-line inputs
  */
 export const sanitizeStrict = (input: string): string => {
   if (!input || typeof input !== 'string') return '';
-  
-  return sanitizeHtml(input.trim(), {
-    allowedTags: [],
-    allowedAttributes: {},
-    disallowedTagsMode: 'recursiveEscape',
-  });
+
+  return toPlainText(input);
 };
 
 /**
- * Basic sanitization - allows basic formatting tags
+ * Basic sanitization - plain text, no HTML. The apps show user text as text,
+ * so formatting tags aren't kept.
  * Use for: descriptions, comments, messages
  */
 export const sanitizeBasic = (input: string): string => {
   if (!input || typeof input !== 'string') return '';
-  
-  return sanitizeHtml(input.trim(), {
-    allowedTags: ['b', 'i', 'em', 'strong', 'p', 'br', 'ul', 'ol', 'li'],
-    allowedAttributes: {},
-    disallowedTagsMode: 'recursiveEscape',
-  });
+
+  return toPlainText(input);
 };
 
 /**
@@ -248,22 +256,23 @@ export const validateEmail = (email: string): string => {
   return sanitized;
 };
 
+import { normalizeNigerianPhone } from '@/utils/validation';
+
 /**
- * Validate phone number (Nigerian format)
+ * Validate a Nigerian mobile number and return it as +234 followed by 10 digits.
+ * Accepts the local (0803 123 4567) and international (+234 803 123 4567) forms,
+ * with spaces, dashes, dots or brackets between the digits, the same as register.
  */
 export const validatePhone = (phone: string): string => {
-  const sanitized = phone.replace(/[^0-9+]/g, '');
-  
-  // Nigerian phone formats: 08012345678, +2348012345678, 2348012345678
-  const nigerianPhoneRegex = /^(\+?234|0)[789][01]\d{8}$/;
-  
-  if (!nigerianPhoneRegex.test(sanitized)) {
+  const normalized = normalizeNigerianPhone(phone);
+
+  if (!normalized) {
     throw new GraphQLError('Invalid Nigerian phone number', {
       extensions: { code: 'INVALID_PHONE' },
     });
   }
-  
-  return sanitized;
+
+  return normalized;
 };
 
 /**
@@ -308,8 +317,9 @@ export const validateName = (name: string, fieldName: string = 'name'): string =
     });
   }
   
-  // Allow letters, numbers, spaces, hyphens, apostrophes, periods
-  if (!/^[\p{L}\p{N}\s\-'.]+$/u.test(sanitized)) {
+  // Allow letters (with combining accents, as in Yoruba names), numbers, spaces,
+  // hyphens, straight and curly apostrophes, periods
+  if (!/^[\p{L}\p{M}\p{N}\s\-'’.]+$/u.test(sanitized)) {
     throw new GraphQLError(`${fieldName} contains invalid characters`, {
       extensions: { code: 'INVALID_INPUT' },
     });
@@ -395,7 +405,7 @@ export const validateRating = (rating: number): number => {
 };
 
 /**
- * Validate amount (positive number)
+ * Validate amount (a number greater than 0)
  */
 export const validateAmount = (amount: number, fieldName: string = 'amount'): number => {
   if (typeof amount !== 'number' || isNaN(amount)) {
@@ -403,8 +413,8 @@ export const validateAmount = (amount: number, fieldName: string = 'amount'): nu
       extensions: { code: 'INVALID_INPUT' },
     });
   }
-  
-  if (amount < 0) {
+
+  if (amount <= 0) {
     throw new GraphQLError(`${fieldName} must be positive`, {
       extensions: { code: 'INVALID_INPUT' },
     });
@@ -654,51 +664,84 @@ export const enforceRateLimit = async (
 // Session/Token Invalidation
 // ==========================================
 
+// Stored timestamps below this are whole seconds (written before millisecond precision)
+const MILLISECOND_TIMESTAMP_MIN = 1e12;
+
 /**
  * Invalidate all tokens for a user (on password change, logout all, etc.)
- * Stores a "tokens invalid before" timestamp
+ * Stores a "tokens invalid before" timestamp in milliseconds. Callers also set
+ * the account's tokenInvalidatedAt, the durable record, so a Redis failure is
+ * logged instead of failing the change that ends the sessions.
  */
 export const invalidateAllUserTokens = async (userId: string): Promise<void> => {
   const key = `user:tokens_invalid_before:${userId}`;
-  const now = Math.floor(Date.now() / 1000);
   const redis = getRedis();
-  
+
   try {
-    // Set the timestamp - tokens issued before this are invalid
-    // Keep for 30 days (longer than any token lifetime)
-    await redis.setex(key, 30 * 24 * 60 * 60, now.toString());
+    // Tokens issued before this are invalid. Keep for 30 days (longer than any token lifetime)
+    await redis.setex(key, 30 * 24 * 60 * 60, Date.now().toString());
   } catch (error) {
     console.error('Failed to invalidate user tokens:', error);
-    throw new GraphQLError('Failed to invalidate sessions', {
-      extensions: { code: 'INTERNAL_ERROR' },
-    });
   }
 };
 
 /**
+ * Whether a token issued at `issuedAtMs` came after sessions were ended at
+ * `cutoffMs`, so it's still usable. Millisecond precision keeps a token issued
+ * right after a password change valid.
+ */
+export const isIssuedAfter = (issuedAtMs: number | null, cutoffMs: number): boolean =>
+  issuedAtMs !== null && issuedAtMs > cutoffMs;
+
+/**
  * Check if a token was issued before the user's invalidation timestamp
  * Returns true if token is valid (not invalidated)
+ *
+ * @param tokenIssuedAt the token's `iat`, in seconds
+ * @param tokenIssuedAtMs the token's `iatMs`, when it has one
  */
-export const isTokenValid = async (userId: string, tokenIssuedAt: number): Promise<boolean> => {
+export const isTokenValid = async (
+  userId: string,
+  tokenIssuedAt: number,
+  tokenIssuedAtMs?: number
+): Promise<boolean> => {
   const key = `user:tokens_invalid_before:${userId}`;
   const redis = getRedis();
-  
+
   try {
     const invalidBefore = await redis.get(key);
     if (!invalidBefore) {
       // No invalidation timestamp, token is valid
       return true;
     }
-    
-    const invalidBeforeTimestamp = parseInt(invalidBefore, 10);
-    // Token is valid if it was issued AFTER the invalidation timestamp
-    return tokenIssuedAt > invalidBeforeTimestamp;
+
+    const stored = Number(invalidBefore);
+    if (!Number.isFinite(stored)) {
+      return true;
+    }
+
+    // A whole-second timestamp ends every token issued during that second, as it always did
+    const cutoffMs = stored < MILLISECOND_TIMESTAMP_MIN ? stored * 1000 + 999 : stored;
+
+    return isIssuedAfter(tokenIssuedAtMs ?? tokenIssuedAt * 1000, cutoffMs);
   } catch (error) {
     console.error('Failed to check token validity:', error);
     // On error, consider token valid (fail open)
     return true;
   }
 };
+
+/**
+ * Whether a ban is currently in force (bannedUntil null = permanent)
+ */
+export const isBanActive = (account: { bannedAt: Date | null; bannedUntil: Date | null }): boolean =>
+  Boolean(account.bannedAt) && (!account.bannedUntil || account.bannedUntil > new Date());
+
+/**
+ * Whether a restriction is currently in force (restrictedUntil null = permanent)
+ */
+export const isRestrictionActive = (account: { restrictedAt: Date | null; restrictedUntil: Date | null }): boolean =>
+  Boolean(account.restrictedAt) && (!account.restrictedUntil || account.restrictedUntil > new Date());
 
 // ==========================================
 // Security Logging
@@ -781,3 +824,34 @@ const securityUtils = {
 };
 
 export default securityUtils;
+
+/**
+ * Validate the name of a business, service, category or place. Same rules as
+ * validateName, plus the punctuation these names use: & , / ( ) and curly
+ * apostrophes, so "Hair & Makeup", "AC/Fridge Repair" and "Ikeja, Lagos" pass.
+ * Person names keep validateName.
+ */
+export const validateBusinessName = (name: string, fieldName: string = 'name'): string => {
+  const sanitized = sanitizeStrict(name);
+
+  if (!sanitized || sanitized.length < 2) {
+    throw new GraphQLError(`${fieldName} must be at least 2 characters`, {
+      extensions: { code: 'INVALID_INPUT' },
+    });
+  }
+
+  if (sanitized.length > MAX_LENGTHS.NAME) {
+    throw new GraphQLError(`${fieldName} too long (max ${MAX_LENGTHS.NAME} characters)`, {
+      extensions: { code: 'INVALID_INPUT' },
+    });
+  }
+
+  // Letters may carry combining accents (Yoruba ọ̀ has no single-character form)
+  if (!/^[\p{L}\p{M}\p{N}\s\-'‘’.&,/()]+$/u.test(sanitized)) {
+    throw new GraphQLError(`${fieldName} contains invalid characters`, {
+      extensions: { code: 'INVALID_INPUT' },
+    });
+  }
+
+  return sanitized;
+};

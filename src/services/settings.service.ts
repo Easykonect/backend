@@ -9,15 +9,18 @@
  * - Email notification preferences
  * - Locale settings (language, timezone, currency)
  * - Privacy settings
+ * - Deactivating and reactivating the account
  */
 
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
+import { validateText } from '@/utils/security';
 import {
   registerPushToken,
   unregisterPushToken,
   updatePushPreference,
 } from '@/services/push.service';
+import { endAllSessions } from '@/services/token.service';
 
 // ==================
 // Default settings shape
@@ -45,6 +48,25 @@ const DEFAULT_SETTINGS = {
   showProfileToPublic: true,
   showPhoneToProviders: false,
 } as const;
+
+type SettingsValues = {
+  -readonly [K in keyof typeof DEFAULT_SETTINGS]: (typeof DEFAULT_SETTINGS)[K] extends boolean
+    ? boolean
+    : string;
+};
+
+/**
+ * Fields for updateMySettings. A missing or null field keeps its current value.
+ */
+export type UpdateSettingsInput = {
+  [K in keyof SettingsValues]?: SettingsValues[K] | null;
+};
+
+const LANGUAGE_PATTERN = /^[a-z]{2}(-[A-Z]{2})?$/;
+const CURRENCY_PATTERN = /^[A-Z]{3}$/;
+const TIMEZONE_PATTERN = /^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/;
+const MAX_TIMEZONE_LENGTH = 64;
+const MAX_DEACTIVATION_REASON_LENGTH = 500;
 
 // ==================
 // Helpers
@@ -74,20 +96,67 @@ const upsertSettings = async (userId: string) => {
   });
 };
 
+const validationError = (message: string) =>
+  new GraphQLError(message, { extensions: { code: 'VALIDATION_ERROR' } });
+
+/**
+ * Whether this is an IANA time zone name the server can use (payout scheduling
+ * reads it)
+ */
+const isValidTimeZone = (timeZone: string): boolean => {
+  if (timeZone.length > MAX_TIMEZONE_LENGTH || !TIMEZONE_PATTERN.test(timeZone)) {
+    return false;
+  }
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+type SettingsRecord = SettingsValues & { id: string; updatedAt: Date };
+
+const formatSettings = (settings: SettingsRecord) => ({
+  id: settings.id,
+  // Push / in-app
+  notifyBookingUpdates: settings.notifyBookingUpdates,
+  notifyMessages: settings.notifyMessages,
+  notifyReviews: settings.notifyReviews,
+  notifyPromotions: settings.notifyPromotions,
+  notifyDisputeUpdates: settings.notifyDisputeUpdates,
+  notifyProviderVerification: settings.notifyProviderVerification,
+  // Email
+  emailBookingUpdates: settings.emailBookingUpdates,
+  emailMessages: settings.emailMessages,
+  emailReviews: settings.emailReviews,
+  emailPromotions: settings.emailPromotions,
+  emailNewsletters: settings.emailNewsletters,
+  // Locale
+  language: settings.language,
+  timezone: settings.timezone,
+  currency: settings.currency,
+  // Privacy
+  showProfileToPublic: settings.showProfileToPublic,
+  showPhoneToProviders: settings.showPhoneToProviders,
+  updatedAt: settings.updatedAt.toISOString(),
+});
+
 // ==================
 // Push Controls
 // ==================
 
 /**
  * Enable push notifications for the current device
- * Requires a OneSignal Player ID (from the mobile SDK)
+ * Requires a OneSignal Player ID (from the mobile SDK). This is the user turning
+ * push on, so it also undoes an earlier switch-off.
  */
 export const enablePushNotifications = async (
   userId: string,
   playerId: string
 ) => {
   await assertUserExists(userId);
-  return registerPushToken(userId, playerId);
+  return registerPushToken(userId, playerId, { enable: true });
 };
 
 /**
@@ -133,80 +202,33 @@ export const getMySettings = async (userId: string) => {
   await assertUserExists(userId);
   const settings = await upsertSettings(userId);
 
-  return {
-    id: settings.id,
-    // Push / in-app
-    notifyBookingUpdates: settings.notifyBookingUpdates,
-    notifyMessages: settings.notifyMessages,
-    notifyReviews: settings.notifyReviews,
-    notifyPromotions: settings.notifyPromotions,
-    notifyDisputeUpdates: settings.notifyDisputeUpdates,
-    notifyProviderVerification: settings.notifyProviderVerification,
-    // Email
-    emailBookingUpdates: settings.emailBookingUpdates,
-    emailMessages: settings.emailMessages,
-    emailReviews: settings.emailReviews,
-    emailPromotions: settings.emailPromotions,
-    emailNewsletters: settings.emailNewsletters,
-    // Locale
-    language: settings.language,
-    timezone: settings.timezone,
-    currency: settings.currency,
-    // Privacy
-    showProfileToPublic: settings.showProfileToPublic,
-    showPhoneToProviders: settings.showPhoneToProviders,
-    updatedAt: settings.updatedAt.toISOString(),
-  };
+  return formatSettings(settings);
 };
 
 /**
  * Update notification and account settings
  */
-export const updateMySettings = async (
-  userId: string,
-  input: {
-    // Push / in-app
-    notifyBookingUpdates?: boolean;
-    notifyMessages?: boolean;
-    notifyReviews?: boolean;
-    notifyPromotions?: boolean;
-    notifyDisputeUpdates?: boolean;
-    notifyProviderVerification?: boolean;
-    // Email
-    emailBookingUpdates?: boolean;
-    emailMessages?: boolean;
-    emailReviews?: boolean;
-    emailPromotions?: boolean;
-    emailNewsletters?: boolean;
-    // Locale
-    language?: string;
-    timezone?: string;
-    currency?: string;
-    // Privacy
-    showProfileToPublic?: boolean;
-    showPhoneToProviders?: boolean;
-  }
-) => {
+export const updateMySettings = async (userId: string, input: UpdateSettingsInput) => {
   await assertUserExists(userId);
 
-  // Validate language if provided
-  if (input.language && !/^[a-z]{2}(-[A-Z]{2})?$/.test(input.language)) {
-    throw new GraphQLError('Invalid language code. Use ISO 639-1 format (e.g. "en", "fr")', {
-      extensions: { code: 'VALIDATION_ERROR' },
-    });
-  }
-
-  // Validate currency if provided (ISO 4217 — 3 uppercase letters)
-  if (input.currency && !/^[A-Z]{3}$/.test(input.currency)) {
-    throw new GraphQLError('Invalid currency code. Use ISO 4217 format (e.g. "NGN", "USD")', {
-      extensions: { code: 'VALIDATION_ERROR' },
-    });
-  }
-
-  // Strip undefined keys so we only update what was passed
+  // Only known fields that were sent with a value; null keeps the current value
   const data = Object.fromEntries(
-    Object.entries(input).filter(([, v]) => v !== undefined)
-  );
+    Object.entries(input).filter(
+      ([key, value]) => key in DEFAULT_SETTINGS && value !== undefined && value !== null
+    )
+  ) as Partial<SettingsValues>;
+
+  if (data.language !== undefined && !LANGUAGE_PATTERN.test(data.language)) {
+    throw validationError('Invalid language code. Use ISO 639-1 format (e.g. "en", "fr")');
+  }
+
+  if (data.timezone !== undefined && !isValidTimeZone(data.timezone)) {
+    throw validationError('Invalid timezone. Use an IANA time zone name (e.g. "Africa/Lagos")');
+  }
+
+  if (data.currency !== undefined && !CURRENCY_PATTERN.test(data.currency)) {
+    throw validationError('Invalid currency code. Use ISO 4217 format (e.g. "NGN", "USD")');
+  }
 
   const settings = await prisma.userSettings.upsert({
     where: { userId },
@@ -217,26 +239,7 @@ export const updateMySettings = async (
   return {
     success: true,
     message: 'Settings updated successfully',
-    settings: {
-      id: settings.id,
-      notifyBookingUpdates: settings.notifyBookingUpdates,
-      notifyMessages: settings.notifyMessages,
-      notifyReviews: settings.notifyReviews,
-      notifyPromotions: settings.notifyPromotions,
-      notifyDisputeUpdates: settings.notifyDisputeUpdates,
-      notifyProviderVerification: settings.notifyProviderVerification,
-      emailBookingUpdates: settings.emailBookingUpdates,
-      emailMessages: settings.emailMessages,
-      emailReviews: settings.emailReviews,
-      emailPromotions: settings.emailPromotions,
-      emailNewsletters: settings.emailNewsletters,
-      language: settings.language,
-      timezone: settings.timezone,
-      currency: settings.currency,
-      showProfileToPublic: settings.showProfileToPublic,
-      showPhoneToProviders: settings.showPhoneToProviders,
-      updatedAt: settings.updatedAt.toISOString(),
-    },
+    settings: formatSettings(settings),
   };
 };
 
@@ -255,26 +258,7 @@ export const resetMySettings = async (userId: string) => {
   return {
     success: true,
     message: 'Settings reset to defaults',
-    settings: {
-      id: settings.id,
-      notifyBookingUpdates: settings.notifyBookingUpdates,
-      notifyMessages: settings.notifyMessages,
-      notifyReviews: settings.notifyReviews,
-      notifyPromotions: settings.notifyPromotions,
-      notifyDisputeUpdates: settings.notifyDisputeUpdates,
-      notifyProviderVerification: settings.notifyProviderVerification,
-      emailBookingUpdates: settings.emailBookingUpdates,
-      emailMessages: settings.emailMessages,
-      emailReviews: settings.emailReviews,
-      emailPromotions: settings.emailPromotions,
-      emailNewsletters: settings.emailNewsletters,
-      language: settings.language,
-      timezone: settings.timezone,
-      currency: settings.currency,
-      showProfileToPublic: settings.showProfileToPublic,
-      showPhoneToProviders: settings.showPhoneToProviders,
-      updatedAt: settings.updatedAt.toISOString(),
-    },
+    settings: formatSettings(settings),
   };
 };
 
@@ -283,16 +267,43 @@ export const resetMySettings = async (userId: string) => {
 // ==================
 
 /**
- * Deactivate account (soft-disable — keeps data, blocks login)
- * Different from deleteOwnAccount which purges all data
+ * Deactivate account (soft-disable — keeps data). Every session ends, and
+ * signing in again with the password reactivates the account. Different from
+ * deleteOwnAccount, which removes the account's personal data.
  */
-// TODO(audit): `reason` is accepted from the client but not recorded.
-export const deactivateMyAccount = async (userId: string, _reason?: string) => {
-  await assertUserExists(userId);
+export const deactivateMyAccount = async (userId: string, reason?: string | null) => {
+  const deactivationReason = reason?.trim()
+    ? validateText(reason, 'Reason', 0, MAX_DEACTIVATION_REASON_LENGTH) || null
+    : null;
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { status: true },
+  });
+
+  if (!user) {
+    throw new GraphQLError('User not found', { extensions: { code: 'NOT_FOUND' } });
+  }
+
+  // Only active accounts can deactivate. Otherwise a suspended user could
+  // deactivate and then reactivate themselves.
+  if (user.status !== 'ACTIVE') {
+    throw new GraphQLError('Only active accounts can be deactivated', {
+      extensions: { code: 'BAD_REQUEST' },
+    });
+  }
+
+  const deactivatedAt = new Date();
 
   await prisma.user.update({
     where: { id: userId },
-    data: { status: 'DEACTIVATED' },
+    data: {
+      status: 'DEACTIVATED',
+      deactivatedAt,
+      deactivationReason,
+      // Ends every session, including ones Redis can't reach right now
+      tokenInvalidatedAt: deactivatedAt,
+    },
   });
 
   // Remove push token so no more notifications are delivered
@@ -302,22 +313,27 @@ export const deactivateMyAccount = async (userId: string, _reason?: string) => {
     // Non-critical — continue even if push cleanup fails
   }
 
+  // Revoke stored refresh tokens and reject earlier access tokens
+  await endAllSessions(userId);
+
   return {
     success: true,
-    message: 'Your account has been deactivated. Contact support to reactivate.',
+    message: 'Your account has been deactivated. Sign in again to reactivate it.',
   };
 };
 
 /**
- * Reactivate a deactivated account (self-service)
+ * Reactivate a deactivated account (self-service). Deactivation ends every
+ * session, so in practice signing in (which reactivates the account) is the way
+ * back; this stays for sessions that are still valid.
  */
 export const reactivateMyAccount = async (userId: string) => {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, status: true },
+    select: { id: true, status: true, deletedAt: true },
   });
 
-  if (!user) {
+  if (!user || user.deletedAt) {
     throw new GraphQLError('User not found', { extensions: { code: 'NOT_FOUND' } });
   }
 
@@ -329,7 +345,7 @@ export const reactivateMyAccount = async (userId: string) => {
 
   await prisma.user.update({
     where: { id: userId },
-    data: { status: 'ACTIVE' },
+    data: { status: 'ACTIVE', deactivatedAt: null, deactivationReason: null },
   });
 
   return {

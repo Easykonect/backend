@@ -1,13 +1,13 @@
 /**
  * GraphQL API Route Handler
  * Next.js API route for Apollo Server
- * 
+ *
  * Security Features:
- * - Rate limiting per IP and operation type
- * - Query depth limiting (max 10 levels)
+ * - IP blocklist, query complexity limits (depth, root fields, aliases) and rate limits for
+ *   every request that carries a GraphQL document: POSTs, and GETs with a `query` parameter
+ * - Request body limits: 1 MB, or 20 MB for requests that upload files
  * - Introspection disabled in production
  * - CORS configuration
- * - Request body size validation
  * - Sentry error monitoring
  */
 
@@ -15,49 +15,31 @@ import { ApolloServer } from '@apollo/server';
 import { startServerAndCreateNextHandler } from '@as-integrations/next';
 import { NextRequest, NextResponse } from 'next/server';
 import { typeDefs, resolvers } from '@/graphql';
+import { dateAwareFieldResolver } from '@/graphql/request-guards';
 import { getAuthContext, GraphQLContext } from '@/middleware';
 import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin/landingPage/default';
 import { ApolloServerPluginLandingPageDisabled } from '@apollo/server/plugin/disabled';
 import { config } from '@/config';
 import {
-  checkRateLimit,
+  analyzeGraphQLRequest,
+  checkGraphQLRateLimit,
+  getClientIp,
+  isBlockedIp,
   rateLimitHeaders,
   rateLimitedResponse,
-  getRateLimitTypeForOperation,
-  isBlockedIp,
-  getClientIp,
-  RateLimitConfig,
+  UPLOAD_FIELDS,
+  type GraphQLRequestAnalysis,
+  type GraphQLRequestParams,
 } from '@/middleware/rate-limit.middleware';
 import { initSentry, captureException } from '@/lib/sentry';
 
 // Initialize Sentry as early as possible
 initSentry();
 
-// Maximum request body size (1MB)
-const MAX_BODY_SIZE = 1024 * 1024;
-
-// Maximum query depth to prevent deeply nested queries
-const MAX_QUERY_DEPTH = 10;
-
-/**
- * Simple query depth checker
- * Counts maximum nesting level in the query
- */
-const getQueryDepth = (query: string): number => {
-  let maxDepth = 0;
-  let currentDepth = 0;
-  
-  for (const char of query) {
-    if (char === '{') {
-      currentDepth++;
-      maxDepth = Math.max(maxDepth, currentDepth);
-    } else if (char === '}') {
-      currentDepth--;
-    }
-  }
-  
-  return maxDepth;
-};
+// Request body limits. Files are uploaded as base64 inside GraphQL, so a request that
+// uploads files may be larger; every other request keeps the normal limit.
+const MAX_BODY_SIZE = 1024 * 1024; // 1 MB
+const MAX_UPLOAD_BODY_SIZE = 20 * 1024 * 1024; // 20 MB
 
 // CORS headers for GraphQL endpoint
 // Note: Access-Control-Allow-Origin cannot be a comma-separated list.
@@ -65,6 +47,8 @@ const getQueryDepth = (query: string): number => {
 const baseCorsHeaders = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+  // Let browser clients read how long to wait and how much of their limit is left
+  'Access-Control-Expose-Headers': 'Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset',
   'Access-Control-Max-Age': '86400',
   'Access-Control-Allow-Credentials': 'true',
 };
@@ -83,7 +67,7 @@ const getCorsHeaders = (requestOrigin: string | null): Record<string, string> =>
       'Access-Control-Allow-Origin': isAllowed ? requestOrigin : config.cors.allowedOrigins[0],
     };
   }
-  
+
   // In development, allow all origins
   return {
     ...baseCorsHeaders,
@@ -96,21 +80,26 @@ const getCorsHeaders = (requestOrigin: string | null): Record<string, string> =>
 const server = new ApolloServer<GraphQLContext>({
   typeDefs,
   resolvers,
+  // Dates reach the app as ISO strings
+  fieldResolver: dateAwareFieldResolver,
   introspection: !config.isProduction, // Disable introspection in production
+  // Automatic persisted queries let a client send only a hash, which the limits below can't
+  // inspect. Clients that use them fall back to sending the full query.
+  persistedQueries: false,
   plugins: [
     // Show Apollo Sandbox only in development
     config.isProduction
       ? ApolloServerPluginLandingPageDisabled()
-      : ApolloServerPluginLandingPageLocalDefault({ 
+      : ApolloServerPluginLandingPageLocalDefault({
           embed: true,
-          includeCookies: true 
+          includeCookies: true
         }),
   ],
   formatError: (formattedError, error) => {
     // Capture errors in Sentry (except validation errors)
     const errorCode = formattedError.extensions?.code as string;
     const skipCodes = ['VALIDATION_ERROR', 'BAD_USER_INPUT', 'UNAUTHENTICATED', 'FORBIDDEN'];
-    
+
     if (!skipCodes.includes(errorCode)) {
       captureException(error, {
         tags: {
@@ -123,7 +112,7 @@ const server = new ApolloServer<GraphQLContext>({
         level: errorCode === 'INTERNAL_SERVER_ERROR' ? 'error' : 'warning',
       });
     }
-    
+
     // Hide internal error details in production
     if (config.isProduction) {
       // Don't expose internal errors
@@ -146,6 +135,63 @@ const handler = startServerAndCreateNextHandler<NextRequest, GraphQLContext>(ser
   },
 });
 
+const errorResponse = (
+  status: number,
+  message: string,
+  code: string,
+  headers: Record<string, string>
+): NextResponse => NextResponse.json({ errors: [{ message, extensions: { code } }] }, { status, headers });
+
+const withHeaders = (response: Response, headers: Record<string, string>): Response => {
+  Object.entries(headers).forEach(([key, value]) => {
+    response.headers.set(key, value);
+  });
+  return response;
+};
+
+const isJsonContentType = (value: string | null): boolean =>
+  value?.split(';')[0].trim().toLowerCase() === 'application/json';
+
+/**
+ * A GET has no body, but Apollo tries to read one when Content-Type says JSON, and fails.
+ * Drop the header and mark the request as preflighted, which a JSON Content-Type already
+ * guaranteed for browsers.
+ */
+const forApolloGet = (request: NextRequest): NextRequest => {
+  if (!isJsonContentType(request.headers.get('content-type'))) return request;
+
+  const headers = new Headers(request.headers);
+  headers.delete('content-type');
+  headers.set('apollo-require-preflight', 'true');
+  return new NextRequest(request.url, { method: 'GET', headers });
+};
+
+const complexityResponse = (
+  analysis: GraphQLRequestAnalysis,
+  corsHeaders: Record<string, string>
+): NextResponse | null =>
+  analysis.complexityError ? errorResponse(400, analysis.complexityError, 'QUERY_TOO_COMPLEX', corsHeaders) : null;
+
+/**
+ * Rate limits for a request that carries a GraphQL document, before Apollo runs it.
+ * Returns the response to send instead, or the headers to add to Apollo's response.
+ */
+const checkLimits = async (
+  request: NextRequest,
+  analysis: GraphQLRequestAnalysis,
+  corsHeaders: Record<string, string>
+): Promise<{ response: Response } | { headers: Record<string, string> }> => {
+  const decision = await checkGraphQLRateLimit(request, analysis);
+  const headers = {
+    ...corsHeaders,
+    ...rateLimitHeaders(decision.remaining, decision.resetIn, decision.limit),
+  };
+  if (decision.limited) {
+    return { response: withHeaders(rateLimitedResponse(decision.resetIn), headers) };
+  }
+  return { headers };
+};
+
 // Export OPTIONS handler for CORS preflight
 export async function OPTIONS(request: NextRequest) {
   const origin = request.headers.get('origin');
@@ -158,107 +204,102 @@ export async function OPTIONS(request: NextRequest) {
 
 // Export route handlers for Next.js App Router
 export async function GET(request: NextRequest) {
-  const origin = request.headers.get('origin');
-  const corsHeaders = getCorsHeaders(origin);
-  // Add CORS headers
-  const response = await handler(request);
-  Object.entries(corsHeaders).forEach(([key, value]) => {
-    response.headers.set(key, value);
+  const corsHeaders = getCorsHeaders(request.headers.get('origin'));
+  const searchParams = request.nextUrl.searchParams;
+
+  // Without a query there is nothing to run (the landing page). /api/health is the health check.
+  if (!searchParams.has('query')) {
+    return withHeaders(await handler(forApolloGet(request)), corsHeaders);
+  }
+
+  if (await isBlockedIp(getClientIp(request))) {
+    return errorResponse(403, 'Access denied', 'FORBIDDEN', corsHeaders);
+  }
+
+  // Apollo rejects a repeated parameter, so only a single value counts
+  const single = (name: string): string | undefined => {
+    const values = searchParams.getAll(name);
+    return values.length === 1 ? values[0] : undefined;
+  };
+  let variables: unknown;
+  try {
+    variables = JSON.parse(single('variables') ?? 'null');
+  } catch {
+    // Invalid JSON: Apollo returns the error
+  }
+
+  const analysis = analyzeGraphQLRequest({
+    query: single('query'),
+    operationName: single('operationName'),
+    variables,
   });
-  return response;
+  const tooComplex = complexityResponse(analysis, corsHeaders);
+  if (tooComplex) return tooComplex;
+
+  const limits = await checkLimits(request, analysis, corsHeaders);
+  if ('response' in limits) return limits.response;
+
+  return withHeaders(await handler(forApolloGet(request)), limits.headers);
 }
 
 export async function POST(request: NextRequest) {
-  const origin = request.headers.get('origin');
-  const corsHeaders = getCorsHeaders(origin);
+  const corsHeaders = getCorsHeaders(request.headers.get('origin'));
+  const tooLarge = () => errorResponse(413, 'Request body too large', 'PAYLOAD_TOO_LARGE', corsHeaders);
 
   // Check if IP is blocked
-  const clientIp = getClientIp(request);
-  if (await isBlockedIp(clientIp)) {
-    return new NextResponse(
-      JSON.stringify({
-        errors: [{ message: 'Access denied', extensions: { code: 'FORBIDDEN' } }],
-      }),
-      { status: 403, headers: corsHeaders }
-    );
+  if (await isBlockedIp(getClientIp(request))) {
+    return errorResponse(403, 'Access denied', 'FORBIDDEN', corsHeaders);
   }
 
-  // Check content length (prevent oversized requests)
-  const contentLength = request.headers.get('content-length');
-  if (contentLength && parseInt(contentLength) > MAX_BODY_SIZE) {
-    return new NextResponse(
-      JSON.stringify({
-        errors: [{ message: 'Request body too large', extensions: { code: 'PAYLOAD_TOO_LARGE' } }],
-      }),
-      { status: 413, headers: corsHeaders }
-    );
+  // Refuse a body declared larger than any request may be, before reading it
+  const contentLength = parseInt(request.headers.get('content-length') ?? '', 10);
+  if (contentLength > MAX_UPLOAD_BODY_SIZE) {
+    return tooLarge();
   }
 
   // Read body once — Next.js 16 streams can only be consumed once.
   // We reconstruct the request for Apollo after inspecting the body.
-  let bodyText = '';
-  let bodyJson: Record<string, unknown> = {};
-  try {
-    bodyText = await request.text();
-    bodyJson = JSON.parse(bodyText);
-  } catch {
-    // Non-JSON or empty body — let Apollo handle the error
+  const bodyText = await request.text();
+  const bodySize = Buffer.byteLength(bodyText);
+  if (bodySize > MAX_UPLOAD_BODY_SIZE) {
+    return tooLarge();
   }
 
-  // Validate query depth from already-parsed body
-  const query = typeof bodyJson.query === 'string' ? bodyJson.query : '';
-  if (query) {
-    const depth = getQueryDepth(query);
-    if (depth > MAX_QUERY_DEPTH) {
-      return new NextResponse(
-        JSON.stringify({
-          errors: [{ message: `Query depth ${depth} exceeds maximum allowed depth of ${MAX_QUERY_DEPTH}`, extensions: { code: 'QUERY_TOO_COMPLEX' } }],
-        }),
-        { status: 400, headers: corsHeaders }
-      );
+  let body: unknown;
+  if (bodyText.trim()) {
+    try {
+      body = JSON.parse(bodyText);
+    } catch {
+      return errorResponse(400, 'The request body is not valid JSON', 'BAD_REQUEST', corsHeaders);
     }
   }
 
-  // Extract operation from already-parsed body
-  let operationName: string | undefined = typeof bodyJson.operationName === 'string' ? bodyJson.operationName : undefined;
-  if (!operationName && query) {
-    const match = query.match(/(?:query|mutation|subscription)\s+(\w+)/);
-    if (match) operationName = match[1];
-  }
-  const rateLimitType = getRateLimitTypeForOperation(operationName);
+  const params = typeof body === 'object' && body !== null ? (body as GraphQLRequestParams) : {};
+  const analysis = analyzeGraphQLRequest(params);
+  const tooComplex = complexityResponse(analysis, corsHeaders);
+  if (tooComplex) return tooComplex;
 
-  // Check rate limit (hybrid: uses userId for authenticated, IP for unauthenticated)
-  const rateCheck = await checkRateLimit(request, rateLimitType, undefined, operationName);
-  if (rateCheck.limited) {
-    const response = rateLimitedResponse(rateCheck.resetIn);
-    Object.entries(corsHeaders).forEach(([key, value]) => {
-      response.headers.set(key, value);
-    });
-    return response;
+  // Only requests that upload files may use the larger limit
+  if (bodySize > MAX_BODY_SIZE && !analysis.rootFields.some((field) => UPLOAD_FIELDS.has(field.name))) {
+    return tooLarge();
+  }
+
+  const limits = await checkLimits(request, analysis, corsHeaders);
+  if ('response' in limits) return limits.response;
+
+  // Apollo only reads the body when Content-Type is exactly application/json, so a
+  // charset suffix (application/json; charset=utf-8) is dropped
+  const headers = new Headers(request.headers);
+  if (isJsonContentType(headers.get('content-type'))) {
+    headers.set('content-type', 'application/json');
   }
 
   // Reconstruct request with the body so Apollo can read it
   const reconstructedRequest = new NextRequest(request.url, {
     method: request.method,
-    headers: request.headers,
+    headers,
     body: bodyText,
   });
 
-  // Process the request
-  const response = await handler(reconstructedRequest);
-  
-  // Add CORS and rate limit headers
-  Object.entries(corsHeaders).forEach(([key, value]) => {
-    response.headers.set(key, value);
-  });
-  
-  const limitConfig = RateLimitConfig[rateLimitType];
-  Object.entries(rateLimitHeaders(rateCheck.remaining, rateCheck.resetIn, limitConfig.limit)).forEach(
-    ([key, value]) => {
-      response.headers.set(key, value);
-    }
-  );
-  
-  return response;
+  return withHeaders(await handler(reconstructedRequest), limits.headers);
 }
-

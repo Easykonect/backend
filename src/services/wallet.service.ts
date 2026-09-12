@@ -1,51 +1,59 @@
 /**
  * Wallet Service
- * 
+ *
  * Handles wallet operations for users and providers.
- * 
+ *
  * Key Features:
  * - Users: Receive refunds, pay for bookings with wallet balance
  * - Providers: Receive service earnings, withdraw to bank account
- * 
+ *
  * Security:
  * - All amounts stored in KOBO (integers) to avoid float precision issues
- * - Atomic balance updates with optimistic locking
- * - Idempotency keys to prevent duplicate transactions
+ * - Balance changes are atomic increments/decrements made in the same database
+ *   transaction as the ledger entry that records them
+ * - Every ledger entry has a unique reference derived from its business event
+ *   (see LedgerReference), so a retried event never moves money twice
  * - Wallet locking during pending withdrawals
- * - Distributed locking via Redis for race condition prevention
  * - Amount validation to prevent overflow attacks
  */
 
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
-import { WalletTransactionType, WalletTransactionSource } from '@prisma/client';
+import {
+  AdminAction,
+  Prisma,
+  type WalletTransaction,
+  WalletTransactionType,
+  WalletTransactionSource,
+} from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
-import RedisClient from '@/lib/redis';
-import { captureWalletError } from '@/lib/sentry';
+import { withTransaction, type TransactionClient } from '@/lib/transaction';
+import { captureException, captureWalletError } from '@/lib/sentry';
+import { createAuditLog } from './audit.service';
 
 // ==========================================
 // Security Constants
 // ==========================================
 
-// Maximum allowed amount (₦100 million in kobo) - prevents overflow
-const MAX_AMOUNT_KOBO = 10_000_000_000;
+// Largest amount or balance (₦20 million in kobo). Wallet amounts are stored as
+// 32-bit integers, which top out at 2,147,483,647 kobo.
+const MAX_AMOUNT_KOBO = 2_000_000_000;
 
-// Distributed lock TTL (30 seconds)
-const LOCK_TTL_MS = 30000;
+// A lock this old with no open withdrawal behind it was left over by a failure
+const STALE_LOCK_MINUTES = 10;
 
-// Lock key prefixes
-const WALLET_LOCK_PREFIX = 'wallet_lock:';
+const LAGOS_UTC_OFFSET_MS = 60 * 60 * 1000;
 
 // ==========================================
 // Types
 // ==========================================
 
-interface CreditWalletInput {
+interface LedgerEntryInput {
   walletId: string;
   amount: number; // In kobo
   source: WalletTransactionSource;
   description: string;
-  reference?: string; // Idempotency key
+  reference: string; // Idempotency key for the business event
   bookingId?: string;
   paymentId?: string;
   withdrawalId?: string;
@@ -53,16 +61,9 @@ interface CreditWalletInput {
   adjustmentReason?: string;
 }
 
-interface DebitWalletInput {
-  walletId: string;
-  amount: number; // In kobo
-  source: WalletTransactionSource;
-  description: string;
-  reference?: string;
-  bookingId?: string;
-  paymentId?: string;
-  withdrawalId?: string;
-}
+type CreditWalletInput = Omit<LedgerEntryInput, 'reference'> & { reference?: string };
+
+type DebitWalletInput = CreditWalletInput;
 
 interface WalletTransactionFilters {
   source?: WalletTransactionSource;
@@ -80,90 +81,11 @@ interface PaginationInput {
 // Constants
 // ==========================================
 
-// Dispute window: how long before earnings become withdrawable (48 hours)
-export const DISPUTE_WINDOW_HOURS = 48;
-
 // Transaction limits
 const MAX_DAILY_WITHDRAWAL_KOBO = 500_000_000; // ₦5 million per day
 const MAX_SINGLE_TRANSACTION_KOBO = 100_000_000; // ₦1 million per transaction
 const MAX_ADMIN_ADJUSTMENT_KOBO = 10_000_000; // ₦100,000 for regular admin
 const SUPER_ADMIN_ADJUSTMENT_LIMIT_KOBO = 100_000_000; // ₦1 million for super admin
-
-// ==========================================
-// Distributed Locking Functions
-// ==========================================
-
-/**
- * Get Redis client safely
- */
-const getRedis = () => {
-  try {
-    return RedisClient.getInstance();
-  } catch {
-    return null;
-  }
-};
-
-/**
- * Acquire a distributed lock for wallet operations
- * Prevents race conditions across multiple server instances
- */
-const acquireWalletLock = async (walletId: string): Promise<boolean> => {
-  const redis = getRedis();
-  if (!redis) {
-    // If Redis unavailable, use database-level locking via version field
-    return true;
-  }
-  
-  const lockKey = `${WALLET_LOCK_PREFIX}${walletId}`;
-  const lockValue = `${Date.now()}_${uuidv4()}`;
-  
-  // SET NX with expiry - atomic operation
-  const result = await redis.set(lockKey, lockValue, 'PX', LOCK_TTL_MS, 'NX');
-  return result === 'OK';
-};
-
-/**
- * Release a distributed lock
- */
-const releaseWalletLock = async (walletId: string): Promise<void> => {
-  const redis = getRedis();
-  if (!redis) return;
-  
-  const lockKey = `${WALLET_LOCK_PREFIX}${walletId}`;
-  await redis.del(lockKey);
-};
-
-/**
- * Execute operation with distributed lock
- */
-const withWalletLock = async <T>(
-  walletId: string,
-  operation: () => Promise<T>,
-  maxRetries: number = 3
-): Promise<T> => {
-  let retries = 0;
-  
-  while (retries < maxRetries) {
-    const acquired = await acquireWalletLock(walletId);
-    
-    if (acquired) {
-      try {
-        return await operation();
-      } finally {
-        await releaseWalletLock(walletId);
-      }
-    }
-    
-    // Wait with exponential backoff
-    await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, retries)));
-    retries++;
-  }
-  
-  throw new GraphQLError('Unable to process wallet operation. Please try again.', {
-    extensions: { code: 'WALLET_BUSY' },
-  });
-};
 
 /**
  * Validate amount to prevent overflow and negative values
@@ -174,13 +96,13 @@ const validateAmount = (amount: number, context: string): void => {
       extensions: { code: 'INVALID_AMOUNT' },
     });
   }
-  
+
   if (amount <= 0) {
     throw new GraphQLError(`${context}: Amount must be positive`, {
       extensions: { code: 'INVALID_AMOUNT' },
     });
   }
-  
+
   if (amount > MAX_AMOUNT_KOBO) {
     throw new GraphQLError(`${context}: Amount exceeds maximum allowed`, {
       extensions: { code: 'AMOUNT_TOO_LARGE' },
@@ -207,7 +129,8 @@ export const nairaToKobo = (naira: number): number => {
 };
 
 /**
- * Generate unique transaction reference
+ * Generate a unique reference for events that can't be repeated by design
+ * (e.g. an admin adjustment)
  */
 const generateReference = (prefix: string = 'TXN'): string => {
   return `${prefix}_${Date.now()}_${uuidv4().substring(0, 8)}`;
@@ -226,6 +149,7 @@ const formatWallet = (wallet: any) => ({
   currency: wallet.currency,
   isLocked: wallet.isLocked,
   lockedReason: wallet.lockedReason,
+  lockReason: wallet.lockedReason,
   createdAt: wallet.createdAt.toISOString(),
   updatedAt: wallet.updatedAt.toISOString(),
 });
@@ -233,7 +157,7 @@ const formatWallet = (wallet: any) => ({
 /**
  * Format wallet transaction for response
  */
-const formatTransaction = (transaction: any) => ({
+export const formatTransaction = (transaction: WalletTransaction) => ({
   id: transaction.id,
   walletId: transaction.walletId,
   type: transaction.type,
@@ -244,6 +168,7 @@ const formatTransaction = (transaction: any) => ({
   balanceAfter: koboToNaira(transaction.balanceAfter),
   description: transaction.description,
   reference: transaction.reference,
+  referenceId: transaction.reference,
   bookingId: transaction.bookingId,
   paymentId: transaction.paymentId,
   withdrawalId: transaction.withdrawalId,
@@ -257,17 +182,16 @@ const formatTransaction = (transaction: any) => ({
 // ==========================================
 
 /**
- * Get or create wallet for a user
+ * Find the user's wallet, creating it if needed. Call this before a
+ * transaction that moves money: a failed create inside a MongoDB transaction
+ * aborts the whole transaction.
  */
-export const getOrCreateWallet = async (userId: string) => {
-  // Try to find existing wallet
-  let wallet = await prisma.wallet.findUnique({
-    where: { userId },
-  });
+export const ensureWallet = async (userId: string) => {
+  const existing = await prisma.wallet.findUnique({ where: { userId } });
+  if (existing) return existing;
 
-  // Create if doesn't exist
-  if (!wallet) {
-    wallet = await prisma.wallet.create({
+  try {
+    return await prisma.wallet.create({
       data: {
         userId,
         balance: 0,
@@ -275,9 +199,56 @@ export const getOrCreateWallet = async (userId: string) => {
         currency: 'NGN',
       },
     });
+  } catch (error) {
+    // Another request created it first
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const created = await prisma.wallet.findUnique({ where: { userId } });
+      if (created) return created;
+    }
+    throw error;
   }
+};
 
-  return formatWallet(wallet);
+/**
+ * Payments still held in escrow: paid, and not yet released to the provider's
+ * wallet. Releases before walletTransactionId was recorded only set payoutAt.
+ */
+export const HELD_IN_ESCROW = {
+  status: 'COMPLETED',
+  AND: [
+    { OR: [{ payoutAt: null }, { payoutAt: { isSet: false } }] },
+    { OR: [{ walletTransactionId: null }, { walletTransactionId: { isSet: false } }] },
+  ],
+} satisfies Prisma.PaymentWhereInput;
+
+/**
+ * A provider's share of their paid bookings still held in escrow, in kobo:
+ * earned but not yet released to their wallet, after any partial refunds. 0
+ * for an account without a provider profile. The API's Wallet.pendingBalance
+ * is this; the stored wallet field isn't used.
+ */
+export const getEscrowedEarningsKobo = async (userId: string): Promise<number> => {
+  const provider = await prisma.serviceProvider.findUnique({
+    where: { userId },
+    select: { id: true },
+  });
+
+  if (!provider) return 0;
+
+  const held = await prisma.payment.aggregate({
+    where: { booking: { providerId: provider.id }, ...HELD_IN_ESCROW },
+    _sum: { providerPayout: true },
+  });
+
+  return nairaToKobo(held._sum.providerPayout ?? 0);
+};
+
+/**
+ * Get or create wallet for a user
+ */
+export const getOrCreateWallet = async (userId: string) => {
+  const [wallet, pendingKobo] = await Promise.all([ensureWallet(userId), getEscrowedEarningsKobo(userId)]);
+  return formatWallet({ ...wallet, pendingBalance: pendingKobo });
 };
 
 /**
@@ -292,7 +263,7 @@ export const getWalletByUserId = async (userId: string) => {
     return null;
   }
 
-  return formatWallet(wallet);
+  return formatWallet({ ...wallet, pendingBalance: await getEscrowedEarningsKobo(userId) });
 };
 
 /**
@@ -325,237 +296,183 @@ export const hasSufficientBalance = async (
 };
 
 // ==========================================
-// Wallet Transactions
+// Ledger
 // ==========================================
 
 /**
- * Credit wallet (add funds)
- * Uses distributed locking + atomic updates for race condition prevention
+ * Return the entry already written for this reference, if any
  */
-export const creditWallet = async (input: CreditWalletInput) => {
-  const {
-    walletId,
-    amount,
-    source,
-    description,
-    reference = generateReference('CR'),
-    bookingId,
-    paymentId,
-    withdrawalId,
-    adjustedBy,
-    adjustmentReason,
-  } = input;
-
-  // Validate amount to prevent overflow attacks
-  validateAmount(amount, 'Credit wallet');
-
-  // Check idempotency - if transaction with this reference exists, return it
-  const existingTransaction = await prisma.walletTransaction.findUnique({
-    where: { reference },
+const findExistingEntry = async (
+  tx: TransactionClient,
+  entry: LedgerEntryInput,
+  type: WalletTransactionType
+) => {
+  const existing = await tx.walletTransaction.findUnique({
+    where: { reference: entry.reference },
   });
 
-  if (existingTransaction) {
-    return formatTransaction(existingTransaction);
+  if (!existing) return null;
+
+  if (existing.walletId !== entry.walletId || existing.type !== type || existing.amount !== entry.amount) {
+    captureWalletError(new Error(`Wallet reference ${entry.reference} reused for a different entry`), {
+      walletId: entry.walletId,
+      operation: type === 'CREDIT' ? 'credit' : 'debit',
+      amount: entry.amount,
+    });
+    throw new GraphQLError('This transaction reference has already been used', {
+      extensions: { code: 'DUPLICATE_REFERENCE' },
+    });
   }
 
-  // Execute with distributed lock to prevent race conditions
-  return withWalletLock(walletId, async () => {
-    // Perform atomic credit operation
-    const result = await prisma.$transaction(async (tx) => {
-      // Get current wallet state
-      const wallet = await tx.wallet.findUnique({
-        where: { id: walletId },
-      });
+  return existing;
+};
 
-      if (!wallet) {
-        throw new GraphQLError('Wallet not found', {
-          extensions: { code: 'WALLET_NOT_FOUND' },
-        });
-      }
+/**
+ * Credit a wallet inside a transaction. Returns the ledger entry; if the
+ * reference was already credited, returns that entry without crediting again.
+ */
+export const applyWalletCredit = async (tx: TransactionClient, entry: LedgerEntryInput) => {
+  validateAmount(entry.amount, 'Credit wallet');
 
-      const balanceBefore = wallet.balance;
-      const balanceAfter = balanceBefore + amount;
+  const existing = await findExistingEntry(tx, entry, 'CREDIT');
+  if (existing) return existing;
 
-      // Validate new balance doesn't overflow
-      if (balanceAfter > MAX_AMOUNT_KOBO) {
-        throw new GraphQLError('Credit would exceed maximum wallet balance', {
-          extensions: { code: 'BALANCE_OVERFLOW' },
-        });
-      }
+  const wallet = await tx.wallet.update({
+    where: { id: entry.walletId },
+    data: { balance: { increment: entry.amount } },
+  });
 
-      // Atomic update with optimistic locking via updatedAt check
-      const updateResult = await tx.wallet.updateMany({
-        where: { 
-          id: walletId,
-          updatedAt: wallet.updatedAt, // Optimistic lock
-        },
-        data: { 
-          balance: balanceAfter,
-          updatedAt: new Date(),
-        },
-      });
-
-      if (updateResult.count === 0) {
-        throw new GraphQLError('Concurrent modification detected. Please retry.', {
-          extensions: { code: 'CONCURRENT_MODIFICATION' },
-        });
-      }
-
-      // Create transaction record
-      const transaction = await tx.walletTransaction.create({
-        data: {
-          walletId,
-          type: 'CREDIT',
-          source,
-          amount,
-          balanceBefore,
-          balanceAfter,
-          description,
-          reference,
-          bookingId,
-          paymentId,
-          withdrawalId,
-          adjustedBy,
-          adjustmentReason,
-        },
-      });
-
-      return transaction;
+  if (wallet.balance > MAX_AMOUNT_KOBO) {
+    throw new GraphQLError('Credit would exceed maximum wallet balance', {
+      extensions: { code: 'BALANCE_OVERFLOW' },
     });
+  }
 
-    return formatTransaction(result);
+  return tx.walletTransaction.create({
+    data: {
+      walletId: entry.walletId,
+      type: 'CREDIT',
+      source: entry.source,
+      amount: entry.amount,
+      balanceBefore: wallet.balance - entry.amount,
+      balanceAfter: wallet.balance,
+      description: entry.description,
+      reference: entry.reference,
+      bookingId: entry.bookingId,
+      paymentId: entry.paymentId,
+      withdrawalId: entry.withdrawalId,
+      adjustedBy: entry.adjustedBy,
+      adjustmentReason: entry.adjustmentReason,
+    },
   });
 };
 
 /**
+ * Debit a wallet inside a transaction. The balance check and the decrement are
+ * one statement, so concurrent debits can't spend the same money.
+ * `allowLocked` is only for the withdrawal that holds the lock.
+ */
+export const applyWalletDebit = async (
+  tx: TransactionClient,
+  entry: LedgerEntryInput & { allowLocked?: boolean }
+) => {
+  validateAmount(entry.amount, 'Debit wallet');
+
+  const existing = await findExistingEntry(tx, entry, 'DEBIT');
+  if (existing) return existing;
+
+  const { count } = await tx.wallet.updateMany({
+    where: {
+      id: entry.walletId,
+      balance: { gte: entry.amount },
+      ...(entry.allowLocked ? {} : { isLocked: false }),
+    },
+    data: { balance: { decrement: entry.amount } },
+  });
+
+  const wallet = await tx.wallet.findUnique({
+    where: { id: entry.walletId },
+  });
+
+  if (!wallet) {
+    throw new GraphQLError('Wallet not found', {
+      extensions: { code: 'WALLET_NOT_FOUND' },
+    });
+  }
+
+  if (count === 0) {
+    if (!entry.allowLocked && wallet.isLocked) {
+      throw new GraphQLError(
+        `Wallet is locked: ${wallet.lockedReason || 'Pending operation'}`,
+        { extensions: { code: 'WALLET_LOCKED' } }
+      );
+    }
+
+    // Don't reveal exact balance in error (security)
+    throw new GraphQLError(
+      'Insufficient wallet balance for this transaction',
+      { extensions: { code: 'INSUFFICIENT_BALANCE' } }
+    );
+  }
+
+  return tx.walletTransaction.create({
+    data: {
+      walletId: entry.walletId,
+      type: 'DEBIT',
+      source: entry.source,
+      amount: entry.amount,
+      balanceBefore: wallet.balance + entry.amount,
+      balanceAfter: wallet.balance,
+      description: entry.description,
+      reference: entry.reference,
+      bookingId: entry.bookingId,
+      paymentId: entry.paymentId,
+      withdrawalId: entry.withdrawalId,
+      adjustedBy: entry.adjustedBy,
+      adjustmentReason: entry.adjustmentReason,
+    },
+  });
+};
+
+/**
+ * Credit wallet (add funds)
+ */
+export const creditWallet = async (input: CreditWalletInput) => {
+  // Fixed before the transaction so a retry reuses it
+  const reference = input.reference ?? generateReference('CR');
+
+  const transaction = await withTransaction((tx) =>
+    applyWalletCredit(tx, { ...input, reference })
+  );
+
+  return formatTransaction(transaction);
+};
+
+/**
  * Debit wallet (remove funds)
- * Uses distributed locking + atomic updates for race condition prevention
- * CRITICAL: This is the main function that prevents double-spending
  */
 export const debitWallet = async (input: DebitWalletInput) => {
-  const {
-    walletId,
-    amount,
-    source,
-    description,
-    reference = generateReference('DR'),
-    bookingId,
-    paymentId,
-    withdrawalId,
-  } = input;
-
-  // Validate amount to prevent overflow attacks
-  validateAmount(amount, 'Debit wallet');
-
   // Enforce single transaction limit
-  if (amount > MAX_SINGLE_TRANSACTION_KOBO) {
+  if (input.amount > MAX_SINGLE_TRANSACTION_KOBO) {
     throw new GraphQLError(
       `Transaction amount exceeds maximum allowed (₦${koboToNaira(MAX_SINGLE_TRANSACTION_KOBO)})`,
       { extensions: { code: 'AMOUNT_TOO_LARGE' } }
     );
   }
 
-  // Check idempotency
-  const existingTransaction = await prisma.walletTransaction.findUnique({
-    where: { reference },
-  });
+  const reference = input.reference ?? generateReference('DR');
 
-  if (existingTransaction) {
-    return formatTransaction(existingTransaction);
-  }
+  const transaction = await withTransaction((tx) =>
+    applyWalletDebit(tx, { ...input, reference })
+  );
 
-  // Execute with distributed lock to prevent race conditions (double-spending)
-  return withWalletLock(walletId, async () => {
-    // Perform atomic debit operation with balance check in same query
-    const result = await prisma.$transaction(async (tx) => {
-      // ATOMIC: Check balance AND update in a single operation
-      // This prevents race conditions where multiple requests pass balance check
-      const updateResult = await tx.wallet.updateMany({
-        where: { 
-          id: walletId,
-          isLocked: false, // Ensure wallet is not locked
-          balance: { gte: amount }, // Atomic balance check
-        },
-        data: { 
-          balance: { decrement: amount },
-          updatedAt: new Date(),
-        },
-      });
+  return formatTransaction(transaction);
+};
 
-      if (updateResult.count === 0) {
-        // Determine why the update failed
-        const wallet = await tx.wallet.findUnique({
-          where: { id: walletId },
-        });
-
-        if (!wallet) {
-          throw new GraphQLError('Wallet not found', {
-            extensions: { code: 'WALLET_NOT_FOUND' },
-          });
-        }
-
-        if (wallet.isLocked) {
-          const error = new Error(`Wallet locked: ${wallet.lockedReason}`);
-          captureWalletError(error, {
-            walletId,
-            operation: 'debit',
-            amount,
-          });
-          throw new GraphQLError(
-            `Wallet is locked: ${wallet.lockedReason || 'Pending operation'}`,
-            { extensions: { code: 'WALLET_LOCKED' } }
-          );
-        }
-
-        // Don't reveal exact balance in error (security)
-        throw new GraphQLError(
-          'Insufficient wallet balance for this transaction',
-          { extensions: { code: 'INSUFFICIENT_BALANCE' } }
-        );
-      }
-
-      // Get updated wallet to record balances
-      const updatedWallet = await tx.wallet.findUnique({
-        where: { id: walletId },
-      });
-
-      if (!updatedWallet) {
-        const error = new Error('Wallet state error after debit');
-        captureWalletError(error, {
-          walletId,
-          operation: 'debit',
-          amount,
-        });
-        throw new GraphQLError('Wallet state error', {
-          extensions: { code: 'WALLET_ERROR' },
-        });
-      }
-
-      const balanceAfter = updatedWallet.balance;
-      const balanceBefore = balanceAfter + amount;
-
-      // Create transaction record
-      const transaction = await tx.walletTransaction.create({
-        data: {
-          walletId,
-          type: 'DEBIT',
-          source,
-          amount,
-          balanceBefore,
-          balanceAfter,
-          description,
-          reference,
-          bookingId,
-          paymentId,
-          withdrawalId,
-        },
-      });
-
-      return transaction;
-    });
-
-    return formatTransaction(result);
-  });
+// Older GraphQL enum names still accepted in filters
+const LEGACY_TRANSACTION_SOURCES: Record<string, WalletTransactionSource> = {
+  EARNING: 'SERVICE_EARNING',
+  PAYOUT: 'WITHDRAWAL',
 };
 
 /**
@@ -563,7 +480,7 @@ export const debitWallet = async (input: DebitWalletInput) => {
  */
 export const getWalletTransactions = async (
   walletId: string,
-  filters: WalletTransactionFilters,
+  filters: WalletTransactionFilters = {},
   pagination: PaginationInput
 ) => {
   const { page, limit } = pagination;
@@ -572,7 +489,7 @@ export const getWalletTransactions = async (
   const where: any = { walletId };
 
   if (filters.source) {
-    where.source = filters.source;
+    where.source = LEGACY_TRANSACTION_SOURCES[filters.source] ?? filters.source;
   }
 
   if (filters.type) {
@@ -599,8 +516,15 @@ export const getWalletTransactions = async (
     prisma.walletTransaction.count({ where }),
   ]);
 
+  const items = transactions.map(formatTransaction);
+
   return {
-    transactions: transactions.map(formatTransaction),
+    items,
+    total,
+    page,
+    totalPages: Math.ceil(total / limit),
+    hasNextPage: page * limit < total,
+    transactions: items,
     pagination: {
       page,
       limit,
@@ -613,264 +537,11 @@ export const getWalletTransactions = async (
 };
 
 // ==========================================
-// User-Specific Operations
-// ==========================================
-
-/**
- * Process refund to user's wallet
- * Called when a booking is cancelled or dispute is resolved in user's favor
- */
-export const processRefundToWallet = async (
-  userId: string,
-  amountKobo: number,
-  bookingId: string,
-  paymentId: string,
-  reason: string
-) => {
-  // Check if user is banned - if so, refund should go to original payment method
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-  });
-
-  if (user?.bannedAt && (!user.bannedUntil || user.bannedUntil > new Date())) {
-    throw new GraphQLError(
-      'User is banned. Refund should be processed to original payment method.',
-      { extensions: { code: 'USER_BANNED', suggestBankRefund: true } }
-    );
-  }
-
-  // Get or create wallet
-  const wallet = await getOrCreateWallet(userId);
-
-  // Credit wallet
-  const transaction = await creditWallet({
-    walletId: wallet.id,
-    amount: amountKobo,
-    source: 'REFUND',
-    description: `Refund: ${reason}`,
-    reference: generateReference('RFD'),
-    bookingId,
-    paymentId,
-  });
-
-  return {
-    success: true,
-    transaction,
-    newBalance: transaction.balanceAfter,
-    message: `₦${koboToNaira(amountKobo)} has been refunded to your wallet.`,
-  };
-};
-
-/**
- * Pay for booking using wallet balance
- * Only available for users (SERVICE_USER role)
- */
-export const payWithWallet = async (
-  userId: string,
-  bookingId: string,
-  amountKobo: number
-) => {
-  // Check user restrictions
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-  });
-
-  if (!user) {
-    throw new GraphQLError('User not found', {
-      extensions: { code: 'USER_NOT_FOUND' },
-    });
-  }
-
-  // Check if user is restricted
-  if (user.restrictedAt && (!user.restrictedUntil || user.restrictedUntil > new Date())) {
-    throw new GraphQLError(
-      'Your account is restricted. You cannot make payments.',
-      { extensions: { code: 'ACCOUNT_RESTRICTED' } }
-    );
-  }
-
-  // Get wallet
-  const wallet = await prisma.wallet.findUnique({
-    where: { userId },
-  });
-
-  if (!wallet) {
-    throw new GraphQLError('Wallet not found. Please add funds first.', {
-      extensions: { code: 'WALLET_NOT_FOUND' },
-    });
-  }
-
-  // Check balance
-  if (wallet.balance < amountKobo) {
-    const shortfall = amountKobo - wallet.balance;
-    throw new GraphQLError(
-      `Insufficient wallet balance. You need ₦${koboToNaira(shortfall)} more.`,
-      {
-        extensions: {
-          code: 'INSUFFICIENT_BALANCE',
-          available: koboToNaira(wallet.balance),
-          required: koboToNaira(amountKobo),
-          shortfall: koboToNaira(shortfall),
-        },
-      }
-    );
-  }
-
-  // Get booking
-  const booking = await prisma.booking.findUnique({
-    where: { id: bookingId },
-    include: { payment: true },
-  });
-
-  if (!booking) {
-    throw new GraphQLError('Booking not found', {
-      extensions: { code: 'BOOKING_NOT_FOUND' },
-    });
-  }
-
-  if (booking.userId !== userId) {
-    throw new GraphQLError('You can only pay for your own bookings', {
-      extensions: { code: 'UNAUTHORIZED' },
-    });
-  }
-
-  if (booking.status !== 'ACCEPTED') {
-    throw new GraphQLError('Booking must be accepted before payment', {
-      extensions: { code: 'INVALID_BOOKING_STATUS' },
-    });
-  }
-
-  if (booking.payment?.status === 'COMPLETED') {
-    throw new GraphQLError('This booking has already been paid for', {
-      extensions: { code: 'ALREADY_PAID' },
-    });
-  }
-
-  // Process wallet payment in transaction
-  const result = await prisma.$transaction(async (tx) => {
-    // Debit wallet
-    const balanceBefore = wallet.balance;
-    const balanceAfter = balanceBefore - amountKobo;
-
-    await tx.wallet.update({
-      where: { id: wallet.id },
-      data: { balance: balanceAfter },
-    });
-
-    // Create wallet transaction
-    const walletTxn = await tx.walletTransaction.create({
-      data: {
-        walletId: wallet.id,
-        type: 'DEBIT',
-        source: 'BOOKING_PAYMENT',
-        amount: amountKobo,
-        balanceBefore,
-        balanceAfter,
-        description: `Payment for booking #${bookingId.substring(0, 8)}`,
-        reference: generateReference('PAY'),
-        bookingId,
-      },
-    });
-
-    // Create or update payment record
-    const payment = await tx.payment.upsert({
-      where: { bookingId },
-      create: {
-        bookingId,
-        amount: koboToNaira(amountKobo),
-        commission: booking.commission,
-        providerPayout: koboToNaira(amountKobo) - booking.commission,
-        status: 'COMPLETED',
-        paymentMethod: 'WALLET',
-        transactionRef: walletTxn.reference,
-        paidAt: new Date(),
-        withdrawableAt: new Date(Date.now() + DISPUTE_WINDOW_HOURS * 60 * 60 * 1000),
-        walletTransactionId: walletTxn.id,
-      },
-      update: {
-        status: 'COMPLETED',
-        paymentMethod: 'WALLET',
-        transactionRef: walletTxn.reference,
-        paidAt: new Date(),
-        withdrawableAt: new Date(Date.now() + DISPUTE_WINDOW_HOURS * 60 * 60 * 1000),
-        walletTransactionId: walletTxn.id,
-      },
-    });
-
-    // Update booking status to IN_PROGRESS
-    await tx.booking.update({
-      where: { id: bookingId },
-      data: { status: 'IN_PROGRESS' },
-    });
-
-    return { walletTxn, payment };
-  });
-
-  return {
-    success: true,
-    message: 'Payment successful',
-    transaction: formatTransaction(result.walletTxn),
-    payment: result.payment,
-    newBalance: koboToNaira(result.walletTxn.balanceAfter),
-  };
-};
-
-// ==========================================
 // Provider-Specific Operations
 // ==========================================
 
 /**
- * Credit provider's wallet with service earnings
- * Called when payment is completed and service is delivered
- */
-export const creditProviderEarnings = async (
-  providerId: string,
-  amountKobo: number,
-  bookingId: string,
-  paymentId: string
-) => {
-  // Get provider's user ID
-  const provider = await prisma.serviceProvider.findUnique({
-    where: { id: providerId },
-    select: { userId: true },
-  });
-
-  if (!provider) {
-    throw new GraphQLError('Provider not found', {
-      extensions: { code: 'PROVIDER_NOT_FOUND' },
-    });
-  }
-
-  // Get or create wallet
-  const wallet = await getOrCreateWallet(provider.userId);
-
-  // Credit wallet
-  const transaction = await creditWallet({
-    walletId: wallet.id,
-    amount: amountKobo,
-    source: 'SERVICE_EARNING',
-    description: `Earnings from booking #${bookingId.substring(0, 8)}`,
-    reference: generateReference('ERN'),
-    bookingId,
-    paymentId,
-  });
-
-  // Update payment to link wallet transaction
-  await prisma.payment.update({
-    where: { id: paymentId },
-    data: { walletTransactionId: transaction.id },
-  });
-
-  return {
-    success: true,
-    transaction,
-    newBalance: transaction.balanceAfter,
-  };
-};
-
-/**
  * Get provider's withdrawable balance
- * Only includes earnings that have passed the dispute window
  */
 export const getProviderWithdrawableBalance = async (providerId: string) => {
   const provider = await prisma.serviceProvider.findUnique({
@@ -917,7 +588,7 @@ export const getProviderWithdrawableBalance = async (providerId: string) => {
 export const lockWallet = async (walletId: string, reason: string): Promise<boolean> => {
   // Atomic lock - only succeeds if wallet is not already locked
   const result = await prisma.wallet.updateMany({
-    where: { 
+    where: {
       id: walletId,
       isLocked: false, // Only lock if not already locked
     },
@@ -947,17 +618,37 @@ export const unlockWallet = async (walletId: string) => {
 };
 
 /**
- * Check and unlock stale locks (locks older than 1 hour)
- * Should be called by a background job
+ * Release locks left behind by a failure. Wallets are only locked while a
+ * withdrawal is pending or processing, so a lock with no open withdrawal is
+ * stale; a lock that still has one is left alone however old it is.
+ * Called by a background job.
  */
 export const unlockStaleWallets = async (): Promise<number> => {
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-  
+  const cutoff = new Date(Date.now() - STALE_LOCK_MINUTES * 60 * 1000);
+
+  const locked = await prisma.wallet.findMany({
+    where: { isLocked: true, updatedAt: { lt: cutoff } },
+    select: { id: true },
+    take: 500,
+  });
+
+  if (locked.length === 0) return 0;
+
+  const walletIds = locked.map((wallet) => wallet.id);
+  const openWithdrawals = await prisma.withdrawal.findMany({
+    where: { walletId: { in: walletIds }, status: { in: ['PENDING', 'PROCESSING'] } },
+    select: { walletId: true },
+  });
+
+  const inUse = new Set(openWithdrawals.map((withdrawal) => withdrawal.walletId));
+  const stale = walletIds.filter((id) => !inUse.has(id));
+
+  if (stale.length === 0) return 0;
+
+  // A locked wallet can't start a new withdrawal, so nothing can take these
+  // locks between the check above and this update
   const result = await prisma.wallet.updateMany({
-    where: {
-      isLocked: true,
-      updatedAt: { lt: oneHourAgo },
-    },
+    where: { id: { in: stale }, isLocked: true },
     data: {
       isLocked: false,
       lockedReason: null,
@@ -978,11 +669,11 @@ export const unlockStaleWallets = async (): Promise<number> => {
 /**
  * Admin wallet balance adjustment
  * For manual corrections or compensations
- * 
- * SECURITY: 
+ *
+ * SECURITY:
  * - Regular admins limited to ₦100,000 adjustments
  * - Super admins limited to ₦1,000,000 adjustments
- * - All adjustments are logged with admin ID and reason
+ * - Every adjustment records the admin and reason, and writes an audit log
  */
 export const adjustWalletBalance = async (
   userId: string,
@@ -996,8 +687,8 @@ export const adjustWalletBalance = async (
   validateAmount(amountKobo, 'Admin adjustment');
 
   // Enforce role-based limits
-  const limit = adminRole === 'SUPER_ADMIN' 
-    ? SUPER_ADMIN_ADJUSTMENT_LIMIT_KOBO 
+  const limit = adminRole === 'SUPER_ADMIN'
+    ? SUPER_ADMIN_ADJUSTMENT_LIMIT_KOBO
     : MAX_ADMIN_ADJUSTMENT_KOBO;
 
   if (amountKobo > limit) {
@@ -1016,55 +707,105 @@ export const adjustWalletBalance = async (
     );
   }
 
-  const wallet = await getOrCreateWallet(userId);
+  // Only an existing customer or provider account has a use for wallet money
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, role: true },
+  });
 
-  if (type === 'CREDIT') {
-    return creditWallet({
-      walletId: wallet.id,
-      amount: amountKobo,
-      source: 'ADMIN_ADJUSTMENT',
-      description: `Admin adjustment: ${reason}`,
-      reference: generateReference('ADJ'),
-      adjustedBy: adminId,
-      adjustmentReason: reason,
-    });
-  } else {
-    return debitWallet({
-      walletId: wallet.id,
-      amount: amountKobo,
-      source: 'ADMIN_ADJUSTMENT',
-      description: `Admin adjustment: ${reason}`,
-      reference: generateReference('ADJ'),
+  if (!user) {
+    throw new GraphQLError('User not found', {
+      extensions: { code: 'NOT_FOUND' },
     });
   }
+
+  if (user.role === 'ADMIN' || user.role === 'SUPER_ADMIN') {
+    throw new GraphQLError('Wallet adjustments can only be made to customer and provider accounts', {
+      extensions: { code: 'FORBIDDEN' },
+    });
+  }
+
+  const wallet = await ensureWallet(userId);
+
+  const entry: LedgerEntryInput = {
+    walletId: wallet.id,
+    amount: amountKobo,
+    source: 'ADMIN_ADJUSTMENT',
+    description: `Admin adjustment: ${reason}`,
+    reference: generateReference('ADJ'),
+    adjustedBy: adminId,
+    adjustmentReason: reason,
+  };
+
+  const transaction = await withTransaction((tx) =>
+    type === 'CREDIT' ? applyWalletCredit(tx, entry) : applyWalletDebit(tx, entry)
+  );
+
+  // The balance has already changed; a failed audit write must not report the
+  // adjustment as failed, or the admin may repeat it
+  try {
+    await createAuditLog({
+      action: AdminAction.ADJUST_WALLET,
+      targetType: 'Wallet',
+      targetId: wallet.id,
+      performedBy: adminId,
+      performedByRole: adminRole,
+      previousValue: { balance: koboToNaira(transaction.balanceBefore) },
+      newValue: {
+        balance: koboToNaira(transaction.balanceAfter),
+        type,
+        amount: koboToNaira(amountKobo),
+        reference: transaction.reference,
+      },
+      reason,
+    });
+  } catch (error) {
+    captureException(error as Error, { tags: { area: 'wallet' }, extra: { walletId: wallet.id, reference: transaction.reference } });
+  }
+
+  return formatTransaction(transaction);
 };
 
 /**
- * Get daily withdrawal total for a user
+ * Get today's withdrawal total for a user, net of transfers that failed and
+ * were returned to the wallet
  */
 export const getDailyWithdrawalTotal = async (userId: string): Promise<number> => {
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
+  // The day starts at midnight in Lagos (UTC+1 all year), whatever the server's timezone
+  const lagosNow = new Date(Date.now() + LAGOS_UTC_OFFSET_MS);
+  lagosNow.setUTCHours(0, 0, 0, 0);
+  const startOfDay = new Date(lagosNow.getTime() - LAGOS_UTC_OFFSET_MS);
 
-  const result = await prisma.walletTransaction.aggregate({
-    where: {
-      wallet: { userId },
-      type: 'DEBIT',
-      source: 'WITHDRAWAL',
-      createdAt: { gte: startOfDay },
-    },
-    _sum: { amount: true },
-  });
+  const [debits, reversals] = await Promise.all([
+    prisma.walletTransaction.aggregate({
+      where: {
+        wallet: { userId },
+        type: 'DEBIT',
+        source: 'WITHDRAWAL',
+        createdAt: { gte: startOfDay },
+      },
+      _sum: { amount: true },
+    }),
+    prisma.walletTransaction.aggregate({
+      where: {
+        wallet: { userId },
+        type: 'CREDIT',
+        source: 'WITHDRAWAL_REVERSAL',
+        createdAt: { gte: startOfDay },
+      },
+      _sum: { amount: true },
+    }),
+  ]);
 
-  return result._sum.amount || 0;
+  return Math.max((debits._sum.amount || 0) - (reversals._sum.amount || 0), 0);
 };
 
 /**
  * Check if user can withdraw specified amount (within daily limit)
  */
-export const canWithdraw = async (userId: string, amountKobo: number): Promise<{ 
-  allowed: boolean; 
-  reason?: string; 
+export const canWithdraw = async (userId: string, amountKobo: number): Promise<{
+  allowed: boolean;
+  reason?: string;
   remainingLimit?: number;
 }> => {
   const dailyTotal = await getDailyWithdrawalTotal(userId);
@@ -1125,8 +866,8 @@ export const getAllWallets = async (pagination: PaginationInput) => {
 };
 
 // Export constants for use in other services
-export { 
-  MAX_DAILY_WITHDRAWAL_KOBO, 
+export {
+  MAX_DAILY_WITHDRAWAL_KOBO,
   MAX_SINGLE_TRANSACTION_KOBO,
   MAX_ADMIN_ADJUSTMENT_KOBO,
   SUPER_ADMIN_ADJUSTMENT_LIMIT_KOBO,

@@ -1,8 +1,8 @@
 /**
  * User Management Service
- * 
+ *
  * Admin functions for managing users and providers.
- * 
+ *
  * Features:
  * - List/search users and providers
  * - View detailed user/provider profiles
@@ -12,10 +12,20 @@
 
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
-import { UserRole, AccountStatus, AdminAction } from '@prisma/client';
+import {
+  UserRole,
+  AccountStatus,
+  AdminAction,
+  BookingStatus,
+  type Prisma,
+  type VerificationStatus,
+} from '@prisma/client';
 import { createAuditLog } from './audit.service';
 import { createNotification } from './notification.service';
 import { sendPushToUser } from './push.service';
+import { getEscrowedEarningsKobo } from './wallet.service';
+import { isBanActive, isRestrictionActive } from '@/utils/security';
+import { normalizeNigerianPhone } from '@/utils/validation';
 
 /**
  * Write an in-app notification AND fire a push so the user is alerted to
@@ -23,7 +33,7 @@ import { sendPushToUser } from './push.service';
  * action has already happened in the DB and we don't want to roll back
  * a ban/restriction because a downstream service is flaky.
  */
-const notifyAndPush = async (
+export const notifyAndPush = async (
   userId: string,
   type: string,
   title: string,
@@ -50,21 +60,25 @@ const notifyAndPush = async (
 // Types
 // ==========================================
 
+// accountStatus / searchTerm / startDate / endDate are the names the GraphQL filters use
 interface UserFilters {
-  role?: UserRole;
-  status?: AccountStatus;
-  search?: string;
-  isBanned?: boolean;
-  isRestricted?: boolean;
+  role?: UserRole | null;
+  status?: AccountStatus | null;
+  accountStatus?: AccountStatus | null;
+  search?: string | null;
+  searchTerm?: string | null;
+  isBanned?: boolean | null;
+  isRestricted?: boolean | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  // Provider profile filters
+  verificationStatus?: VerificationStatus | null;
+  city?: string | null;
+  state?: string | null;
 }
 
-interface ProviderFilters {
-  verificationStatus?: string;
-  status?: AccountStatus;
-  search?: string;
-  city?: string;
-  state?: string;
-}
+// managedProviders takes the same filters as managedUsers
+type ProviderFilters = UserFilters;
 
 interface PaginationInput {
   page: number;
@@ -73,14 +87,18 @@ interface PaginationInput {
 
 interface BanUserInput {
   userId: string;
-  reason: string;
-  days?: number; // null = permanent
+  reason: string; // Saved on the account and in the audit log
+  days?: number | null; // null = permanent
+  // Shown to the user instead of `reason`, when the reason is written for admins
+  userFacingReason?: string | null;
 }
 
 interface RestrictUserInput {
   userId: string;
-  reason: string;
+  reason: string; // Saved on the account and in the audit log
   days: number;
+  // Shown to the user instead of `reason`, when the reason is written for admins
+  userFacingReason?: string | null;
 }
 
 // ==========================================
@@ -89,32 +107,203 @@ interface RestrictUserInput {
 
 const MANAGEABLE_ROLES: string[] = [UserRole.SERVICE_USER, UserRole.SERVICE_PROVIDER];
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Longest ban or restriction with an end date
+const MAX_MODERATION_DAYS = 365;
+
+// Bookings that are still going ahead
+const OPEN_BOOKING_STATUSES: BookingStatus[] = [
+  BookingStatus.PENDING,
+  BookingStatus.ACCEPTED,
+  BookingStatus.IN_PROGRESS,
+];
+
+// Reviews an admin removed don't appear in any list, count or rating. On MongoDB
+// a field that was never written doesn't match `null`, so both are checked.
+const NOT_REMOVED_REVIEW: Prisma.ReviewWhereInput = {
+  OR: [{ deletedAt: null }, { deletedAt: { isSet: false } }],
+};
+
 // ==========================================
 // Helper Functions
 // ==========================================
 
+type AccountAction = 'BAN' | 'UNBAN' | 'RESTRICT' | 'UNRESTRICT';
+
 /**
- * Check if admin can act on target user
+ * Check if admin can act on target user. An ADMIN can act only on customers and
+ * providers. A SUPER_ADMIN can act on anyone, except that Super Admins can't be
+ * banned or restricted (lifting an older ban or restriction is allowed).
  */
 const canAdminActOn = (
   adminRole: string,
   targetRole: string,
-  action: 'BAN' | 'RESTRICT' | 'SUSPEND'
+  action: AccountAction
 ): boolean => {
-  // Super Admin can act on anyone except other Super Admins (for ban)
   if (adminRole === UserRole.SUPER_ADMIN) {
-    if (action === 'BAN' && targetRole === UserRole.SUPER_ADMIN) {
-      return false;
-    }
-    return true;
+    return targetRole !== UserRole.SUPER_ADMIN || action === 'UNBAN' || action === 'UNRESTRICT';
   }
 
-  // Admin can only act on SERVICE_USER and SERVICE_PROVIDER
   if (adminRole === UserRole.ADMIN) {
     return MANAGEABLE_ROLES.includes(targetRole);
   }
 
   return false;
+};
+
+const forbidden = (message: string) =>
+  new GraphQLError(message, { extensions: { code: 'FORBIDDEN' } });
+
+const isValidDuration = (days: unknown): days is number =>
+  typeof days === 'number' && Number.isInteger(days) && days >= 1 && days <= MAX_MODERATION_DAYS;
+
+const invalidDuration = () =>
+  new GraphQLError(`Duration must be a whole number of days between 1 and ${MAX_MODERATION_DAYS}`, {
+    extensions: { code: 'INVALID_INPUT' },
+  });
+
+const dayCount = (days: number) => `${days} day${days === 1 ? '' : 's'}`;
+
+// On MongoDB a field that was never written doesn't match `null`, so "no value"
+// checks for both and "has a value" rules out both.
+
+/** Accounts with a ban in force: banned, with no end date or one still to come */
+const banInForce = (now: Date): Prisma.UserWhereInput => ({
+  AND: [
+    { bannedAt: { isSet: true } },
+    { bannedAt: { not: null } },
+    { OR: [{ bannedUntil: null }, { bannedUntil: { isSet: false } }, { bannedUntil: { gt: now } }] },
+  ],
+});
+
+/** Accounts never banned, unbanned, or whose ban has ended */
+const noBanInForce = (now: Date): Prisma.UserWhereInput => ({
+  OR: [
+    { bannedAt: null },
+    { bannedAt: { isSet: false } },
+    { AND: [{ bannedUntil: { isSet: true } }, { bannedUntil: { not: null } }, { bannedUntil: { lte: now } }] },
+  ],
+});
+
+/** Accounts with a restriction in force */
+const restrictionInForce = (now: Date): Prisma.UserWhereInput => ({
+  AND: [
+    { restrictedAt: { isSet: true } },
+    { restrictedAt: { not: null } },
+    { OR: [{ restrictedUntil: null }, { restrictedUntil: { isSet: false } }, { restrictedUntil: { gt: now } }] },
+  ],
+});
+
+/** Accounts never restricted, unrestricted, or whose restriction has ended */
+const noRestrictionInForce = (now: Date): Prisma.UserWhereInput => ({
+  OR: [
+    { restrictedAt: null },
+    { restrictedAt: { isSet: false } },
+    {
+      AND: [
+        { restrictedUntil: { isSet: true } },
+        { restrictedUntil: { not: null } },
+        { restrictedUntil: { lte: now } },
+      ],
+    },
+  ],
+});
+
+/**
+ * Account conditions for the isBanned / isRestricted filters, on the ban or
+ * restriction being in force now
+ */
+const moderationConditions = (filters: UserFilters, now: Date): Prisma.UserWhereInput[] => {
+  const conditions: Prisma.UserWhereInput[] = [];
+
+  if (filters.isBanned === true) conditions.push(banInForce(now));
+  if (filters.isBanned === false) conditions.push(noBanInForce(now));
+  if (filters.isRestricted === true) conditions.push(restrictionInForce(now));
+  if (filters.isRestricted === false) conditions.push(noRestrictionInForce(now));
+
+  return conditions;
+};
+
+/**
+ * Provider profile conditions for the verificationStatus / city / state filters,
+ * or null when none is set
+ */
+const providerProfileConditions = (filters: UserFilters): Prisma.ServiceProviderWhereInput | null => {
+  const where: Prisma.ServiceProviderWhereInput = {};
+
+  if (filters.verificationStatus) {
+    where.verificationStatus = filters.verificationStatus;
+  }
+
+  if (filters.city) {
+    where.city = { contains: filters.city, mode: 'insensitive' };
+  }
+
+  if (filters.state) {
+    where.state = { contains: filters.state, mode: 'insensitive' };
+  }
+
+  return Object.keys(where).length > 0 ? where : null;
+};
+
+/**
+ * Creation date range for the startDate / endDate filters, or null when neither is set
+ */
+const createdBetween = (filters: UserFilters): Prisma.DateTimeFilter | null =>
+  filters.startDate || filters.endDate
+    ? {
+        ...(filters.startDate && { gte: new Date(filters.startDate) }),
+        ...(filters.endDate && { lte: new Date(filters.endDate) }),
+      }
+    : null;
+
+/**
+ * Phone conditions for a search term: the text as typed, and for a full Nigerian
+ * mobile number every form it may be saved in (+234, 234 or 0 before the last
+ * 10 digits; older accounts weren't normalised)
+ */
+const phoneSearchConditions = (search: string): Prisma.UserWhereInput[] => {
+  const conditions: Prisma.UserWhereInput[] = [{ phone: { contains: search } }];
+  const normalized = normalizeNigerianPhone(search);
+
+  if (normalized) {
+    const digits = normalized.slice('+234'.length);
+    conditions.push({ phone: { in: [normalized, `0${digits}`, `234${digits}`] } });
+  }
+
+  return conditions;
+};
+
+/**
+ * Earnings released to each provider's wallet, in naira, by user ID. Escrow
+ * credits the wallet once for each released booking (source SERVICE_EARNING),
+ * and a released payment can't be refunded, so the ledger total is what the
+ * provider has been paid for their work. Money still held in escrow isn't included.
+ */
+const getReleasedEarnings = async (userIds: string[]): Promise<Map<string, number>> => {
+  if (userIds.length === 0) return new Map();
+
+  const wallets = await prisma.wallet.findMany({
+    where: { userId: { in: userIds } },
+    select: { id: true, userId: true },
+  });
+
+  if (wallets.length === 0) return new Map();
+
+  const totals = await prisma.walletTransaction.groupBy({
+    by: ['walletId'],
+    where: {
+      walletId: { in: wallets.map((wallet) => wallet.id) },
+      type: 'CREDIT',
+      source: 'SERVICE_EARNING',
+    },
+    _sum: { amount: true },
+  });
+
+  const koboByWallet = new Map(totals.map((total) => [total.walletId, total._sum.amount ?? 0]));
+
+  return new Map(wallets.map((wallet) => [wallet.userId, (koboByWallet.get(wallet.id) ?? 0) / 100]));
 };
 
 /**
@@ -129,13 +318,24 @@ const formatUserForManagement = (user: any) => ({
   profilePhoto: user.profilePhoto,
   role: user.role,
   status: user.status,
+  accountStatus: user.status,
   isEmailVerified: user.isEmailVerified,
   bannedAt: user.bannedAt?.toISOString() || null,
   bannedUntil: user.bannedUntil?.toISOString() || null,
   banReason: user.banReason,
+  bannedReason: user.banReason,
+  isBanned: isBanActive(user),
   restrictedAt: user.restrictedAt?.toISOString() || null,
   restrictedUntil: user.restrictedUntil?.toISOString() || null,
   restrictionReason: user.restrictionReason,
+  isRestricted: isRestrictionActive(user),
+  provider: user.provider
+    ? {
+        id: user.provider.id,
+        businessName: user.provider.businessName,
+        verificationStatus: user.provider.verificationStatus,
+      }
+    : null,
   lastLoginAt: user.lastLoginAt?.toISOString() || null,
   createdAt: user.createdAt.toISOString(),
   updatedAt: user.updatedAt.toISOString(),
@@ -177,35 +377,40 @@ export const getAllUsers = async (
   const { page, limit } = pagination;
   const skip = (page - 1) * limit;
 
-  const where: any = {};
+  const where: Prisma.UserWhereInput = {};
 
   if (filters.role) {
     where.role = filters.role;
   }
 
-  if (filters.status) {
-    where.status = filters.status;
+  const status = filters.accountStatus ?? filters.status;
+  if (status) {
+    where.status = status;
   }
 
-  if (filters.search) {
+  const createdAt = createdBetween(filters);
+  if (createdAt) {
+    where.createdAt = createdAt;
+  }
+
+  const search = filters.searchTerm ?? filters.search;
+  if (search) {
     where.OR = [
-      { email: { contains: filters.search, mode: 'insensitive' } },
-      { firstName: { contains: filters.search, mode: 'insensitive' } },
-      { lastName: { contains: filters.search, mode: 'insensitive' } },
-      { phone: { contains: filters.search } },
+      { email: { contains: search, mode: 'insensitive' } },
+      { firstName: { contains: search, mode: 'insensitive' } },
+      { lastName: { contains: search, mode: 'insensitive' } },
+      ...phoneSearchConditions(search),
     ];
   }
 
-  if (filters.isBanned === true) {
-    where.bannedAt = { not: null };
-  } else if (filters.isBanned === false) {
-    where.bannedAt = null;
+  const profile = providerProfileConditions(filters);
+  if (profile) {
+    where.provider = { is: profile };
   }
 
-  if (filters.isRestricted === true) {
-    where.restrictedAt = { not: null };
-  } else if (filters.isRestricted === false) {
-    where.restrictedAt = null;
+  const conditions = moderationConditions(filters, new Date());
+  if (conditions.length > 0) {
+    where.AND = conditions;
   }
 
   const [users, total] = await Promise.all([
@@ -215,10 +420,11 @@ export const getAllUsers = async (
       skip,
       take: limit,
       include: {
+        provider: true,
         _count: {
           select: {
             bookingsAsUser: true,
-            reviews: true,
+            reviews: { where: NOT_REMOVED_REVIEW },
           },
         },
       },
@@ -226,12 +432,19 @@ export const getAllUsers = async (
     prisma.user.count({ where }),
   ]);
 
+  const items = users.map((u) => ({
+    ...formatUserForManagement(u),
+    bookingsCount: u._count?.bookingsAsUser || 0,
+    reviewsCount: u._count?.reviews || 0,
+  }));
+
   return {
-    users: users.map((u) => ({
-      ...formatUserForManagement(u),
-      bookingsCount: u._count?.bookingsAsUser || 0,
-      reviewsCount: u._count?.reviews || 0,
-    })),
+    items,
+    total,
+    page,
+    totalPages: Math.ceil(total / limit),
+    hasNextPage: page * limit < total,
+    users: items,
     pagination: {
       page,
       limit,
@@ -261,6 +474,7 @@ export const getUserDetails = async (userId: string) => {
         },
       },
       reviews: {
+        where: NOT_REMOVED_REVIEW,
         take: 10,
         orderBy: { createdAt: 'desc' },
       },
@@ -268,7 +482,7 @@ export const getUserDetails = async (userId: string) => {
       _count: {
         select: {
           bookingsAsUser: true,
-          reviews: true,
+          reviews: { where: NOT_REMOVED_REVIEW },
           favourites: true,
         },
       },
@@ -281,14 +495,18 @@ export const getUserDetails = async (userId: string) => {
     });
   }
 
-  // Calculate total spent
-  const totalSpent = await prisma.payment.aggregate({
-    where: {
-      booking: { userId },
-      status: 'COMPLETED',
-    },
-    _sum: { amount: true },
-  });
+  const [totalSpent, escrowedKobo] = await Promise.all([
+    // Calculate total spent
+    prisma.payment.aggregate({
+      where: {
+        booking: { userId },
+        status: 'COMPLETED',
+      },
+      _sum: { amount: true },
+    }),
+    // A wallet's pending balance is the provider's share of paid bookings still in escrow
+    user.wallet && user.provider ? getEscrowedEarningsKobo(userId) : 0,
+  ]);
 
   return {
     ...formatUserForManagement(user),
@@ -299,8 +517,8 @@ export const getUserDetails = async (userId: string) => {
     } : null,
     wallet: user.wallet ? {
       id: user.wallet.id,
-      balance: (user.wallet as any).balance / 100, // Convert kobo to naira
-      pendingBalance: (user.wallet as any).pendingBalance / 100,
+      balance: user.wallet.balance / 100, // Convert kobo to naira
+      pendingBalance: escrowedKobo / 100,
     } : null,
     recentBookings: user.bookingsAsUser.map((b) => ({
       id: b.id,
@@ -330,30 +548,37 @@ export const getAllProviders = async (
   const { page, limit } = pagination;
   const skip = (page - 1) * limit;
 
-  const where: any = {};
+  const where: Prisma.ServiceProviderWhereInput = { ...providerProfileConditions(filters) };
 
-  if (filters.verificationStatus) {
-    where.verificationStatus = filters.verificationStatus;
+  // Filters on the provider's own account
+  const accountConditions = moderationConditions(filters, new Date());
+
+  if (filters.role) {
+    accountConditions.push({ role: filters.role });
   }
 
-  if (filters.city) {
-    where.city = { contains: filters.city, mode: 'insensitive' };
+  const status = filters.accountStatus ?? filters.status;
+  if (status) {
+    accountConditions.push({ status });
   }
 
-  if (filters.state) {
-    where.state = { contains: filters.state, mode: 'insensitive' };
+  if (accountConditions.length > 0) {
+    where.user = { is: { AND: accountConditions } };
   }
 
-  if (filters.status) {
-    where.user = { status: filters.status };
+  // The dates apply to the provider profile, which is also what the list is sorted by
+  const createdAt = createdBetween(filters);
+  if (createdAt) {
+    where.createdAt = createdAt;
   }
 
-  if (filters.search) {
+  const search = filters.searchTerm ?? filters.search;
+  if (search) {
     where.OR = [
-      { businessName: { contains: filters.search, mode: 'insensitive' } },
-      { user: { email: { contains: filters.search, mode: 'insensitive' } } },
-      { user: { firstName: { contains: filters.search, mode: 'insensitive' } } },
-      { user: { lastName: { contains: filters.search, mode: 'insensitive' } } },
+      { businessName: { contains: search, mode: 'insensitive' } },
+      { user: { email: { contains: search, mode: 'insensitive' } } },
+      { user: { firstName: { contains: search, mode: 'insensitive' } } },
+      { user: { lastName: { contains: search, mode: 'insensitive' } } },
     ];
   }
 
@@ -369,7 +594,7 @@ export const getAllProviders = async (
           select: {
             services: true,
             bookings: true,
-            reviews: true,
+            reviews: { where: NOT_REMOVED_REVIEW },
           },
         },
       },
@@ -377,21 +602,44 @@ export const getAllProviders = async (
     prisma.serviceProvider.count({ where }),
   ]);
 
-  // Calculate average ratings
-  const providersWithRatings = await Promise.all(
-    providers.map(async (p) => {
-      const avgRating = await prisma.review.aggregate({
-        where: { providerId: p.id },
-        _avg: { rating: true },
-      });
-      return {
-        ...p,
-        averageRating: avgRating._avg.rating,
-      };
-    })
-  );
+  // Average ratings, and earnings released to each provider's wallet
+  const [providersWithRatings, earnings] = await Promise.all([
+    Promise.all(
+      providers.map(async (p) => {
+        const avgRating = await prisma.review.aggregate({
+          where: { providerId: p.id, ...NOT_REMOVED_REVIEW },
+          _avg: { rating: true },
+        });
+        return {
+          ...p,
+          averageRating: avgRating._avg.rating,
+        };
+      })
+    ),
+    getReleasedEarnings(providers.map((p) => p.userId)),
+  ]);
+
+  // managedProviders returns ManagedUser items with the provider attached
+  const items = providersWithRatings.map((p) => ({
+    ...formatUserForManagement(p.user),
+    provider: {
+      id: p.id,
+      businessName: p.businessName,
+      verificationStatus: p.verificationStatus,
+      averageRating: p.averageRating,
+      totalReviews: p._count.reviews,
+      totalServices: p._count.services,
+      totalBookings: p._count.bookings,
+      totalEarnings: earnings.get(p.userId) ?? 0,
+    },
+  }));
 
   return {
+    items,
+    total,
+    page,
+    totalPages: Math.ceil(total / limit),
+    hasNextPage: page * limit < total,
     providers: providersWithRatings.map(formatProviderForManagement),
     pagination: {
       page,
@@ -430,6 +678,7 @@ export const getProviderDetails = async (providerId: string) => {
         },
       },
       reviews: {
+        where: NOT_REMOVED_REVIEW,
         take: 10,
         orderBy: { createdAt: 'desc' },
         include: {
@@ -441,7 +690,7 @@ export const getProviderDetails = async (providerId: string) => {
         select: {
           services: true,
           bookings: true,
-          reviews: true,
+          reviews: { where: NOT_REMOVED_REVIEW },
         },
       },
     },
@@ -453,39 +702,35 @@ export const getProviderDetails = async (providerId: string) => {
     });
   }
 
-  // Calculate earnings
-  const earnings = await prisma.payment.aggregate({
-    where: {
-      booking: { providerId },
-      status: 'COMPLETED',
-    },
-    _sum: { providerPayout: true },
-  });
-
-  // Calculate average rating
-  const avgRating = await prisma.review.aggregate({
-    where: { providerId },
-    _avg: { rating: true },
-  });
-
-  // Get withdrawal stats
-  const withdrawals = await prisma.withdrawal.aggregate({
-    where: {
-      providerId,
-      status: 'COMPLETED',
-    },
-    _sum: { amount: true },
-    _count: true,
-  });
+  const [avgRating, withdrawals, releasedEarnings, escrowedKobo] = await Promise.all([
+    // Calculate average rating
+    prisma.review.aggregate({
+      where: { providerId, ...NOT_REMOVED_REVIEW },
+      _avg: { rating: true },
+    }),
+    // Get withdrawal stats
+    prisma.withdrawal.aggregate({
+      where: {
+        providerId,
+        status: 'COMPLETED',
+      },
+      _sum: { amount: true },
+      _count: true,
+    }),
+    // Earnings released to the wallet, the same figure as managedProviders shows
+    getReleasedEarnings([provider.userId]),
+    // The provider's share of paid bookings still held in escrow
+    getEscrowedEarningsKobo(provider.userId),
+  ]);
 
   return {
     ...formatProviderForManagement(provider),
     user: formatUserForManagement(provider.user),
     wallet: provider.user.wallet ? {
       id: provider.user.wallet.id,
-      balance: (provider.user.wallet as any).balance / 100,
-      pendingBalance: (provider.user.wallet as any).pendingBalance / 100,
-      isLocked: (provider.user.wallet as any).isLocked,
+      balance: provider.user.wallet.balance / 100,
+      pendingBalance: escrowedKobo / 100,
+      isLocked: provider.user.wallet.isLocked,
     } : null,
     services: provider.services.map((s) => ({
       id: s.id,
@@ -521,7 +766,7 @@ export const getProviderDetails = async (providerId: string) => {
       totalBookings: provider._count.bookings,
       totalReviews: provider._count.reviews,
       averageRating: avgRating._avg.rating || 0,
-      totalEarnings: earnings._sum.providerPayout || 0,
+      totalEarnings: releasedEarnings.get(provider.userId) ?? 0,
       totalWithdrawn: (withdrawals._sum.amount || 0) / 100,
       withdrawalCount: withdrawals._count,
     },
@@ -541,7 +786,11 @@ export const banUser = async (
   adminRole: string,
   ipAddress?: string
 ) => {
-  const { userId, reason, days } = input;
+  const { userId, reason, days, userFacingReason } = input;
+
+  if (days != null && !isValidDuration(days)) {
+    throw invalidDuration();
+  }
 
   // Self-check
   if (userId === adminId) {
@@ -554,7 +803,8 @@ export const banUser = async (
     where: { id: userId },
   });
 
-  if (!user) {
+  // A deleted account has nothing left to ban
+  if (!user || user.deletedAt) {
     throw new GraphQLError('User not found', {
       extensions: { code: 'NOT_FOUND' },
     });
@@ -562,58 +812,55 @@ export const banUser = async (
 
   // Role hierarchy check
   if (!canAdminActOn(adminRole, user.role, 'BAN')) {
-    throw new GraphQLError('You do not have permission to ban this user', {
-      extensions: { code: 'FORBIDDEN' },
-    });
+    throw forbidden('You do not have permission to ban this user');
   }
 
-  // Calculate ban end date
-  const bannedUntil = days
-    ? new Date(Date.now() + days * 24 * 60 * 60 * 1000)
-    : null; // null = permanent
+  const now = new Date();
+  const bannedUntil = days ? new Date(now.getTime() + days * DAY_MS) : null; // null = permanent
 
-  // Update user
-  await prisma.user.update({
+  const updatedUser = await prisma.user.update({
     where: { id: userId },
     data: {
-      bannedAt: new Date(),
+      bannedAt: now,
       bannedUntil,
       banReason: reason,
       bannedBy: adminId,
-      tokenInvalidatedAt: new Date(), // Force re-login (which will fail)
+      tokenInvalidatedAt: now, // Ends every session the user has
     },
+    include: { provider: true },
   });
 
-  // Create audit log
   await createAuditLog({
-    action: 'BAN_USER' as AdminAction,
+    action: AdminAction.BAN_USER,
     targetType: 'User',
     targetId: userId,
     performedBy: adminId,
     performedByRole: adminRole,
-    previousValue: { bannedAt: null },
-    newValue: { bannedAt: new Date(), bannedUntil, banReason: reason },
+    previousValue: { bannedAt: user.bannedAt, bannedUntil: user.bannedUntil, banReason: user.banReason },
+    newValue: { bannedAt: now, bannedUntil, banReason: reason },
     reason,
     ipAddress,
   });
 
-  // Notify user
+  const shownReason = userFacingReason?.trim() || reason;
+
   await notifyAndPush(
     userId,
     'ACCOUNT_SUSPENDED',
     'Account Banned',
     days
-      ? `Your account has been banned for ${days} days. Reason: ${reason}`
-      : `Your account has been permanently banned. Reason: ${reason}`,
-    { reason, bannedUntil },
+      ? `Your account has been banned for ${dayCount(days)}. Reason: ${shownReason}`
+      : `Your account has been permanently banned. Reason: ${shownReason}`,
+    { reason: shownReason, bannedUntil },
   );
 
   return {
     success: true,
     message: days
-      ? `User banned for ${days} days`
+      ? `User banned for ${dayCount(days)}`
       : 'User permanently banned',
     bannedUntil,
+    user: formatUserForManagement(updatedUser),
   };
 };
 
@@ -636,14 +883,18 @@ export const unbanUser = async (
     });
   }
 
+  // Same role rules as banning, so an ADMIN can't lift a ban on an admin account
+  if (!canAdminActOn(adminRole, user.role, 'UNBAN')) {
+    throw forbidden('You do not have permission to unban this user');
+  }
+
   if (!user.bannedAt) {
     throw new GraphQLError('User is not banned', {
       extensions: { code: 'NOT_BANNED' },
     });
   }
 
-  // Update user
-  await prisma.user.update({
+  const updatedUser = await prisma.user.update({
     where: { id: userId },
     data: {
       bannedAt: null,
@@ -651,21 +902,20 @@ export const unbanUser = async (
       banReason: null,
       bannedBy: null,
     },
+    include: { provider: true },
   });
 
-  // Create audit log
   await createAuditLog({
-    action: 'UNBAN_USER' as AdminAction,
+    action: AdminAction.UNBAN_USER,
     targetType: 'User',
     targetId: userId,
     performedBy: adminId,
     performedByRole: adminRole,
-    previousValue: { bannedAt: user.bannedAt, banReason: user.banReason },
+    previousValue: { bannedAt: user.bannedAt, bannedUntil: user.bannedUntil, banReason: user.banReason },
     newValue: { bannedAt: null },
     ipAddress,
   });
 
-  // Notify user
   await notifyAndPush(
     userId,
     'ACCOUNT_ACTIVATED',
@@ -676,6 +926,7 @@ export const unbanUser = async (
   return {
     success: true,
     message: 'User unbanned successfully',
+    user: formatUserForManagement(updatedUser),
   };
 };
 
@@ -689,7 +940,11 @@ export const restrictUser = async (
   adminRole: string,
   ipAddress?: string
 ) => {
-  const { userId, reason, days } = input;
+  const { userId, reason, days, userFacingReason } = input;
+
+  if (!isValidDuration(days)) {
+    throw invalidDuration();
+  }
 
   // Self-check
   if (userId === adminId) {
@@ -698,22 +953,18 @@ export const restrictUser = async (
     });
   }
 
+  const openBookings = { where: { status: { in: OPEN_BOOKING_STATUSES } } };
+
   const user = await prisma.user.findUnique({
     where: { id: userId },
     include: {
-      _count: {
-        select: {
-          bookingsAsUser: {
-            where: {
-              status: { in: ['PENDING', 'ACCEPTED', 'IN_PROGRESS'] },
-            },
-          },
-        },
-      },
+      _count: { select: { bookingsAsUser: openBookings } },
+      provider: { select: { _count: { select: { bookings: openBookings } } } },
     },
   });
 
-  if (!user) {
+  // A deleted account has nothing left to restrict
+  if (!user || user.deletedAt) {
     throw new GraphQLError('User not found', {
       extensions: { code: 'NOT_FOUND' },
     });
@@ -721,55 +972,60 @@ export const restrictUser = async (
 
   // Role hierarchy check
   if (!canAdminActOn(adminRole, user.role, 'RESTRICT')) {
-    throw new GraphQLError('You do not have permission to restrict this user', {
-      extensions: { code: 'FORBIDDEN' },
-    });
+    throw forbidden('You do not have permission to restrict this user');
   }
 
-  const restrictedUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-  const pendingBookingsCount = user._count.bookingsAsUser;
+  const now = new Date();
+  const restrictedUntil = new Date(now.getTime() + days * DAY_MS);
+  // Open bookings the account has as a customer and as a provider
+  const pendingBookingsCount = user._count.bookingsAsUser + (user.provider?._count.bookings ?? 0);
 
-  // Update user
-  await prisma.user.update({
+  const updatedUser = await prisma.user.update({
     where: { id: userId },
     data: {
-      restrictedAt: new Date(),
+      restrictedAt: now,
       restrictedUntil,
       restrictionReason: reason,
       restrictedBy: adminId,
     },
+    include: { provider: true },
   });
 
-  // Create audit log
   await createAuditLog({
-    action: 'RESTRICT_USER' as AdminAction,
+    action: AdminAction.RESTRICT_USER,
     targetType: 'User',
     targetId: userId,
     performedBy: adminId,
     performedByRole: adminRole,
-    previousValue: { restrictedAt: null },
-    newValue: { restrictedAt: new Date(), restrictedUntil, restrictionReason: reason },
+    previousValue: {
+      restrictedAt: user.restrictedAt,
+      restrictedUntil: user.restrictedUntil,
+      restrictionReason: user.restrictionReason,
+    },
+    newValue: { restrictedAt: now, restrictedUntil, restrictionReason: reason },
     reason,
     ipAddress,
   });
 
-  // Notify user
+  const shownReason = userFacingReason?.trim() || reason;
+
   await notifyAndPush(
     userId,
     'ACCOUNT_SUSPENDED',
     'Account Restricted',
-    `Your account has been restricted for ${days} days. You can still view your account but cannot make new transactions. Reason: ${reason}`,
-    { reason, restrictedUntil },
+    `Your account has been restricted for ${dayCount(days)}. You can still view your account but cannot make new transactions. Reason: ${shownReason}`,
+    { reason: shownReason, restrictedUntil },
   );
 
   return {
     success: true,
-    message: `User restricted for ${days} days`,
+    message: `User restricted for ${dayCount(days)}`,
     restrictedUntil,
     pendingBookingsCount,
     warning: pendingBookingsCount > 0
       ? `User has ${pendingBookingsCount} pending booking(s) that will continue`
       : null,
+    user: formatUserForManagement(updatedUser),
   };
 };
 
@@ -792,14 +1048,18 @@ export const removeRestriction = async (
     });
   }
 
+  // Same role rules as restricting, so an ADMIN can't lift a restriction on an admin account
+  if (!canAdminActOn(adminRole, user.role, 'UNRESTRICT')) {
+    throw forbidden('You do not have permission to remove this restriction');
+  }
+
   if (!user.restrictedAt) {
     throw new GraphQLError('User is not restricted', {
       extensions: { code: 'NOT_RESTRICTED' },
     });
   }
 
-  // Update user
-  await prisma.user.update({
+  const updatedUser = await prisma.user.update({
     where: { id: userId },
     data: {
       restrictedAt: null,
@@ -807,21 +1067,24 @@ export const removeRestriction = async (
       restrictionReason: null,
       restrictedBy: null,
     },
+    include: { provider: true },
   });
 
-  // Create audit log
   await createAuditLog({
-    action: 'UNRESTRICT_USER' as AdminAction,
+    action: AdminAction.UNRESTRICT_USER,
     targetType: 'User',
     targetId: userId,
     performedBy: adminId,
     performedByRole: adminRole,
-    previousValue: { restrictedAt: user.restrictedAt, restrictionReason: user.restrictionReason },
+    previousValue: {
+      restrictedAt: user.restrictedAt,
+      restrictedUntil: user.restrictedUntil,
+      restrictionReason: user.restrictionReason,
+    },
     newValue: { restrictedAt: null },
     ipAddress,
   });
 
-  // Notify user
   await notifyAndPush(
     userId,
     'ACCOUNT_ACTIVATED',
@@ -832,6 +1095,7 @@ export const removeRestriction = async (
   return {
     success: true,
     message: 'User restriction removed successfully',
+    user: formatUserForManagement(updatedUser),
   };
 };
 

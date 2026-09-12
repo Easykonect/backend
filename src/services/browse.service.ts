@@ -4,17 +4,19 @@
  *
  * Features:
  * - Browse all verified providers with filters
- * - Sort by: rating, popularity (likes), newest, name
+ * - Sort by: rating, popularity (likes), newest, name, distance (nearby only)
  * - Filter by: city, state, category, verifiedOnly, minRating
  * - Haversine-based distance calculation (for nearby providers)
  * - Paginated results
  */
 
 import { GraphQLError } from 'graphql';
+import type { Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import { config } from '@/config';
-import { VerificationStatus } from '@/constants';
+import { UserRole, VerificationStatus } from '@/constants';
 import { sanitizeSearchQuery } from '@/utils/security';
+import { getBlockedUserIds, isBlockedBetween } from '@/services/block.service';
 
 // ==================
 // Types
@@ -24,7 +26,8 @@ export type ProviderSortBy =
   | 'RATING_DESC'
   | 'POPULARITY_DESC'
   | 'NEWEST'
-  | 'NAME_ASC';
+  | 'NAME_ASC'
+  | 'NEAREST';
 
 export interface ProviderFiltersInput {
   city?: string;
@@ -54,6 +57,12 @@ export interface NearbyProvidersInput {
   excludeUserId?: string;
 }
 
+// The signed-in user opening a provider profile
+export interface ProfileViewer {
+  userId: string;
+  role: string;
+}
+
 // ==================
 // Haversine Distance
 // ==================
@@ -80,6 +89,42 @@ export const haversineDistance = (
   return Math.round(R * c * 10) / 10; // 1 decimal place
 };
 
+// Upper bound on providers loaded for one nearby search
+export const MAX_NEARBY_CANDIDATES = 1000;
+
+// A dense area's search radius is never narrowed below this
+export const MIN_NEARBY_RADIUS_KM = 1;
+
+// Reviews an admin removed (soft-deleted) don't count towards ratings or review
+// totals. Reviews written before soft deletion have no deletedAt field at all.
+const COUNTED_REVIEWS: Prisma.ReviewWhereInput = {
+  OR: [{ deletedAt: null }, { deletedAt: { isSet: false } }],
+};
+
+/**
+ * Latitude/longitude ranges enclosing a circle of radiusKm around a point, so a
+ * nearby search only loads providers inside the box (the exact distance is
+ * checked afterwards). Range filters also skip providers with no coordinates.
+ */
+export const boundingBox = (latitude: number, longitude: number, radiusKm: number) => {
+  const KM_PER_DEGREE = 111.32;
+  const latDelta = radiusKm / KM_PER_DEGREE;
+  // Degrees of longitude shrink towards the poles; avoid dividing by ~0
+  const lngDelta = radiusKm / (KM_PER_DEGREE * Math.max(Math.cos((latitude * Math.PI) / 180), 0.01));
+
+  return {
+    latitude: { gte: latitude - latDelta, lte: latitude + latDelta },
+    longitude: { gte: longitude - lngDelta, lte: longitude + lngDelta },
+  };
+};
+
+/**
+ * Lowest average rating that still shows as at least minRating once rounded to
+ * 1 decimal place, the way averageRating is returned
+ */
+export const minimumAverageFor = (minRating: number): number =>
+  (Math.ceil(Number((minRating * 10).toFixed(6))) - 0.5) / 10;
+
 // ==================
 // Helpers
 // ==================
@@ -88,8 +133,8 @@ export const haversineDistance = (
  * Build the base Prisma WHERE clause from filters
  * Note: All string filters are sanitized to prevent NoSQL injection
  */
-const buildWhereClause = (filters: ProviderFiltersInput = {}) => {
-  const where: any = {};
+const buildWhereClause = (filters: ProviderFiltersInput = {}): Prisma.ServiceProviderWhereInput => {
+  const where: Prisma.ServiceProviderWhereInput = {};
 
   if (filters.verifiedOnly !== false) {
     // Default to verified only unless explicitly set to false
@@ -123,18 +168,71 @@ const buildWhereClause = (filters: ProviderFiltersInput = {}) => {
 };
 
 /**
- * Build the Prisma ORDER BY clause from sortBy
+ * Restrict a query to providers whose rounded average rating is at least
+ * minRating. Done in the query so paging and totals account for it.
  */
-const buildOrderBy = (sortBy: ProviderSortBy = 'NEWEST') => {
+const applyMinRating = async (
+  where: Prisma.ServiceProviderWhereInput,
+  minRating?: number | null
+): Promise<void> => {
+  if (!minRating || minRating <= 0) return;
+
+  const rated = await prisma.review.groupBy({
+    by: ['providerId'],
+    where: COUNTED_REVIEWS,
+    having: { rating: { _avg: { gte: minimumAverageFor(minRating) } } },
+  });
+
+  where.id = { in: rated.map((group) => group.providerId) };
+};
+
+/**
+ * Build the Prisma ORDER BY clause from sortBy. The ID breaks ties so pages
+ * don't overlap.
+ */
+const buildOrderBy = (sortBy: ProviderSortBy = 'NEWEST'): Prisma.ServiceProviderOrderByWithRelationInput[] => {
   switch (sortBy) {
     case 'NAME_ASC':
-      return [{ businessName: 'asc' as const }];
-    case 'NEWEST':
-      return [{ createdAt: 'desc' as const }];
-    // RATING_DESC and POPULARITY_DESC are handled post-query (computed fields)
+      return [{ businessName: 'asc' }, { id: 'asc' }];
+    // RATING_DESC and POPULARITY_DESC are sorted after the query (computed
+    // fields), starting from newest first
     default:
-      return [{ createdAt: 'desc' as const }];
+      return [{ createdAt: 'desc' }, { id: 'desc' }];
   }
+};
+
+const compareIds = (a: { id: string }, b: { id: string }): number =>
+  a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
+const notFound = () =>
+  new GraphQLError('Provider not found', {
+    extensions: { code: 'NOT_FOUND' },
+  });
+
+/**
+ * Radius to load providers from. Without a geo index providers can't be loaded
+ * nearest first, so when the square around the search circle holds more than
+ * MAX_NEARBY_CANDIDATES providers the radius is halved until it doesn't (but
+ * not below MIN_NEARBY_RADIUS_KM). Every provider within the returned radius is
+ * then loaded, so the results are complete up to that distance.
+ */
+const narrowSearchRadius = async (
+  where: Prisma.ServiceProviderWhereInput,
+  latitude: number,
+  longitude: number,
+  radius: number
+): Promise<number> => {
+  let searchRadius = radius;
+
+  while (searchRadius / 2 >= MIN_NEARBY_RADIUS_KM) {
+    const candidates = await prisma.serviceProvider.count({
+      where: { ...where, ...boundingBox(latitude, longitude, searchRadius) },
+    });
+    if (!(candidates > MAX_NEARBY_CANDIDATES)) break;
+    searchRadius = Math.round((searchRadius / 2) * 10) / 10;
+  }
+
+  return searchRadius;
 };
 
 /**
@@ -191,26 +289,27 @@ export const browseProviders = async ({
   pagination = { page: 1, limit: 10 },
   excludeUserId,
 }: BrowseProvidersInput) => {
-  const { page, limit: rawLimit } = pagination;
+  // Either field may be omitted by the client
+  const { page = 1, limit: rawLimit = 10 } = pagination;
   const limit = Math.min(rawLimit, config.pagination.maxLimit);
   const skip = (page - 1) * limit;
 
   const where = buildWhereClause(filters);
   if (excludeUserId) {
-    where.userId = { not: excludeUserId };
+    // The viewer's own profile, and providers they've blocked
+    where.userId = { notIn: [excludeUserId, ...(await getBlockedUserIds(excludeUserId))] };
   }
+  await applyMinRating(where, filters.minRating);
 
   // For rating/popularity sort we fetch all matched and sort in-memory
   // (MongoDB aggregations via Prisma are limited for computed sort)
   const needsComputedSort =
     sortBy === 'RATING_DESC' || sortBy === 'POPULARITY_DESC';
 
-  const orderBy = needsComputedSort ? undefined : buildOrderBy(sortBy);
-
   const [rawProviders, total] = await Promise.all([
     prisma.serviceProvider.findMany({
       where,
-      orderBy,
+      orderBy: buildOrderBy(sortBy),
       skip: needsComputedSort ? 0 : skip,
       take: needsComputedSort ? undefined : limit,
       include: {
@@ -229,7 +328,7 @@ export const browseProviders = async ({
           },
         },
         _count: {
-          select: { reviews: true, likes: true },
+          select: { reviews: { where: COUNTED_REVIEWS }, likes: true },
         },
       },
     }),
@@ -241,25 +340,20 @@ export const browseProviders = async ({
 
   const ratingAggs = await prisma.review.groupBy({
     by: ['providerId'],
-    where: { providerId: { in: providerIds } },
+    where: { providerId: { in: providerIds }, ...COUNTED_REVIEWS },
     _avg: { rating: true },
   });
 
   const ratingMap = new Map(ratingAggs.map((r) => [r.providerId, r._avg.rating ?? 0]));
 
-  // Attach minRating filter (post-query since it's computed)
-  const providers = rawProviders
-    .map((p) => ({
-      ...p,
-      averageRating: Math.round((ratingMap.get(p.id) ?? 0) * 10) / 10,
-      totalReviews: p._count.reviews,
-      likeCount: p._count.likes,
-    }))
-    .filter((p) =>
-      filters.minRating ? p.averageRating >= filters.minRating : true
-    );
+  const providers = rawProviders.map((p) => ({
+    ...p,
+    averageRating: Math.round((ratingMap.get(p.id) ?? 0) * 10) / 10,
+    totalReviews: p._count.reviews,
+    likeCount: p._count.likes,
+  }));
 
-  // Sort computed fields in-memory
+  // Sort computed fields in-memory (the sort is stable, so ties stay newest first)
   if (sortBy === 'RATING_DESC') {
     providers.sort((a, b) => b.averageRating - a.averageRating);
   } else if (sortBy === 'POPULARITY_DESC') {
@@ -276,6 +370,12 @@ export const browseProviders = async ({
 
   return {
     items: paginatedProviders.map((p) => formatProvider(p)),
+    total: totalFiltered,
+    page,
+    limit,
+    totalPages,
+    hasNextPage: page < totalPages,
+    hasPreviousPage: page > 1,
     pagination: {
       page,
       limit,
@@ -288,9 +388,15 @@ export const browseProviders = async ({
 };
 
 /**
- * Get a single provider's public profile by ID
+ * Get a single provider's public profile by ID.
+ * Only VERIFIED providers are public; the provider themself and admins can open
+ * a profile in any status. A provider and a user who has blocked the other (in
+ * either direction) can't see each other.
  */
-export const getProviderPublicProfile = async (providerId: string) => {
+export const getProviderPublicProfile = async (
+  providerId: string,
+  viewer?: ProfileViewer | null
+) => {
   const provider = await prisma.serviceProvider.findUnique({
     where: { id: providerId },
     include: {
@@ -310,24 +416,34 @@ export const getProviderPublicProfile = async (providerId: string) => {
           price: true,
           duration: true,
           images: true,
-          category: { select: { id: true, name: true, slug: true } },
+          category: true,
         },
       },
       _count: {
-        select: { reviews: true, likes: true },
+        select: { reviews: { where: COUNTED_REVIEWS }, likes: true },
       },
     },
   });
 
   if (!provider) {
-    throw new GraphQLError('Provider not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw notFound();
+  }
+
+  const isAdmin = viewer?.role === UserRole.ADMIN || viewer?.role === UserRole.SUPER_ADMIN;
+  const isOwner = Boolean(viewer) && viewer?.userId === provider.userId;
+
+  if (!isAdmin && !isOwner) {
+    if (provider.verificationStatus !== VerificationStatus.VERIFIED) {
+      throw notFound();
+    }
+    if (viewer && (await isBlockedBetween(viewer.userId, provider.userId))) {
+      throw notFound();
+    }
   }
 
   // Get average rating
   const ratingStats = await prisma.review.aggregate({
-    where: { providerId },
+    where: { providerId, ...COUNTED_REVIEWS },
     _avg: { rating: true },
     _count: { id: true },
   });
@@ -375,21 +491,28 @@ export const getNearbyProviders = async ({
     config.geo.maxRadiusKm
   );
 
-  const { page, limit: rawLimit } = pagination;
+  // Either field may be omitted by the client
+  const { page = 1, limit: rawLimit = 10 } = pagination;
   const limit = Math.min(rawLimit, config.pagination.maxLimit);
 
   const where = buildWhereClause(filters);
   if (excludeUserId) {
-    where.userId = { not: excludeUserId };
+    // The viewer's own profile, and providers they've blocked
+    where.userId = { notIn: [excludeUserId, ...(await getBlockedUserIds(excludeUserId))] };
   }
+  await applyMinRating(where, filters.minRating);
 
-  // Fetch all providers with lat/lng (we filter by distance in JS)
+  const searchRadius = await narrowSearchRadius(where, latitude, longitude, radius);
+
+  // Load only providers inside the bounding box (latitude/longitude index);
+  // the exact distance is checked below
   const rawProviders = await prisma.serviceProvider.findMany({
     where: {
       ...where,
-      latitude: { not: null },
-      longitude: { not: null },
+      ...boundingBox(latitude, longitude, searchRadius),
     },
+    orderBy: [{ id: 'asc' }],
+    take: MAX_NEARBY_CANDIDATES,
     include: {
       user: {
         select: {
@@ -406,7 +529,7 @@ export const getNearbyProviders = async ({
         },
       },
       _count: {
-        select: { reviews: true, likes: true },
+        select: { reviews: { where: COUNTED_REVIEWS }, likes: true },
       },
     },
   });
@@ -415,7 +538,7 @@ export const getNearbyProviders = async ({
 
   const ratingAggs = await prisma.review.groupBy({
     by: ['providerId'],
-    where: { providerId: { in: providerIds } },
+    where: { providerId: { in: providerIds }, ...COUNTED_REVIEWS },
     _avg: { rating: true },
   });
 
@@ -430,19 +553,29 @@ export const getNearbyProviders = async ({
       likeCount: p._count.likes,
       distanceKm: haversineDistance(latitude, longitude, p.latitude!, p.longitude!),
     }))
-    .filter((p) => p.distanceKm <= radius)
-    .filter((p) => (filters.minRating ? p.averageRating >= filters.minRating : true));
+    .filter((p) => p.distanceKm <= searchRadius);
 
-  // Sort
-  if (sortBy === 'RATING_DESC') {
-    providers.sort((a, b) => b.averageRating - a.averageRating);
-  } else if (sortBy === 'POPULARITY_DESC') {
-    providers.sort((a, b) => b.likeCount - a.likeCount);
-  } else if (sortBy === 'NAME_ASC') {
-    providers.sort((a, b) => a.businessName.localeCompare(b.businessName));
-  } else {
-    // Default: sort by distance (nearest first)
-    providers.sort((a, b) => a.distanceKm - b.distanceKm);
+  type NearbyProvider = (typeof providers)[number];
+  const nearestFirst = (a: NearbyProvider, b: NearbyProvider) =>
+    a.distanceKm - b.distanceKm || compareIds(a, b);
+
+  // Sort; ties go to the nearer provider, then by ID
+  switch (sortBy) {
+    case 'RATING_DESC':
+      providers.sort((a, b) => b.averageRating - a.averageRating || nearestFirst(a, b));
+      break;
+    case 'POPULARITY_DESC':
+      providers.sort((a, b) => b.likeCount - a.likeCount || nearestFirst(a, b));
+      break;
+    case 'NAME_ASC':
+      providers.sort((a, b) => a.businessName.localeCompare(b.businessName) || compareIds(a, b));
+      break;
+    case 'NEWEST':
+      providers.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || compareIds(a, b));
+      break;
+    default:
+      // NEAREST
+      providers.sort(nearestFirst);
   }
 
   const total = providers.length;
@@ -452,6 +585,12 @@ export const getNearbyProviders = async ({
 
   return {
     items: paginatedProviders.map((p) => formatProvider(p, p.distanceKm)),
+    total,
+    page,
+    limit,
+    totalPages,
+    hasNextPage: page < totalPages,
+    hasPreviousPage: page > 1,
     pagination: {
       page,
       limit,
@@ -461,6 +600,9 @@ export const getNearbyProviders = async ({
       hasPrev: page > 1,
     },
     radiusKm: radius,
+    // Every provider within this distance is included; smaller than radiusKm
+    // only when the area holds too many providers to load at once
+    coveredRadiusKm: searchRadius,
     searchLocation: { latitude, longitude },
   };
 };

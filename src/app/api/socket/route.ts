@@ -1,37 +1,33 @@
 /**
- * WebSocket API Route
- * 
- * This provides WebSocket upgrade handling for Next.js API routes.
- * Note: This approach works for simple use cases but has limitations
- * in serverless environments. For production, consider:
- * 
- * 1. Using the custom server (server.ts) for traditional deployments
- * 2. Using a separate WebSocket service (e.g., Ably, Pusher, Socket.io Cloud)
- * 3. Using Server-Sent Events (SSE) for one-way real-time updates
+ * Socket information route
+ *
+ * Next.js API routes can't hold WebSocket connections. Socket.IO runs in the custom
+ * server (server.ts → src/lib/server.ts), started with `npm run start:ws` (or
+ * `npm run dev:ws` locally). Clients connect with socket.io-client to the Socket.IO
+ * path `/socket.io/` on the same host as the API. This route only describes that.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 
-// Health check endpoint
+// Information endpoint
 export async function GET() {
   return NextResponse.json({
     status: 'ok',
     message: 'WebSocket server is available',
     info: {
       connection: 'Use socket.io-client to connect',
-      endpoint: '/api/socket',
+      endpoint: '/socket.io/',
       transport: ['websocket', 'polling'],
     },
-    note: 'For full WebSocket support, use the custom server (npm run server)',
+    note: 'WebSocket connections are served by the custom server (npm run start:ws), not by this route',
   });
 }
 
 // WebSocket upgrade not directly supported in Next.js API routes
-// This is a placeholder to explain the architecture
 export async function POST(_request: NextRequest) {
   return NextResponse.json({
     error: 'WebSocket upgrade not supported via API routes',
-    solution: 'Use the custom server (npm run server) for WebSocket support',
+    solution: 'Connect with socket.io-client to /socket.io/ on the custom server (npm run start:ws)',
     alternatives: [
       'Use polling-based real-time updates via GraphQL',
       'Deploy with custom server on platforms like Render, Railway, or VPS',

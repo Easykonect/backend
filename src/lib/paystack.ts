@@ -12,7 +12,8 @@
  * - Transfer to providers (payouts)
  * - Webhook signature verification
  * 
- * Commission: 7% platform commission + 1.5% Paystack fee (capped at ₦2,000)
+ * Commission: bookings use the rate a Super Admin sets (platform-settings.service);
+ * the helpers here use the starting rate, COMMISSION_RATE
  */
 
 import { config } from '@/config';
@@ -50,6 +51,7 @@ export interface PaystackVerifyResponse {
     status: 'success' | 'failed' | 'abandoned' | 'pending';
     reference: string;
     amount: number;
+    fees?: number | null; // Paystack's fee in kobo
     message: string | null;
     gateway_response: string;
     paid_at: string | null;
@@ -133,7 +135,8 @@ export interface PaystackTransferResponse {
     source: string;
     reason: string;
     recipient: number;
-    status: 'pending' | 'success' | 'failed' | 'reversed';
+    status: 'pending' | 'success' | 'failed' | 'reversed' | 'otp' | 'abandoned' | 'blocked' | 'rejected' | 'received';
+    reference?: string;
     transfer_code: string;
     id: number;
     createdAt: string;
@@ -222,8 +225,20 @@ export const PAYSTACK_LOCAL_FEE_PERCENT = 0.015; // 1.5%
 export const PAYSTACK_LOCAL_FEE_FLAT = 100; // ₦100 in kobo = 10000 kobo, but waived for < ₦2,500
 export const PAYSTACK_FEE_CAP = 200000; // ₦2,000 in kobo
 
-// Platform commission rate (7%)
-export const PLATFORM_COMMISSION_RATE = 0.07;
+// A Paystack call that hangs would otherwise hold the request open indefinitely
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * A failed Paystack call. `httpStatus` is set when Paystack answered with an
+ * error; it's undefined when the outcome is unknown (timeout, network error),
+ * in which case the operation may still have gone through.
+ */
+export class PaystackRequestError extends Error {
+  constructor(message: string, public readonly httpStatus?: number) {
+    super(message);
+    this.name = 'PaystackRequestError';
+  }
+}
 
 // ==========================================
 // Helper Functions
@@ -259,29 +274,33 @@ const paystackRequest = async <T>(
   const options: RequestInit = {
     method,
     headers,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   };
 
   if (body && (method === 'POST' || method === 'PUT')) {
     options.body = JSON.stringify(body);
   }
 
+  let response: Response;
+  let data: T & { message?: string };
   try {
-    const response = await fetch(url, options);
+    response = await fetch(url, options);
     // Node's fetch types `json()` as `unknown`; Paystack always returns an
     // object carrying a `message` on failure.
-    const data = (await response.json()) as T & { message?: string };
-
-    if (!response.ok) {
-      throw new Error(data.message || `Paystack API error: ${response.status}`);
-    }
-
-    return data;
+    data = (await response.json()) as T & { message?: string };
   } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Paystack request failed: ${error.message}`);
-    }
-    throw new Error('Paystack request failed: Unknown error');
+    const reason = error instanceof Error ? error.message : 'Unknown error';
+    throw new PaystackRequestError(`Paystack request failed: ${reason}`);
   }
+
+  if (!response.ok) {
+    throw new PaystackRequestError(
+      `Paystack request failed: ${data.message || `Paystack API error: ${response.status}`}`,
+      response.status
+    );
+  }
+
+  return data;
 };
 
 /**
@@ -325,10 +344,10 @@ export const calculatePaystackFee = (amountInKobo: number): number => {
 };
 
 /**
- * Calculate platform commission (7%)
+ * Calculate platform commission at the configured rate
  */
 export const calculatePlatformCommission = (amountInKobo: number): number => {
-  return Math.round(amountInKobo * PLATFORM_COMMISSION_RATE);
+  return Math.round(amountInKobo * config.platform.commissionRate);
 };
 
 /**
@@ -392,7 +411,7 @@ export const initializeTransaction = async (
 export const verifyTransaction = async (
   reference: string
 ): Promise<PaystackVerifyResponse> => {
-  return paystackRequest<PaystackVerifyResponse>(`/transaction/verify/${reference}`);
+  return paystackRequest<PaystackVerifyResponse>(`/transaction/verify/${encodeURIComponent(reference)}`);
 };
 
 /**
@@ -419,6 +438,25 @@ export const initiateTransfer = async (
     ...params,
     source: 'balance',
   });
+};
+
+/**
+ * Look up a transfer by our reference. Throws PaystackRequestError with
+ * httpStatus 404 when Paystack has no transfer with that reference.
+ */
+export const verifyTransfer = async (
+  reference: string
+): Promise<PaystackTransferResponse> => {
+  return paystackRequest<PaystackTransferResponse>(`/transfer/verify/${encodeURIComponent(reference)}`);
+};
+
+/**
+ * Fetch a transfer by its id or transfer code
+ */
+export const fetchTransfer = async (
+  idOrCode: string
+): Promise<PaystackTransferResponse> => {
+  return paystackRequest<PaystackTransferResponse>(`/transfer/${encodeURIComponent(idOrCode)}`);
 };
 
 /**
@@ -460,7 +498,7 @@ export const resolveAccount = async (
 export const getTransaction = async (
   idOrReference: string | number
 ): Promise<PaystackVerifyResponse> => {
-  return paystackRequest<PaystackVerifyResponse>(`/transaction/${idOrReference}`);
+  return paystackRequest<PaystackVerifyResponse>(`/transaction/${encodeURIComponent(String(idOrReference))}`);
 };
 
 /**
@@ -486,7 +524,9 @@ export const paystack = {
   // Transfers (Payouts)
   createTransferRecipient,
   initiateTransfer,
-  
+  verifyTransfer,
+  fetchTransfer,
+
   // Refunds
   processRefund,
   

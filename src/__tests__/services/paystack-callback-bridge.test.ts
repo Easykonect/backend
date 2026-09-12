@@ -136,7 +136,7 @@ describe('Paystack callback bridge — GET /api/payments/paystack/callback', () 
       data: {
         status: 'success',
         metadata: {
-          returnDeepLink: "easykonnect://x'<script>alert(1)</script>",
+          returnDeepLink: "easykonnect://payment-callback?note='<script>alert(1)</script>",
         },
       },
     });
@@ -154,9 +154,12 @@ describe('Paystack callback bridge — GET /api/payments/paystack/callback', () 
     expect(body).toMatch(/\\u003cscript/);
   });
 
-  it('marks status=failed when Paystack reports a non-success transaction', async () => {
+  it('marks status=failed when the payment could not be applied', async () => {
+    // e.g. Paystack reports a failure, or the booking was cancelled and the
+    // money went to the wallet
+    (verifyPayment as jest.Mock).mockResolvedValueOnce({ verified: false });
     (paystackLib.verifyTransaction as jest.Mock).mockResolvedValueOnce({
-      data: { status: 'failed', metadata: { returnDeepLink: 'easykonnect://payment-callback' } },
+      data: { status: 'success', metadata: { returnDeepLink: 'easykonnect://payment-callback' } },
     });
 
     const res = await GET(
@@ -165,5 +168,33 @@ describe('Paystack callback bridge — GET /api/payments/paystack/callback', () 
 
     const body = await res.text();
     expect(body).toContain('status=failed');
+  });
+
+  it.each([
+    ['another website', 'https://evil.example/steal'],
+    ['a script URL', 'javascript:alert(document.domain)'],
+    ['another app', 'intent://evil#Intent;scheme=https;end'],
+  ])('does not follow a returnDeepLink to %s', async (_label, returnDeepLink) => {
+    (paystackLib.verifyTransaction as jest.Mock).mockResolvedValueOnce({
+      data: { status: 'success', metadata: { returnDeepLink } },
+    });
+
+    const res = await GET(
+      buildRequest('https://api.easykonnect.com/api/payments/paystack/callback?reference=ref_abc')
+    );
+
+    const body = await res.text();
+    expect(body).toContain('https://app.easykonnect.com/payment/callback?reference=ref_abc');
+    expect(body).not.toContain(returnDeepLink.slice(0, 12));
+  });
+
+  it('rejects a malformed reference without calling Paystack', async () => {
+    const res = await GET(
+      buildRequest('https://api.easykonnect.com/api/payments/paystack/callback?reference=..%2Fbalance')
+    );
+
+    expect(res.status).toBe(400);
+    expect(verifyPayment).not.toHaveBeenCalled();
+    expect(paystackLib.verifyTransaction).not.toHaveBeenCalled();
   });
 });

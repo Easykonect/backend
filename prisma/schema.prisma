@@ -78,6 +78,46 @@ enum DisputeResolution {
 }
 
 // ==================
+// Moderation Enums
+// ==================
+
+enum ReportTargetType {
+  USER
+  MESSAGE
+  CONVERSATION
+  REVIEW
+  SERVICE
+  PROVIDER
+}
+
+enum ReportReason {
+  HARASSMENT
+  HATE
+  SEXUAL_CONTENT
+  VIOLENCE
+  SCAM
+  OFF_PLATFORM_PAYMENT
+  SPAM
+  IMPERSONATION
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  ACTIONED
+  DISMISSED
+}
+
+enum ModerationAction {
+  DISMISS
+  REMOVE_CONTENT
+  WARN_USER
+  RESTRICT_USER
+  BAN_USER
+  SUSPEND_SERVICE
+}
+
+// ==================
 // Wallet & Withdrawal Enums
 // ==================
 
@@ -130,6 +170,11 @@ enum AdminAction {
   APPROVE_SERVICE
   REJECT_SERVICE
   SUSPEND_SERVICE
+  UPDATE_PLATFORM_SETTINGS
+  RESOLVE_REPORT
+  VIEW_REPORTED_CONVERSATION
+  CREATE_ADMIN
+  DELETE_REVIEW
 }
 
 // ==================
@@ -155,9 +200,11 @@ model User {
   pendingEmail      String?   // Staged new email awaiting OTP confirmation
   
   // Push Notifications (OneSignal)
-  oneSignalPlayerId String?   // OneSignal Player ID for push notifications
+  oneSignalPlayerId String?   // OneSignal Player ID for push notifications (the most recently registered device)
+  oneSignalPlayerIds String[] // Every registered device, oldest first; missing on older accounts
   pushEnabled       Boolean   @default(true) // User preference for push notifications
-  
+  pushOptedOutAt    DateTime? // When the user switched push off themselves; registering a device leaves it off
+
   // Security fields
   failedLoginAttempts Int       @default(0)
   lockoutUntil        DateTime?
@@ -182,7 +229,18 @@ model User {
   
   // Session invalidation (tokens issued before this time are invalid)
   tokenInvalidatedAt  DateTime?
-  
+
+  // Self-service deactivation (signing in again reactivates the account)
+  deactivatedAt       DateTime?
+  deactivationReason  String?
+
+  // Account deletion: personal data is removed and the account can't be used again
+  deletedAt           DateTime?
+
+  // Community terms the user accepted
+  acceptedTermsVersion String?
+  acceptedTermsAt      DateTime?
+
   // Provider specific fields (only for SERVICE_PROVIDER role)
   provider  ServiceProvider?
   
@@ -199,6 +257,7 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([oneSignalPlayerId])
   @@map("users")
 }
 
@@ -210,7 +269,8 @@ model ServiceProvider {
   businessName        String
   businessDescription String?
   verificationStatus  VerificationStatus @default(UNVERIFIED)
-  
+  rejectionReason     String?            // Why an admin last rejected verification; cleared on approval
+
   // Location
   address             String
   city                String
@@ -236,6 +296,8 @@ model ServiceProvider {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
+  @@index([verificationStatus, createdAt])
+  @@index([latitude, longitude])
   @@map("service_providers")
 }
 
@@ -268,7 +330,9 @@ model Service {
   price       Float
   duration    Int             // Duration in minutes
   status      ServiceStatus   @default(DRAFT)
-  
+  rejectionReason  String?    // Why an admin last sent it back; cleared on approval
+  suspensionReason String?    // Why an admin suspended it
+
   images      String[]
   
   bookings    Booking[]
@@ -353,6 +417,8 @@ model Payment {
   status          PaymentStatus @default(PENDING)
   paymentMethod   String?
   transactionRef  String?       @unique
+  // Every Paystack reference issued for this payment (checkout can be reopened)
+  transactionRefs String[]
   
   paidAt          DateTime?
   refundedAt      DateTime?
@@ -373,7 +439,8 @@ model Payment {
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
-  @@index([status])
+  @@index([status, paidAt])
+  @@index([transactionRefs])
   @@index([withdrawableAt])
   @@map("payments")
 }
@@ -393,10 +460,21 @@ model Review {
   // Provider response
   response    String?
   respondedAt DateTime?
-  
+
+  // Hidden from public listings pending moderation
+  isHidden    Boolean?         @default(false)
+
+  // Removed by an admin (deleteReview). A removed review is left out of every
+  // list, count and rating, and its booking can't be reviewed again.
+  deletedAt      DateTime?
+  deletedBy      String?   @db.ObjectId // Admin who removed it
+  deletionReason String?
+
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
 
+  @@index([providerId, createdAt])
+  @@index([userId, createdAt])
   @@map("reviews")
 }
 
@@ -411,6 +489,7 @@ model Favourite {
 
   // Ensure a user can only favourite a service once
   @@unique([userId, serviceId])
+  @@index([serviceId])
   @@map("favourites")
 }
 
@@ -425,6 +504,7 @@ model ProviderLike {
 
   // Ensure a user can only like a provider once
   @@unique([userId, providerId])
+  @@index([providerId])
   @@map("provider_likes")
 }
 
@@ -443,7 +523,14 @@ model Dispute {
   evidence      String[]         // URLs to uploaded evidence (images, documents)
   
   status        DisputeStatus    @default(OPEN)
-  
+
+  // Booking status when the dispute was opened, restored if nothing is refunded
+  previousBookingStatus BookingStatus?
+
+  // The admin who took the dispute under review, and when
+  reviewedById    String?          @db.ObjectId
+  reviewStartedAt DateTime?
+
   // Resolution (filled when resolved)
   resolution      DisputeResolution?
   resolutionNotes String?
@@ -456,6 +543,7 @@ model Dispute {
   createdAt     DateTime         @default(now())
   updatedAt     DateTime         @updatedAt
 
+  @@index([status, createdAt])
   @@map("disputes")
 }
 
@@ -528,8 +616,12 @@ model Conversation {
   // For support chats - subject/topic
   subject         String?
   
-  // Track if conversation is active or archived
+  // Track if conversation is active or archived. Conversations archived before
+  // archiving was per participant have false here, archived for everyone.
   isActive        Boolean          @default(true)
+
+  // Participants who archived the conversation for themselves; missing means none
+  archivedBy      String[]         @db.ObjectId
   
   // Last message info for quick display
   lastMessageAt   DateTime?
@@ -541,6 +633,7 @@ model Conversation {
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
 
+  @@index([participantIds, lastMessageAt])
   @@map("conversations")
 }
 
@@ -572,10 +665,14 @@ model Message {
   // Soft delete
   isDeleted       Boolean       @default(false)
   deletedAt       DateTime?
+
+  // Hidden from the other participants pending moderation
+  isHidden        Boolean?       @default(false)
   
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
+  @@index([conversationId, createdAt])
   @@map("messages")
 }
 
@@ -832,13 +929,86 @@ model ScheduledPayout {
   
   processedAt     DateTime?
   failureReason   String?
-  
+
+  // Set when the payout job skipped this run day instead of requesting a
+  // withdrawal: WALLET_LOCKED, BELOW_MINIMUM or NO_BANK_ACCOUNT
+  skipReason      String?
+
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
-  
+
   @@index([providerId, status])
   @@index([scheduledFor, status])
   @@map("scheduled_payouts")
+}
+
+// ==================
+// Safety: Blocks and Reports
+// ==================
+
+// One user blocking another
+model UserBlock {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  blockerId String   @db.ObjectId
+  blockedId String   @db.ObjectId
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@unique([blockerId, blockedId])
+  @@index([blockedId])
+  @@map("user_blocks")
+}
+
+// A report of a user or their content, by a user or by the content filter
+model Report {
+  id              String            @id @default(auto()) @map("_id") @db.ObjectId
+  // Empty for reports raised automatically by the content filter
+  reporterId      String?           @db.ObjectId
+  automated       Boolean           @default(false)
+
+  targetType      ReportTargetType
+  targetId        String            @db.ObjectId
+  // The user responsible for the reported content
+  targetUserId    String?           @db.ObjectId
+
+  reason          ReportReason
+  details         String?
+  // JSON copy of the content when it was reported, kept even if it's deleted
+  snapshot        String
+
+  status          ReportStatus      @default(OPEN)
+  action          ModerationAction?
+  resolutionNotes String?
+  handledBy       String?           @db.ObjectId
+  handledAt       DateTime?
+
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([status, createdAt])
+  @@index([targetType, targetId, status])
+  @@index([reporterId, createdAt])
+  @@index([targetUserId])
+  @@map("reports")
+}
+
+// ==================
+// Platform Settings
+// ==================
+
+// Settings a Super Admin can change from the app (a single document)
+model PlatformSettings {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  key            String   @unique @default("platform")
+
+  // Commission taken from each new booking, as a fraction (0.07 = 7%)
+  commissionRate Float
+
+  updatedBy      String?  @db.ObjectId
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("platform_settings")
 }
 
 // ==================

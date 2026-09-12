@@ -80,7 +80,27 @@ jest.mock('@/lib/email', () => ({
   sendProviderSubmissionEmail: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock('@/services/report.service', () => ({
+  flagContent: jest.fn(),
+}));
+
+jest.mock('@/services/notification.service', () => ({
+  notifyVerificationApproved: jest.fn(),
+  notifyVerificationRejected: jest.fn(),
+}));
+
+jest.mock('@/services/push.service', () => ({ sendVerificationPush: jest.fn() }));
+
+jest.mock('@/services/audit.service', () => ({ createAuditLog: jest.fn() }));
+
+// Rating and like counts are covered in provider-verification.test.ts
+jest.mock('@/services/provider-profile.service', () => ({
+  ...jest.requireActual('@/services/provider-profile.service'),
+  loadProviderStats: async () => new Map(),
+}));
+
 import prisma from '@/lib/prisma';
+import { flagContent } from '@/services/report.service';
 import { becomeProvider, updateProviderProfile } from '@/services/provider.service';
 
 // ==================
@@ -226,5 +246,108 @@ describe('updateProviderProfile — businessDescription validation', () => {
     await expect(
       updateProviderProfile(userId, { businessDescription: longDesc })
     ).rejects.toThrow(/at most 250 characters/);
+  });
+});
+
+// ==================
+// Screening, and review of verified profiles
+// ==================
+
+describe('becomeProvider — screening', () => {
+  it.each([
+    [{ businessName: 'Bitch Please Cleaning' }, 'INAPPROPRIATE_CONTENT'],
+    [{ businessDescription: 'Quality cleaning, no bullshit, every day' }, 'INAPPROPRIATE_CONTENT'],
+    [{ businessName: 'Ada Cleaning 08031234567' }, 'CONTACT_DETAILS_NOT_ALLOWED'],
+    [{ businessDescription: 'Book us at bookings@adaclean.ng today' }, 'CONTACT_DETAILS_NOT_ALLOWED'],
+  ])('rejects %j with %s and creates no profile', async (edit, code) => {
+    await expect(becomeProvider(userId, { ...validInput, ...edit })).rejects.toMatchObject({
+      extensions: { code },
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('updateProviderProfile — screening and review of verified profiles', () => {
+  const verifiedProfile = {
+    id: 'provider1',
+    userId,
+    businessName: 'Ada Cleaning',
+    businessDescription: 'Quality home cleaning in Lagos.',
+    address: '1 Main St',
+    city: 'Lagos',
+    state: 'Lagos',
+    country: 'Nigeria',
+    latitude: 6.5,
+    longitude: 3.3,
+    verificationStatus: 'VERIFIED',
+    documents: [],
+    images: [],
+    createdAt: new Date('2025-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2025-01-01T00:00:00.000Z'),
+  };
+
+  const editing = (provider: typeof verifiedProfile) => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue({ ...baseUser, role: 'SERVICE_PROVIDER', provider });
+    (prisma.serviceProvider.update as jest.Mock).mockImplementation(
+      async ({ data }: { data: Record<string, unknown> }) => ({ ...provider, ...data })
+    );
+  };
+
+  it.each([
+    [{ businessName: 'Fucking Fast Cleaners' }, 'INAPPROPRIATE_CONTENT'],
+    [{ businessDescription: 'Quality cleaning, none of that shit' }, 'INAPPROPRIATE_CONTENT'],
+    [{ businessName: 'Ada Cleaning 08031234567' }, 'CONTACT_DETAILS_NOT_ALLOWED'],
+    [{ businessDescription: 'WhatsApp 0803 123 4567 for cheaper prices' }, 'CONTACT_DETAILS_NOT_ALLOWED'],
+  ])('rejects %j with %s and saves nothing', async (edit, code) => {
+    editing(verifiedProfile);
+
+    await expect(updateProviderProfile(userId, edit)).rejects.toMatchObject({ extensions: { code } });
+    expect(prisma.serviceProvider.update).not.toHaveBeenCalled();
+    expect(flagContent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ businessName: 'Ada Home Cleaning' }],
+    [{ businessDescription: 'Quality home and office cleaning in Lagos.' }],
+  ])('flags a VERIFIED profile for admins after an edit of %j', async (edit) => {
+    editing(verifiedProfile);
+
+    await updateProviderProfile(userId, edit);
+
+    const before = {
+      businessName: verifiedProfile.businessName,
+      businessDescription: verifiedProfile.businessDescription,
+    };
+    expect(flagContent).toHaveBeenCalledTimes(1);
+    expect(flagContent).toHaveBeenCalledWith({
+      targetType: 'PROVIDER',
+      targetId: 'provider1',
+      targetUserId: userId,
+      reason: 'OTHER',
+      details: expect.any(String),
+      snapshot: { before, after: { ...before, ...edit } },
+    });
+  });
+
+  it('does not flag an unverified profile', async () => {
+    editing({ ...verifiedProfile, verificationStatus: 'UNVERIFIED' });
+
+    await updateProviderProfile(userId, { businessName: 'Ada Home Cleaning' });
+
+    expect(prisma.serviceProvider.update).toHaveBeenCalled();
+    expect(flagContent).not.toHaveBeenCalled();
+  });
+
+  it('does not flag a VERIFIED profile when the name and description are unchanged', async () => {
+    editing(verifiedProfile);
+
+    await updateProviderProfile(userId, {
+      businessName: verifiedProfile.businessName,
+      businessDescription: verifiedProfile.businessDescription,
+      city: 'Ikeja',
+    });
+
+    expect(prisma.serviceProvider.update).toHaveBeenCalled();
+    expect(flagContent).not.toHaveBeenCalled();
   });
 });

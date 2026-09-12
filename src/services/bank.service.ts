@@ -1,28 +1,26 @@
 /**
  * Bank Service
- * 
+ *
  * Handles bank account operations for providers.
- * 
+ *
  * Features:
  * - List Nigerian banks (cached)
- * - Verify bank account (resolve account name)
+ * - Verify bank account (resolve account name), limited per user
  * - Add/remove provider bank accounts
- * - Bank suggestion based on account number prefix
+ * - Bank suggestions from the account number's NUBAN check digit
  */
 
 import { GraphQLError } from 'graphql';
+import { Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
-import { paystack } from '@/lib/paystack';
-import RedisClient from '@/lib/redis';
-
-// Get Redis client instance
-const getRedis = () => {
-  try {
-    return RedisClient.getInstance();
-  } catch {
-    return null;
-  }
-};
+import {
+  paystack,
+  PaystackRequestError,
+  type PaystackBank,
+  type PaystackBankListResponse,
+  type PaystackResolveAccountResponse,
+} from '@/lib/paystack';
+import RedisClient, { rateLimit } from '@/lib/redis';
 
 // ==========================================
 // Types
@@ -33,40 +31,77 @@ interface AddBankAccountInput {
   accountNumber: string;
 }
 
+/** What Paystack resolved for an account number and bank */
+interface ResolvedAccount {
+  accountNumber: string;
+  accountName: string;
+  bankId: number | null;
+}
+
 // ==========================================
 // Constants
 // ==========================================
 
 const BANK_LIST_CACHE_KEY = 'nigerian_banks';
 const BANK_LIST_CACHE_TTL = 86400; // 24 hours
-const RATE_LIMIT_PREFIX = 'rate_limit:bank_verify:';
-const RATE_LIMIT_MAX = 5; // 5 verifications per hour
-const RATE_LIMIT_WINDOW = 3600; // 1 hour in seconds
 
-// Known bank account number prefixes (partial, not comprehensive)
-const BANK_PREFIXES: Record<string, string[]> = {
-  '044': ['Access Bank'],
-  '063': ['Access Bank (Diamond)'],
-  '050': ['Ecobank'],
-  '070': ['Fidelity Bank'],
-  '011': ['First Bank'],
-  '214': ['First City Monument Bank'],
-  '058': ['Guaranty Trust Bank'],
-  '030': ['Heritage Bank'],
-  '301': ['Jaiz Bank'],
-  '082': ['Keystone Bank'],
-  '526': ['Parallex Bank'],
-  '076': ['Polaris Bank'],
-  '101': ['Providus Bank'],
-  '221': ['Stanbic IBTC'],
-  '068': ['Standard Chartered'],
-  '232': ['Sterling Bank'],
-  '100': ['Suntrust Bank'],
-  '032': ['Union Bank'],
-  '033': ['United Bank for Africa'],
-  '215': ['Unity Bank'],
-  '035': ['Wema Bank'],
-  '057': ['Zenith Bank'],
+// Account lookups with Paystack allowed per user in any rolling hour
+const VERIFY_LIMIT = 5;
+const VERIFY_WINDOW_SECONDS = 3600;
+
+// A successful lookup is reused for this long, so a provider can verify an
+// account and then add it without a second lookup
+const VERIFIED_ACCOUNT_TTL_SECONDS = 15 * 60;
+
+// Paystack answers an account it can't resolve with a 4xx. These statuses are
+// about our own integration instead, not the account.
+const INTEGRATION_ERROR_STATUSES = new Set([401, 403, 429]);
+
+/**
+ * NUBAN check digit weights, applied to the 3-digit bank code followed by the
+ * first nine digits of the account number
+ */
+const NUBAN_WEIGHTS = [3, 7, 3, 3, 7, 3, 3, 7, 3, 3, 7, 3];
+
+/**
+ * Banks whose account numbers carry a check digit computed with a 3-digit CBN
+ * bank code, mapped to the code(s) Paystack's bank list uses for each. They're
+ * the same except for Globus and Parallex. Microfinance banks and mobile money
+ * operators (e.g. Kuda, OPay, PalmPay, Moniepoint) compute theirs with longer
+ * CBN institution codes that Paystack's list doesn't carry, so they're never
+ * suggested.
+ */
+const NUBAN_BANKS: Record<string, string[]> = {
+  '011': ['011'], // First Bank of Nigeria
+  '023': ['023'], // Citibank Nigeria
+  '030': ['030'], // Heritage Bank
+  '032': ['032'], // Union Bank of Nigeria
+  '033': ['033'], // United Bank for Africa
+  '035': ['035'], // Wema Bank
+  '044': ['044'], // Access Bank
+  '050': ['050'], // Ecobank Nigeria
+  '057': ['057'], // Zenith Bank
+  '058': ['058'], // Guaranty Trust Bank
+  '063': ['063'], // Access Bank (Diamond)
+  '068': ['068'], // Standard Chartered Bank
+  '070': ['070'], // Fidelity Bank
+  '076': ['076'], // Polaris Bank
+  '082': ['082'], // Keystone Bank
+  '100': ['100'], // SunTrust Bank
+  '101': ['101'], // Providus Bank
+  '102': ['102'], // Titan Trust Bank
+  '103': ['00103'], // Globus Bank
+  '104': ['104', '526'], // Parallex Bank, which Paystack has listed as 526
+  '105': ['105'], // PremiumTrust Bank
+  '106': ['106'], // Signature Bank
+  '107': ['107'], // Optimus Bank
+  '214': ['214'], // First City Monument Bank
+  '215': ['215'], // Unity Bank
+  '221': ['221'], // Stanbic IBTC Bank
+  '232': ['232'], // Sterling Bank
+  '301': ['301'], // Jaiz Bank
+  '302': ['302'], // TAJ Bank
+  '303': ['303'], // Lotus Bank
 };
 
 // ==========================================
@@ -76,7 +111,7 @@ const BANK_PREFIXES: Record<string, string[]> = {
 /**
  * Format bank for response
  */
-const formatBank = (bank: any) => ({
+const formatBank = (bank: PaystackBank) => ({
   id: bank.id?.toString() || bank.code,
   name: bank.name,
   code: bank.code,
@@ -88,6 +123,8 @@ const formatBank = (bank: any) => ({
   currency: bank.currency,
   type: bank.type,
 });
+
+type Bank = ReturnType<typeof formatBank>;
 
 /**
  * Format provider bank account for response
@@ -106,6 +143,31 @@ const formatBankAccount = (account: any) => ({
   updatedAt: account.updatedAt.toISOString(),
 });
 
+/**
+ * Read a cached value. A Redis failure counts as a cache miss.
+ */
+const readCache = async (key: string): Promise<string | null> => {
+  try {
+    return await RedisClient.getInstance().get(key);
+  } catch (error) {
+    console.error('Redis cache error:', error);
+    return null;
+  }
+};
+
+const writeCache = async (key: string, ttlSeconds: number, value: string): Promise<void> => {
+  try {
+    await RedisClient.getInstance().setex(key, ttlSeconds, value);
+  } catch (error) {
+    console.error('Redis cache set error:', error);
+  }
+};
+
+const banksUnavailable = () =>
+  new GraphQLError('Failed to fetch banks', {
+    extensions: { code: 'PAYSTACK_ERROR' },
+  });
+
 // ==========================================
 // Bank List Functions
 // ==========================================
@@ -113,40 +175,31 @@ const formatBankAccount = (account: any) => ({
 /**
  * Get list of Nigerian banks (cached)
  */
-export const listBanks = async () => {
-  const redis = getRedis();
-  
-  // Try to get from cache first
-  if (redis) {
+export const listBanks = async (): Promise<Bank[]> => {
+  const cached = await readCache(BANK_LIST_CACHE_KEY);
+  if (cached) {
     try {
-      const cached = await redis.get(BANK_LIST_CACHE_KEY);
-      if (cached) {
-        return JSON.parse(cached);
-      }
-    } catch (error) {
-      console.error('Redis cache error:', error);
+      return JSON.parse(cached) as Bank[];
+    } catch {
+      // Fetch a fresh list instead
     }
   }
 
-  // Fetch from Paystack
-  const response = await paystack.listBanks();
+  let response: PaystackBankListResponse;
+  try {
+    response = await paystack.listBanks();
+  } catch (error) {
+    console.error('Failed to fetch banks from Paystack:', error);
+    throw banksUnavailable();
+  }
 
   if (!response.status) {
-    throw new GraphQLError('Failed to fetch banks', {
-      extensions: { code: 'PAYSTACK_ERROR' },
-    });
+    throw banksUnavailable();
   }
 
   const banks = response.data.map(formatBank);
 
-  // Cache the result
-  if (redis) {
-    try {
-      await redis.setex(BANK_LIST_CACHE_KEY, BANK_LIST_CACHE_TTL, JSON.stringify(banks));
-    } catch (error) {
-      console.error('Redis cache set error:', error);
-    }
-  }
+  await writeCache(BANK_LIST_CACHE_KEY, BANK_LIST_CACHE_TTL, JSON.stringify(banks));
 
   return banks;
 };
@@ -156,30 +209,57 @@ export const listBanks = async () => {
  */
 export const getBankByCode = async (bankCode: string) => {
   const banks = await listBanks();
-  return banks.find((bank: any) => bank.code === bankCode) || null;
+  return banks.find((bank) => bank.code === bankCode) || null;
 };
 
 /**
- * Suggest bank(s) based on account number prefix
- * Note: This is a heuristic and not always accurate
+ * Whether a 10-digit account number's check digit is valid for a 3-digit CBN
+ * bank code (the NUBAN standard)
  */
-export const suggestBankFromAccountNumber = (accountNumber: string) => {
-  if (accountNumber.length < 3) {
+export const isValidNuban = (accountNumber: string, cbnBankCode: string): boolean => {
+  if (!/^\d{10}$/.test(accountNumber) || !/^\d{3}$/.test(cbnBankCode)) {
+    return false;
+  }
+
+  const digits = `${cbnBankCode}${accountNumber.slice(0, 9)}`;
+  const sum = [...digits].reduce((total, digit, index) => total + Number(digit) * NUBAN_WEIGHTS[index], 0);
+
+  return (10 - (sum % 10)) % 10 === Number(accountNumber[9]);
+};
+
+/**
+ * Suggest the banks a 10-digit account number can belong to: those whose bank
+ * code gives it a valid NUBAN check digit
+ */
+export const suggestBankFromAccountNumber = async (accountNumber: string) => {
+  if (!/^\d{10}$/.test(accountNumber)) {
     return {
-      suggestions: [],
-      message: 'Please enter at least 3 digits',
+      possibleBanks: [],
+      confidence: 'NONE',
+      message: 'Enter the full 10-digit account number',
     };
   }
 
-  const prefix = accountNumber.substring(0, 3);
-  const suggestions = BANK_PREFIXES[prefix] || [];
+  const paystackCodes = new Set(
+    Object.entries(NUBAN_BANKS)
+      .filter(([cbnCode]) => isValidNuban(accountNumber, cbnCode))
+      .flatMap(([, codes]) => codes)
+  );
+
+  const possibleBanks =
+    paystackCodes.size > 0 ? (await listBanks()).filter((bank) => paystackCodes.has(bank.code)) : [];
+
+  // A check digit only rules banks out, and microfinance banks can't be
+  // checked, so confidence is never HIGH
+  const confidence = possibleBanks.length === 0 ? 'NONE' : possibleBanks.length === 1 ? 'MEDIUM' : 'LOW';
 
   return {
-    prefix,
-    suggestions,
-    message: suggestions.length > 0
-      ? `Possible bank(s): ${suggestions.join(', ')}`
-      : 'Bank could not be determined from account number',
+    possibleBanks,
+    confidence,
+    message:
+      possibleBanks.length > 0
+        ? `Possible bank(s): ${possibleBanks.map((bank) => bank.name).join(', ')}`
+        : 'Bank could not be determined from account number',
   };
 };
 
@@ -187,74 +267,47 @@ export const suggestBankFromAccountNumber = (accountNumber: string) => {
 // Bank Account Verification
 // ==========================================
 
-// Track rate limit failures for fallback
-let rateLimitFailureCount = 0;
-const MAX_RATE_LIMIT_FAILURES = 10;
+const verificationFailed = () =>
+  new GraphQLError('Could not verify this account. Check the account number and bank, then try again.', {
+    extensions: { code: 'VERIFICATION_FAILED' },
+  });
 
-/**
- * Check rate limit for bank verification
- * SECURITY FIX: Fail CLOSED when Redis unavailable (after grace period)
- */
-const checkRateLimit = async (userId: string): Promise<boolean> => {
-  const redis = getRedis();
-  
-  if (!redis) {
-    // Fail CLOSED after too many failures - prevent API abuse
-    rateLimitFailureCount++;
-    if (rateLimitFailureCount > MAX_RATE_LIMIT_FAILURES) {
-      console.error('Rate limiting disabled due to Redis unavailability - blocking requests');
-      return false;
-    }
-    console.warn(`Redis unavailable for rate limiting (failure ${rateLimitFailureCount}/${MAX_RATE_LIMIT_FAILURES})`);
-    return true; // Allow during grace period
-  }
+const verificationUnavailable = () =>
+  new GraphQLError('Bank account verification is unavailable right now. Please try again shortly.', {
+    extensions: { code: 'PAYSTACK_ERROR' },
+  });
 
-  // Reset failure count when Redis is available
-  rateLimitFailureCount = 0;
+const verifiedAccountKey = (userId: string, bankCode: string, accountNumber: string) =>
+  `bank_verified:${userId}:${bankCode}:${accountNumber}`;
 
-  const key = `${RATE_LIMIT_PREFIX}${userId}`;
-  
+const isResolvedAccount = (value: unknown): value is ResolvedAccount =>
+  typeof value === 'object' &&
+  value !== null &&
+  typeof (value as ResolvedAccount).accountNumber === 'string' &&
+  typeof (value as ResolvedAccount).accountName === 'string';
+
+const readVerifiedAccount = async (key: string): Promise<ResolvedAccount | null> => {
+  const cached = await readCache(key);
+  if (!cached) return null;
+
   try {
-    const count = await redis.incr(key);
-    
-    if (count === 1) {
-      await redis.expire(key, RATE_LIMIT_WINDOW);
-    }
-    
-    return count <= RATE_LIMIT_MAX;
-  } catch (error) {
-    console.error('Rate limit check error:', error);
-    // FAIL CLOSED on Redis error - security over convenience
-    return false;
+    const parsed: unknown = JSON.parse(cached);
+    return isResolvedAccount(parsed) ? parsed : null;
+  } catch {
+    return null;
   }
 };
 
 /**
- * Verify bank account and resolve account name
- * Rate limited to prevent API abuse
+ * Check the account number and bank code before anything is counted
  */
-export const verifyBankAccount = async (
-  userId: string,
-  accountNumber: string,
-  bankCode: string
-) => {
-  // Check rate limit
-  const allowed = await checkRateLimit(userId);
-  if (!allowed) {
-    throw new GraphQLError(
-      'Rate limit exceeded. You can verify up to 5 accounts per hour.',
-      { extensions: { code: 'RATE_LIMIT_EXCEEDED' } }
-    );
-  }
-
-  // Validate account number format (10 digits for Nigerian banks)
+const validateAccountDetails = async (accountNumber: string, bankCode: string) => {
   if (!/^\d{10}$/.test(accountNumber)) {
     throw new GraphQLError('Invalid account number. Must be 10 digits.', {
       extensions: { code: 'INVALID_ACCOUNT_NUMBER' },
     });
   }
 
-  // Verify bank code exists
   const bank = await getBankByCode(bankCode);
   if (!bank) {
     throw new GraphQLError('Invalid bank code', {
@@ -262,19 +315,81 @@ export const verifyBankAccount = async (
     });
   }
 
-  // Call Paystack to resolve account
-  const response = await paystack.resolveAccount(accountNumber, bankCode);
+  return bank;
+};
 
-  if (!response.status) {
-    throw new GraphQLError(
-      response.message || 'Could not verify account. Please check the details.',
-      { extensions: { code: 'VERIFICATION_FAILED' } }
-    );
+/**
+ * Look the account up with Paystack, or reuse this user's lookup of the same
+ * account from the last 15 minutes. Only a real lookup counts towards the
+ * hourly limit, which is enforced in memory while Redis is unavailable.
+ */
+const resolveAccount = async (
+  userId: string,
+  accountNumber: string,
+  bankCode: string
+): Promise<ResolvedAccount> => {
+  const cacheKey = verifiedAccountKey(userId, bankCode, accountNumber);
+
+  const recent = await readVerifiedAccount(cacheKey);
+  if (recent) {
+    return recent;
   }
 
-  return {
-    accountNumber: response.data.account_number,
+  const limit = await rateLimit.check(`bank_verify:${userId}`, VERIFY_LIMIT, VERIFY_WINDOW_SECONDS);
+  if (!limit.allowed) {
+    throw new GraphQLError('Rate limit exceeded. You can verify up to 5 accounts per hour.', {
+      extensions: { code: 'RATE_LIMIT_EXCEEDED', resetIn: limit.resetIn },
+    });
+  }
+
+  let response: PaystackResolveAccountResponse;
+  try {
+    response = await paystack.resolveAccount(accountNumber, bankCode);
+  } catch (error) {
+    const accountRejected =
+      error instanceof PaystackRequestError &&
+      error.httpStatus !== undefined &&
+      error.httpStatus >= 400 &&
+      error.httpStatus < 500 &&
+      !INTEGRATION_ERROR_STATUSES.has(error.httpStatus);
+
+    if (accountRejected) {
+      throw verificationFailed();
+    }
+
+    // No answer, a Paystack server error, or a problem with our integration
+    console.error('Paystack account lookup failed:', error);
+    throw verificationUnavailable();
+  }
+
+  if (!response.status || !response.data?.account_name) {
+    throw verificationFailed();
+  }
+
+  const account: ResolvedAccount = {
+    accountNumber: response.data.account_number || accountNumber,
     accountName: response.data.account_name,
+    bankId: response.data.bank_id ?? null,
+  };
+
+  await writeCache(cacheKey, VERIFIED_ACCOUNT_TTL_SECONDS, JSON.stringify(account));
+
+  return account;
+};
+
+/**
+ * Verify bank account and resolve account name
+ */
+export const verifyBankAccount = async (
+  userId: string,
+  accountNumber: string,
+  bankCode: string
+) => {
+  const bank = await validateAccountDetails(accountNumber, bankCode);
+  const account = await resolveAccount(userId, accountNumber, bankCode);
+
+  return {
+    ...account,
     bankCode,
     bankName: bank.name,
     verified: true,
@@ -295,10 +410,9 @@ export const addProviderBankAccount = async (
 ) => {
   const { bankCode, accountNumber } = input;
 
-  // Verify the account first
-  const verification = await verifyBankAccount(userId, accountNumber, bankCode);
+  const bank = await validateAccountDetails(accountNumber, bankCode);
 
-  // Check if account already exists for this provider
+  // Checked before the lookup, so adding an account twice doesn't use a verification
   const existing = await prisma.providerBankAccount.findFirst({
     where: {
       providerId,
@@ -312,6 +426,9 @@ export const addProviderBankAccount = async (
       extensions: { code: 'DUPLICATE_ACCOUNT' },
     });
   }
+
+  // Reuses a verifyBankAccount lookup of this account from the last 15 minutes
+  const verification = await resolveAccount(userId, accountNumber, bankCode);
 
   // Check if this is the first account (make it default)
   const accountCount = await prisma.providerBankAccount.count({
@@ -330,7 +447,7 @@ export const addProviderBankAccount = async (
       bank_code: bankCode,
       currency: 'NGN',
     });
-    
+
     if (recipientResponse.status) {
       recipientCode = recipientResponse.data.recipient_code;
     }
@@ -340,18 +457,29 @@ export const addProviderBankAccount = async (
   }
 
   // Create bank account record
-  const bankAccount = await prisma.providerBankAccount.create({
-    data: {
-      providerId,
-      bankCode,
-      bankName: verification.bankName,
-      accountNumber,
-      accountName: verification.accountName,
-      isDefault,
-      isVerified: true,
-      recipientCode,
-    },
-  });
+  let bankAccount;
+  try {
+    bankAccount = await prisma.providerBankAccount.create({
+      data: {
+        providerId,
+        bankCode,
+        bankName: bank.name,
+        accountNumber,
+        accountName: verification.accountName,
+        isDefault,
+        isVerified: true,
+        recipientCode,
+      },
+    });
+  } catch (error) {
+    // Two requests adding the same account at once: the unique index stops the second
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      throw new GraphQLError('This bank account is already added', {
+        extensions: { code: 'DUPLICATE_ACCOUNT' },
+      });
+    }
+    throw error;
+  }
 
   return formatBankAccount(bankAccount);
 };
@@ -463,22 +591,28 @@ export const deleteBankAccount = async (accountId: string, providerId: string) =
     );
   }
 
-  // Check if it's used in payout schedule
-  const payoutSchedule = await prisma.payoutSchedule.findUnique({
-    where: { providerId },
+  // Only an active payout schedule keeps its account
+  const activeSchedule = await prisma.payoutSchedule.findFirst({
+    where: { providerId, bankAccountId: accountId, isActive: true },
   });
 
-  if (payoutSchedule?.bankAccountId === accountId) {
+  if (activeSchedule) {
     throw new GraphQLError(
       'Cannot delete this account. It is set for scheduled payouts.',
       { extensions: { code: 'IN_USE_BY_PAYOUT_SCHEDULE' } }
     );
   }
 
-  // Delete the account
-  await prisma.providerBankAccount.delete({
-    where: { id: accountId },
-  });
+  await prisma.$transaction([
+    // A paused schedule that named this account uses the default account if it's turned back on
+    prisma.payoutSchedule.updateMany({
+      where: { providerId, bankAccountId: accountId },
+      data: { bankAccountId: null },
+    }),
+    prisma.providerBankAccount.delete({
+      where: { id: accountId },
+    }),
+  ]);
 
   // If this was the default, set another account as default
   if (account.isDefault) {

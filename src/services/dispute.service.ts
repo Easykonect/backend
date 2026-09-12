@@ -1,18 +1,52 @@
 /**
  * Dispute Service
  * Handles booking dispute operations
- * 
+ *
  * Features:
- * - Users or providers can raise disputes on bookings
- * - Admin reviews and resolves disputes
- * - Track dispute status and resolution
- * - Support for evidence uploads
+ * - Users or providers can raise disputes on bookings, until the payment has
+ *   been released to the provider. Active admins are alerted.
+ * - An admin can take a dispute under review, which records who took it and
+ *   tells both parties
+ * - Admin reviews and resolves disputes, and the resolution moves the money:
+ *   - REFUND_FULL: everything not yet refunded goes to the customer's wallet
+ *     and the booking is cancelled
+ *   - REFUND_PARTIAL, or MUTUAL_AGREEMENT with a refund: that amount goes to
+ *     the customer's wallet and the rest is released to the provider now
+ *   - NO_REFUND, DISMISSED, or MUTUAL_AGREEMENT without a refund: the booking
+ *     returns to the status it had; a finished, paid job is released now
+ *   - REDO_SERVICE: the booking goes back to ACCEPTED and the money stays held
+ *     until the redone job is confirmed
+ * - Evidence is files uploaded to Easykonnet's Cloudinary account, at most 10
+ *   per dispute
  */
 
 import { GraphQLError } from 'graphql';
+import {
+  AdminAction,
+  type BookingStatus as BookingStatusValue,
+  type DisputeResolution as DisputeResolutionValue,
+  type Prisma,
+} from '@prisma/client';
 import prisma from '@/lib/prisma';
-import { BookingStatus, DisputeStatus, DisputeResolution, UserRole } from '@/constants';
+import { CloudinaryFolders } from '@/lib/cloudinary';
+import { withTransaction } from '@/lib/transaction';
+import {
+  AUTO_RELEASE_DAYS,
+  BookingStatus,
+  DisputeStatus,
+  DisputeResolution,
+  NotificationType,
+  PaymentStatus,
+  RELEASE_DELAY_HOURS,
+  UserRole,
+} from '@/constants';
 import { sanitizeBasic, validateText, MAX_LENGTHS } from '@/utils/security';
+import { createAuditLog } from './audit.service';
+import { refundableKobo, refundPaymentToWallet } from './escrow.service';
+import { createBulkNotifications, createNotification } from './notification.service';
+import { sendPushToUser } from './push.service';
+import { extractOwnedAsset } from './upload.service';
+import { ensureWallet, koboToNaira, nairaToKobo } from './wallet.service';
 
 // ==================
 // Types
@@ -28,7 +62,7 @@ interface CreateDisputeInput {
 interface ResolveDisputeInput {
   resolution: string;
   resolutionNotes: string;
-  refundAmount?: number;
+  refundAmount?: number | null; // Naira
 }
 
 interface DisputeFilters {
@@ -42,19 +76,44 @@ interface PaginationInput {
 }
 
 // ==================
+// Constants
+// ==================
+
+export const MAX_EVIDENCE = 10;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const ADMIN_ROLES: string[] = [UserRole.ADMIN, UserRole.SUPER_ADMIN];
+
+// ==================
 // Helper Functions
 // ==================
+
+const disputeInclude = {
+  booking: {
+    include: {
+      user: true,
+      provider: {
+        include: { user: true },
+      },
+      service: true,
+    },
+  },
+} satisfies Prisma.DisputeInclude;
+
+type DisputeWithBooking = Prisma.DisputeGetPayload<{ include: typeof disputeInclude }>;
 
 /**
  * Format dispute response for GraphQL
  */
-const formatDisputeResponse = (dispute: any) => ({
+const formatDisputeResponse = (dispute: DisputeWithBooking) => ({
   id: dispute.id,
   reason: dispute.reason,
   description: dispute.description,
   evidence: dispute.evidence,
   status: dispute.status,
   raisedByRole: dispute.raisedByRole,
+  // Returned to admins only (see the Dispute field resolvers)
+  reviewedBy: dispute.reviewedById ?? null,
+  reviewStartedAt: dispute.reviewStartedAt?.toISOString() ?? null,
   resolution: dispute.resolution,
   resolutionNotes: dispute.resolutionNotes,
   refundAmount: dispute.refundAmount,
@@ -92,6 +151,126 @@ const formatDisputeResponse = (dispute: any) => ({
   } : null,
 });
 
+/**
+ * The same error for a booking that doesn't exist and for one the caller
+ * isn't on, so outsiders learn nothing about it
+ */
+const bookingNotFound = () =>
+  new GraphQLError('Booking not found', {
+    extensions: { code: 'NOT_FOUND' },
+  });
+
+const tooMuchEvidence = () =>
+  new GraphQLError(`Maximum ${MAX_EVIDENCE} evidence files allowed`, {
+    extensions: { code: 'MAX_EVIDENCE_EXCEEDED' },
+  });
+
+/**
+ * Whether a URL is an https link to an evidence file `userId` uploaded to
+ * Easykonnet's Cloudinary account: in the evidence folder, and named
+ * `<userId>_...` as getEvidenceUploadParams uploads are
+ */
+export const isEvidenceUrl = (value: string, userId: string): boolean => {
+  if (typeof value !== 'string' || value !== value.trim() || value.length > MAX_LENGTHS.URL) {
+    return false;
+  }
+
+  if (!value.startsWith('https://')) return false;
+
+  const asset = extractOwnedAsset(value, userId);
+  return Boolean(asset && asset.publicId.startsWith(`${CloudinaryFolders.EVIDENCE}/`));
+};
+
+const checkEvidenceUrls = (urls: string[], userId: string) => {
+  if (!urls.every((url) => isEvidenceUrl(url, userId))) {
+    throw new GraphQLError(
+      'Evidence must be files you uploaded through Easykonnet. Upload each file first, then send the URL you get back.',
+      { extensions: { code: 'INVALID_EVIDENCE_URL' } }
+    );
+  }
+};
+
+/**
+ * In-app notification and push. Failures are logged, never thrown: the change
+ * they describe has already been saved. The push carries the DISPUTE_* type,
+ * so it follows the user's notifyDisputeUpdates setting; the in-app
+ * notification is always saved.
+ */
+const notifyUser = async (
+  userId: string,
+  type: string,
+  title: string,
+  message: string,
+  disputeId: string,
+  metadata: Record<string, string>
+) => {
+  let notificationId: string | undefined;
+
+  try {
+    const notification = await createNotification({
+      userId,
+      type,
+      title,
+      message,
+      entityType: 'dispute',
+      entityId: disputeId,
+      metadata,
+    });
+    notificationId = notification?.id;
+  } catch (error) {
+    console.error('Failed to write dispute notification:', error);
+  }
+
+  try {
+    await sendPushToUser(userId, {
+      title,
+      message,
+      data: { type, disputeId, ...metadata },
+      ...(notificationId ? { notificationId } : {}),
+    });
+  } catch (error) {
+    console.error('Failed to send dispute push:', error);
+  }
+};
+
+/**
+ * Tell every active admin a dispute is waiting for a decision. Failures are
+ * logged: the dispute is saved and in the admin queue either way.
+ */
+const alertAdmins = async (params: {
+  disputeId: string;
+  bookingId: string;
+  serviceName: string;
+  raisedByCustomer: boolean;
+  reopened: boolean;
+}) => {
+  const { disputeId, bookingId, serviceName, raisedByCustomer, reopened } = params;
+  const raiser = raisedByCustomer ? 'customer' : 'provider';
+
+  try {
+    const admins = await prisma.user.findMany({
+      where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] }, status: 'ACTIVE' },
+      select: { id: true },
+    });
+
+    if (admins.length === 0) return;
+
+    await createBulkNotifications(
+      admins.map((admin) => admin.id),
+      NotificationType.DISPUTE_OPENED,
+      reopened ? 'Dispute reopened' : 'New dispute to review',
+      reopened
+        ? `The ${raiser} reopened the dispute about the booking of ${serviceName}.`
+        : `The ${raiser} opened a dispute about the booking of ${serviceName}.`,
+      'dispute',
+      disputeId,
+      { disputeId, bookingId }
+    );
+  } catch (error) {
+    console.error('Failed to alert admins about a dispute:', error);
+  }
+};
+
 // ==================
 // Dispute Functions
 // ==================
@@ -120,6 +299,12 @@ export const createDispute = async (
     });
   }
 
+  // Evidence is files uploaded through Easykonnet, at most MAX_EVIDENCE of them
+  checkEvidenceUrls(evidence, userId);
+  if (evidence.length > MAX_EVIDENCE) {
+    throw tooMuchEvidence();
+  }
+
   // Get booking with relations
   const booking = await prisma.booking.findUnique({
     where: { id: bookingId },
@@ -133,26 +318,30 @@ export const createDispute = async (
     },
   });
 
-  if (!booking) {
-    throw new GraphQLError('Booking not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+  const isUser = booking?.userId === userId;
+  const isProvider = booking?.provider.userId === userId;
+
+  // Only the booking's customer and provider, and admins, learn whether the
+  // booking exists or already has a dispute
+  if (!booking || (!isUser && !isProvider && !ADMIN_ROLES.includes(userRole))) {
+    throw bookingNotFound();
   }
 
-  // Check if dispute already exists
-  if (booking.dispute) {
-    throw new GraphQLError('A dispute already exists for this booking', {
-      extensions: { code: 'DISPUTE_EXISTS' },
-    });
-  }
-
-  // Determine if user is authorized to raise dispute
-  const isUser = booking.userId === userId;
-  const isProvider = booking.provider.userId === userId;
-
+  // Admins settle disputes; they don't raise them
   if (!isUser && !isProvider) {
     throw new GraphQLError('You are not authorized to raise a dispute for this booking', {
       extensions: { code: 'FORBIDDEN' },
+    });
+  }
+
+  // One dispute per booking; after a redo it can be reopened about the redone job
+  const reopening =
+    booking.dispute?.status === DisputeStatus.RESOLVED &&
+    booking.dispute.resolution === DisputeResolution.REDO_SERVICE;
+
+  if (booking.dispute && !reopening) {
+    throw new GraphQLError('A dispute already exists for this booking', {
+      extensions: { code: 'DISPUTE_EXISTS' },
     });
   }
 
@@ -163,67 +352,121 @@ export const createDispute = async (
     BookingStatus.COMPLETED,
   ];
 
-  if (!disputeableStatuses.includes(booking.status as any)) {
+  if (!(disputeableStatuses as string[]).includes(booking.status)) {
     throw new GraphQLError(
       `Cannot raise a dispute for a booking with status: ${booking.status}. Disputes can only be raised for accepted, in-progress, or completed bookings.`,
       { extensions: { code: 'INVALID_BOOKING_STATUS' } }
     );
   }
 
-  // For completed bookings, check if within dispute window (e.g., 7 days)
-  if (booking.status === BookingStatus.COMPLETED && booking.completedAt) {
-    const disputeWindowDays = 7;
-    const disputeDeadline = new Date(booking.completedAt);
-    disputeDeadline.setDate(disputeDeadline.getDate() + disputeWindowDays);
-    
-    if (new Date() > disputeDeadline) {
+  // Money can only be disputed while it's still held
+  if (booking.paymentReleasedAt) {
+    throw new GraphQLError(
+      'The payment for this booking has already been released to the provider. Please contact support for help.',
+      { extensions: { code: 'DISPUTE_WINDOW_EXPIRED' } }
+    );
+  }
+
+  // A completed job's payment is released RELEASE_DELAY_HOURS after the
+  // customer confirms, or AUTO_RELEASE_DAYS after completion without a
+  // confirmation. Once that time comes, the window has closed.
+  if (booking.status === BookingStatus.COMPLETED) {
+    const releaseDue =
+      booking.paymentReleaseAt ??
+      (booking.completedAt ? new Date(booking.completedAt.getTime() + AUTO_RELEASE_DAYS * DAY_MS) : null);
+
+    if (releaseDue && releaseDue.getTime() <= Date.now()) {
       throw new GraphQLError(
-        `Dispute window has expired. Disputes must be raised within ${disputeWindowDays} days of service completion.`,
+        `Dispute window has expired. Disputes can be raised until the provider's payment is released: ${RELEASE_DELAY_HOURS} hours after the customer confirms delivery, or ${AUTO_RELEASE_DAYS} days after the job is completed if they don't.`,
         { extensions: { code: 'DISPUTE_WINDOW_EXPIRED' } }
       );
     }
   }
 
-  // Create dispute and update booking status
+  // A reopened dispute keeps its earlier evidence, and the cap covers both
+  const allEvidence = reopening && booking.dispute ? [...booking.dispute.evidence, ...evidence] : evidence;
+  if (evidence.length > 0 && allEvidence.length > MAX_EVIDENCE) {
+    throw tooMuchEvidence();
+  }
+
   // Sanitize user inputs to prevent XSS
   const sanitizedReason = sanitizeBasic(reason.trim());
   const sanitizedDescription = validateText(
     sanitizeBasic(description.trim()),
     'Description',
+    20,
     MAX_LENGTHS.DESCRIPTION
   );
-  
-  const [dispute] = await prisma.$transaction([
-    prisma.dispute.create({
-      data: {
-        bookingId,
-        raisedById: userId,
-        raisedByRole: isUser ? UserRole.SERVICE_USER : UserRole.SERVICE_PROVIDER,
-        reason: sanitizedReason,
-        description: sanitizedDescription,
-        evidence,
-        status: DisputeStatus.OPEN,
+
+  const dispute = await withTransaction(async (tx) => {
+    // The booking must be unchanged since the checks above and not yet
+    // released; the write also conflicts with a release running now
+    const { count } = await tx.booking.updateMany({
+      where: {
+        id: bookingId,
+        status: booking.status,
+        OR: [{ paymentReleasedAt: null }, { paymentReleasedAt: { isSet: false } }],
       },
-      include: {
-        booking: {
-          include: {
-            user: true,
-            provider: {
-              include: { user: true },
-            },
-            service: true,
-          },
-        },
-      },
-    }),
-    prisma.booking.update({
-      where: { id: bookingId },
       data: { status: BookingStatus.DISPUTED },
+    });
+
+    if (count === 0) {
+      throw new GraphQLError('This booking changed while the dispute was being raised. Please refresh and try again.', {
+        extensions: { code: 'INVALID_BOOKING_STATUS' },
+      });
+    }
+
+    const details = {
+      raisedById: userId,
+      raisedByRole: isUser ? UserRole.SERVICE_USER : UserRole.SERVICE_PROVIDER,
+      reason: sanitizedReason,
+      description: sanitizedDescription,
+      status: DisputeStatus.OPEN,
+      previousBookingStatus: booking.status,
+    };
+
+    if (reopening && booking.dispute) {
+      // The earlier resolution stays in the audit log
+      return tx.dispute.update({
+        where: { id: booking.dispute.id },
+        data: {
+          ...details,
+          evidence: allEvidence,
+          reviewedById: null,
+          reviewStartedAt: null,
+          resolution: null,
+          resolutionNotes: null,
+          refundAmount: null,
+          resolvedById: null,
+          resolvedAt: null,
+        },
+        include: disputeInclude,
+      });
+    }
+
+    return tx.dispute.create({
+      data: { bookingId, ...details, evidence },
+      include: disputeInclude,
+    });
+  });
+
+  await Promise.all([
+    notifyUser(
+      isUser ? booking.provider.userId : booking.userId,
+      NotificationType.DISPUTE_OPENED,
+      'Dispute opened',
+      `A dispute has been opened for the booking of ${booking.service.name}. Easykonnet will review it.`,
+      dispute.id,
+      { bookingId }
+    ),
+    alertAdmins({
+      disputeId: dispute.id,
+      bookingId,
+      serviceName: booking.service.name,
+      raisedByCustomer: isUser,
+      reopened: reopening,
     }),
   ]);
-
-  // TODO: Send notification to the other party and admin
-  // TODO: Send email notification
 
   return formatDisputeResponse(dispute);
 };
@@ -234,17 +477,7 @@ export const createDispute = async (
 export const getDisputeById = async (disputeId: string, userId?: string, isAdmin?: boolean) => {
   const dispute = await prisma.dispute.findUnique({
     where: { id: disputeId },
-    include: {
-      booking: {
-        include: {
-          user: true,
-          provider: {
-            include: { user: true },
-          },
-          service: true,
-        },
-      },
-    },
+    include: disputeInclude,
   });
 
   if (!dispute) {
@@ -257,10 +490,11 @@ export const getDisputeById = async (disputeId: string, userId?: string, isAdmin
   if (!isAdmin && userId) {
     const isUser = dispute.booking.userId === userId;
     const isProvider = dispute.booking.provider.userId === userId;
-    
+
+    // Same answer as a missing dispute, so outsiders can't tell one exists
     if (!isUser && !isProvider) {
-      throw new GraphQLError('You are not authorized to view this dispute', {
-        extensions: { code: 'FORBIDDEN' },
+      throw new GraphQLError('Dispute not found', {
+        extensions: { code: 'NOT_FOUND' },
       });
     }
   }
@@ -269,42 +503,37 @@ export const getDisputeById = async (disputeId: string, userId?: string, isAdmin
 };
 
 /**
- * Get dispute for a booking
+ * Get the dispute for a booking, or null if it has none. Only the booking's
+ * customer and provider, and admins, can ask.
  */
 export const getBookingDispute = async (bookingId: string, userId?: string, isAdmin?: boolean) => {
-  const dispute = await prisma.dispute.findUnique({
-    where: { bookingId },
-    include: {
-      booking: {
-        include: {
-          user: true,
-          provider: {
-            include: { user: true },
-          },
-          service: true,
-        },
-      },
-    },
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: { userId: true, provider: { select: { userId: true } } },
   });
 
-  if (!dispute) {
-    return null;
+  const isParty = Boolean(userId) && (booking?.userId === userId || booking?.provider.userId === userId);
+
+  if (!booking || (!isAdmin && !isParty)) {
+    throw bookingNotFound();
   }
 
-  // If not admin, check authorization
-  if (!isAdmin && userId) {
-    const isUser = dispute.booking.userId === userId;
-    const isProvider = dispute.booking.provider.userId === userId;
-    
-    if (!isUser && !isProvider) {
-      throw new GraphQLError('You are not authorized to view this dispute', {
-        extensions: { code: 'FORBIDDEN' },
-      });
-    }
-  }
+  const dispute = await prisma.dispute.findUnique({
+    where: { bookingId },
+    include: disputeInclude,
+  });
 
-  return formatDisputeResponse(dispute);
+  return dispute ? formatDisputeResponse(dispute) : null;
 };
+
+/**
+ * The status and raisedByRole filters, as a query. GraphQL's enums have
+ * already checked the values.
+ */
+const disputeFilterWhere = (filters: DisputeFilters): Prisma.DisputeWhereInput => ({
+  ...(filters.status ? { status: filters.status as Prisma.DisputeWhereInput['status'] } : {}),
+  ...(filters.raisedByRole ? { raisedByRole: filters.raisedByRole as Prisma.DisputeWhereInput['raisedByRole'] } : {}),
+});
 
 /**
  * Get user's disputes (as user or provider)
@@ -322,32 +551,19 @@ export const getMyDisputes = async (
     where: { userId },
   });
 
-  // Build where clause - disputes for user's bookings or provider's bookings
-  const where: any = {
+  // Disputes on the user's bookings, as the customer or as the provider
+  const where: Prisma.DisputeWhereInput = {
     OR: [
       { booking: { userId } },
       ...(provider ? [{ booking: { providerId: provider.id } }] : []),
     ],
+    ...disputeFilterWhere(filters),
   };
-
-  if (filters.status) {
-    where.status = filters.status;
-  }
 
   const [disputes, total] = await Promise.all([
     prisma.dispute.findMany({
       where,
-      include: {
-        booking: {
-          include: {
-            user: true,
-            provider: {
-              include: { user: true },
-            },
-            service: true,
-          },
-        },
-      },
+      include: disputeInclude,
       skip,
       take: limit,
       orderBy: { createdAt: 'desc' },
@@ -378,31 +594,12 @@ export const getAllDisputes = async (
   const { page, limit } = pagination;
   const skip = (page - 1) * limit;
 
-  // Build where clause
-  const where: any = {};
-
-  if (filters.status) {
-    where.status = filters.status;
-  }
-
-  if (filters.raisedByRole) {
-    where.raisedByRole = filters.raisedByRole;
-  }
+  const where = disputeFilterWhere(filters);
 
   const [disputes, total] = await Promise.all([
     prisma.dispute.findMany({
       where,
-      include: {
-        booking: {
-          include: {
-            user: true,
-            provider: {
-              include: { user: true },
-            },
-            service: true,
-          },
-        },
-      },
+      include: disputeInclude,
       skip,
       take: limit,
       orderBy: { createdAt: 'desc' },
@@ -439,11 +636,10 @@ export const getOpenDisputesCount = async () => {
 };
 
 /**
- * Admin takes dispute under review
+ * Admin takes dispute under review. Records who took it and when, and tells
+ * both parties.
  */
-// TODO(audit): `adminId` is discarded — the Dispute model has no field for who
-// took it under review (only `resolvedById` at resolution time).
-export const takeDisputeUnderReview = async (disputeId: string, _adminId: string) => {
+export const takeDisputeUnderReview = async (disputeId: string, adminId: string) => {
   const dispute = await prisma.dispute.findUnique({
     where: { id: disputeId },
   });
@@ -454,34 +650,346 @@ export const takeDisputeUnderReview = async (disputeId: string, _adminId: string
     });
   }
 
-  if (dispute.status !== DisputeStatus.OPEN) {
+  // Conditional, so a dispute settled or taken meanwhile isn't changed
+  const { count } = await prisma.dispute.updateMany({
+    where: { id: disputeId, status: DisputeStatus.OPEN },
+    data: { status: DisputeStatus.UNDER_REVIEW, reviewedById: adminId, reviewStartedAt: new Date() },
+  });
+
+  if (count === 0) {
     throw new GraphQLError(
       `Cannot take dispute under review. Current status: ${dispute.status}`,
       { extensions: { code: 'INVALID_STATUS' } }
     );
   }
 
-  const updatedDispute = await prisma.dispute.update({
+  const updatedDispute = await prisma.dispute.findUniqueOrThrow({
     where: { id: disputeId },
-    data: {
-      status: DisputeStatus.UNDER_REVIEW,
-    },
+    include: disputeInclude,
+  });
+
+  const { booking } = updatedDispute;
+  const message = `Easykonnet is now reviewing the dispute for ${booking.service.name}. We'll let you know when it's settled.`;
+
+  await Promise.all(
+    [booking.userId, booking.provider.userId].map((recipientId) =>
+      notifyUser(
+        recipientId,
+        NotificationType.DISPUTE_UPDATED,
+        'Dispute under review',
+        message,
+        disputeId,
+        { bookingId: booking.id }
+      )
+    )
+  );
+
+  return formatDisputeResponse(updatedDispute);
+};
+
+// ==================
+// Resolution
+// ==================
+
+const RESOLUTION_OUTCOMES: Record<string, string> = {
+  [DisputeResolution.REFUND_FULL]: 'a full refund',
+  [DisputeResolution.REFUND_PARTIAL]: 'a partial refund',
+  [DisputeResolution.NO_REFUND]: 'no refund',
+  [DisputeResolution.REDO_SERVICE]: 'the service being redone',
+  [DisputeResolution.MUTUAL_AGREEMENT]: 'a mutual agreement',
+  [DisputeResolution.DISMISSED]: 'the dispute being dismissed',
+};
+
+/**
+ * How much a resolution refunds, in kobo. `paidKobo` is the booking's
+ * completed payment (0 if it wasn't paid), `refundedKobo` the part of it an
+ * earlier refund already returned, and `requestedKobo` the amount the admin
+ * entered, if any. Refunds are measured against what hasn't been refunded yet.
+ */
+export const refundForResolution = (
+  resolution: string,
+  requestedKobo: number | null,
+  paidKobo: number,
+  refundedKobo = 0
+): number => {
+  const naira = (kobo: number) => `₦${koboToNaira(kobo).toLocaleString()}`;
+  const refundableKobo = Math.max(paidKobo - refundedKobo, 0);
+
+  // What the amount is measured against, as the error messages say it
+  const limit = refundedKobo > 0
+    ? `${naira(refundableKobo)} not yet refunded (${naira(refundedKobo)} of the ${naira(paidKobo)} paid was refunded earlier)`
+    : `${naira(paidKobo)} paid`;
+
+  const invalidAmount = (message: string) =>
+    new GraphQLError(message, { extensions: { code: 'INVALID_REFUND_AMOUNT' } });
+
+  const requirePayment = () => {
+    if (paidKobo <= 0) {
+      throw new GraphQLError('This booking has no completed payment to refund', {
+        extensions: { code: 'NO_PAYMENT_TO_REFUND' },
+      });
+    }
+    if (refundableKobo <= 0) {
+      throw new GraphQLError('This payment has already been refunded', {
+        extensions: { code: 'ALREADY_REFUNDED' },
+      });
+    }
+  };
+
+  switch (resolution) {
+    case DisputeResolution.REFUND_FULL:
+      requirePayment();
+      if (requestedKobo !== null && requestedKobo !== refundableKobo) {
+        throw invalidAmount(
+          refundedKobo > 0
+            ? `A full refund is the ${limit}. Leave the amount empty, or choose a partial refund.`
+            : `A full refund is the whole ${limit}. Leave the amount empty, or choose a partial refund.`
+        );
+      }
+      return refundableKobo;
+
+    case DisputeResolution.REFUND_PARTIAL:
+      if (requestedKobo === null) {
+        throw new GraphQLError('Refund amount is required for a partial refund', {
+          extensions: { code: 'REFUND_AMOUNT_REQUIRED' },
+        });
+      }
+      requirePayment();
+      if (requestedKobo <= 0 || requestedKobo >= refundableKobo) {
+        throw invalidAmount(`A partial refund must be more than ₦0 and less than the ${limit}`);
+      }
+      return requestedKobo;
+
+    case DisputeResolution.MUTUAL_AGREEMENT:
+      if (!requestedKobo) return 0;
+      requirePayment();
+      if (requestedKobo < 0 || requestedKobo > refundableKobo) {
+        throw invalidAmount(`The agreed refund must be between ₦0 and the ${limit}`);
+      }
+      return requestedKobo;
+
+    default:
+      if (requestedKobo) {
+        throw invalidAmount('This resolution doesn’t include a refund. Remove the refund amount, or choose a refund resolution.');
+      }
+      return 0;
+  }
+};
+
+/**
+ * Where the booking goes when its dispute is settled. `paidKobo` is what's
+ * still held for the booking: the payment less any earlier refund.
+ */
+export const bookingAfterResolution = (params: {
+  resolution: string;
+  refundKobo: number;
+  paidKobo: number;
+  previousStatus: BookingStatusValue;
+  completedAt: Date | null;
+  now: Date;
+}): Prisma.BookingUpdateInput => {
+  const { resolution, refundKobo, paidKobo, previousStatus, completedAt, now } = params;
+
+  if (refundKobo > 0 && refundKobo === paidKobo) {
+    return {
+      status: BookingStatus.CANCELLED,
+      cancelledAt: now,
+      cancellationReason: 'Dispute resolved with a full refund',
+    };
+  }
+
+  if (resolution === DisputeResolution.REDO_SERVICE) {
+    // Held until the redone job is completed and confirmed
+    return {
+      status: BookingStatus.ACCEPTED,
+      completedAt: null,
+      customerConfirmedAt: null,
+      paymentReleaseAt: null,
+    };
+  }
+
+  if (refundKobo > 0) {
+    // Settled: the rest goes to the provider now
+    return {
+      status: BookingStatus.COMPLETED,
+      completedAt: completedAt ?? now,
+      paymentReleaseAt: now,
+    };
+  }
+
+  // Nothing refunded: back to where it was, and a finished, paid job is released
+  if (previousStatus === BookingStatus.COMPLETED) {
+    return {
+      status: BookingStatus.COMPLETED,
+      ...(paidKobo > 0 ? { paymentReleaseAt: now } : {}),
+    };
+  }
+
+  return { status: previousStatus };
+};
+
+/**
+ * Settle a dispute: record the resolution, refund to the customer's wallet if
+ * the resolution includes one, and move the booking on, all together
+ */
+const settleDispute = async (
+  disputeId: string,
+  admin: { id: string; role: string },
+  input: { resolution: string; notes: string; refundAmount?: number | null; close: boolean }
+) => {
+  const dispute = await prisma.dispute.findUnique({
+    where: { id: disputeId },
     include: {
       booking: {
         include: {
-          user: true,
-          provider: {
-            include: { user: true },
-          },
+          payment: true,
           service: true,
+          provider: { select: { userId: true } },
         },
       },
     },
   });
 
-  // TODO: Send notification to both parties that dispute is under review
+  if (!dispute) {
+    throw new GraphQLError('Dispute not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
 
-  return formatDisputeResponse(updatedDispute);
+  if (dispute.status === DisputeStatus.RESOLVED || dispute.status === DisputeStatus.CLOSED) {
+    throw new GraphQLError('This dispute has already been resolved or closed', {
+      extensions: { code: 'ALREADY_RESOLVED' },
+    });
+  }
+
+  const { booking } = dispute;
+  const payment = booking.payment?.status === PaymentStatus.COMPLETED ? booking.payment : null;
+  const paidKobo = payment ? nairaToKobo(payment.amount) : 0;
+  // An earlier partial refund leaves less to refund; escrow works it out the same way
+  const refundedKobo = payment ? paidKobo - refundableKobo(payment) : 0;
+  const requestedKobo = input.refundAmount == null ? null : nairaToKobo(input.refundAmount);
+  const refundKobo = refundForResolution(input.resolution, requestedKobo, paidKobo, refundedKobo);
+
+  const now = new Date();
+  const bookingUpdate = bookingAfterResolution({
+    resolution: input.resolution,
+    refundKobo,
+    paidKobo: paidKobo - refundedKobo,
+    // Disputes opened before this was recorded: infer it
+    previousStatus:
+      dispute.previousBookingStatus ??
+      (booking.completedAt ? BookingStatus.COMPLETED : BookingStatus.ACCEPTED),
+    completedAt: booking.completedAt,
+    now,
+  });
+
+  // Created before the transaction: a failed create would abort it
+  const wallet = refundKobo > 0 ? await ensureWallet(booking.userId) : null;
+
+  const refund = await withTransaction(async (tx) => {
+    // Claim the dispute, so two admins can't settle it at once
+    const { count } = await tx.dispute.updateMany({
+      where: {
+        id: disputeId,
+        status: { in: [DisputeStatus.OPEN, DisputeStatus.UNDER_REVIEW] },
+      },
+      data: {
+        status: input.close ? DisputeStatus.CLOSED : DisputeStatus.RESOLVED,
+        resolution: input.resolution as DisputeResolutionValue,
+        resolutionNotes: input.notes,
+        refundAmount: refundKobo > 0 ? koboToNaira(refundKobo) : null,
+        resolvedById: admin.id,
+        resolvedAt: now,
+      },
+    });
+
+    if (count === 0) {
+      throw new GraphQLError('This dispute has already been resolved or closed', {
+        extensions: { code: 'ALREADY_RESOLVED' },
+      });
+    }
+
+    const result = payment && wallet && refundKobo > 0
+      ? await refundPaymentToWallet(tx, wallet.id, {
+          paymentId: payment.id,
+          amountKobo: refundKobo,
+          reason: `Dispute resolution: ${input.notes}`,
+          via: 'DISPUTE',
+          refundedBy: admin.id,
+        })
+      : null;
+
+    await tx.booking.update({
+      where: { id: booking.id },
+      data: bookingUpdate,
+    });
+
+    return result;
+  });
+
+  try {
+    await createAuditLog({
+      action: AdminAction.RESOLVE_DISPUTE,
+      targetType: 'Dispute',
+      targetId: disputeId,
+      performedBy: admin.id,
+      performedByRole: admin.role,
+      previousValue: { status: dispute.status, bookingStatus: booking.status },
+      newValue: {
+        status: input.close ? DisputeStatus.CLOSED : DisputeStatus.RESOLVED,
+        resolution: input.resolution,
+        refundAmount: koboToNaira(refundKobo),
+        bookingStatus: bookingUpdate.status,
+      },
+      reason: input.notes,
+    });
+  } catch (error) {
+    console.error('Failed to write dispute audit log:', error);
+  }
+
+  const serviceName = booking.service.name;
+  const outcome = RESOLUTION_OUTCOMES[input.resolution] ?? input.resolution;
+  const metadata = { bookingId: booking.id };
+  const releasedNow = bookingUpdate.paymentReleaseAt instanceof Date;
+  const providerShareKobo = refund ? refund.providerPayoutKobo : nairaToKobo(payment?.providerPayout ?? 0);
+
+  const customerNote = refund
+    ? ` ₦${koboToNaira(refund.refundKobo).toLocaleString()} has been added to your Easykonnet wallet.`
+    : '';
+
+  const providerNote = refund?.isFullRefund
+    ? ' The booking was cancelled.'
+    : input.resolution === DisputeResolution.REDO_SERVICE
+      ? ' Please arrange with the customer to redo the service.'
+      : releasedNow
+        ? ` ₦${koboToNaira(providerShareKobo).toLocaleString()} will be released to your wallet shortly.`
+        : '';
+
+  await Promise.all([
+    notifyUser(
+      booking.userId,
+      NotificationType.DISPUTE_RESOLVED,
+      'Dispute resolved',
+      `The dispute for ${serviceName} was settled with ${outcome}.${customerNote}`,
+      disputeId,
+      metadata
+    ),
+    notifyUser(
+      booking.provider.userId,
+      NotificationType.DISPUTE_RESOLVED,
+      'Dispute resolved',
+      `The dispute for ${serviceName} was settled with ${outcome}.${providerNote}`,
+      disputeId,
+      metadata
+    ),
+  ]);
+
+  const settled = await prisma.dispute.findUniqueOrThrow({
+    where: { id: disputeId },
+    include: disputeInclude,
+  });
+
+  return formatDisputeResponse(settled);
 };
 
 /**
@@ -490,13 +998,15 @@ export const takeDisputeUnderReview = async (disputeId: string, _adminId: string
 export const resolveDispute = async (
   disputeId: string,
   adminId: string,
-  input: ResolveDisputeInput
+  input: ResolveDisputeInput,
+  adminRole: string = UserRole.ADMIN
 ) => {
   const { resolution, resolutionNotes, refundAmount } = input;
 
-  // Validate resolution type
-  const validResolutions = Object.values(DisputeResolution);
-  if (!validResolutions.includes(resolution as any)) {
+  // Validate resolution type. GraphQL's DisputeResolution enum rejects a bad
+  // value first, so this only guards direct callers.
+  const validResolutions: string[] = Object.values(DisputeResolution);
+  if (!validResolutions.includes(resolution)) {
     throw new GraphQLError(
       `Invalid resolution type. Must be one of: ${validResolutions.join(', ')}`,
       { extensions: { code: 'INVALID_RESOLUTION' } }
@@ -510,89 +1020,12 @@ export const resolveDispute = async (
     });
   }
 
-  const dispute = await prisma.dispute.findUnique({
-    where: { id: disputeId },
-    include: {
-      booking: true,
-    },
+  return settleDispute(disputeId, { id: adminId, role: adminRole }, {
+    resolution,
+    notes: sanitizeBasic(resolutionNotes.trim()),
+    refundAmount,
+    close: false,
   });
-
-  if (!dispute) {
-    throw new GraphQLError('Dispute not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
-  }
-
-  if (dispute.status === DisputeStatus.RESOLVED || dispute.status === DisputeStatus.CLOSED) {
-    throw new GraphQLError('This dispute has already been resolved', {
-      extensions: { code: 'ALREADY_RESOLVED' },
-    });
-  }
-
-  // Validate refund amount if applicable
-  if (
-    (resolution === DisputeResolution.REFUND_FULL || 
-     resolution === DisputeResolution.REFUND_PARTIAL) &&
-    refundAmount === undefined
-  ) {
-    throw new GraphQLError('Refund amount is required for refund resolutions', {
-      extensions: { code: 'REFUND_AMOUNT_REQUIRED' },
-    });
-  }
-
-  if (refundAmount !== undefined) {
-    if (refundAmount < 0) {
-      throw new GraphQLError('Refund amount cannot be negative', {
-        extensions: { code: 'INVALID_REFUND_AMOUNT' },
-      });
-    }
-    if (refundAmount > dispute.booking.totalAmount) {
-      throw new GraphQLError('Refund amount cannot exceed the booking total', {
-        extensions: { code: 'INVALID_REFUND_AMOUNT' },
-      });
-    }
-  }
-
-  // Determine new booking status based on resolution
-  let newBookingStatus: string = BookingStatus.COMPLETED;
-  if (resolution === DisputeResolution.REDO_SERVICE) {
-    newBookingStatus = BookingStatus.PENDING;
-  }
-
-  // Update dispute and booking
-  const [updatedDispute] = await prisma.$transaction([
-    prisma.dispute.update({
-      where: { id: disputeId },
-      data: {
-        status: DisputeStatus.RESOLVED,
-        resolution: resolution as any,
-        resolutionNotes: resolutionNotes.trim(),
-        refundAmount,
-        resolvedById: adminId,
-        resolvedAt: new Date(),
-      },
-      include: {
-        booking: {
-          include: {
-            user: true,
-            provider: {
-              include: { user: true },
-            },
-            service: true,
-          },
-        },
-      },
-    }),
-    prisma.booking.update({
-      where: { id: dispute.bookingId },
-      data: { status: newBookingStatus as any },
-    }),
-  ]);
-
-  // TODO: Send notifications to both parties about resolution
-  // TODO: Process refund if applicable (integrate with payment service)
-
-  return formatDisputeResponse(updatedDispute);
 };
 
 /**
@@ -603,6 +1036,8 @@ export const addDisputeEvidence = async (
   userId: string,
   evidenceUrls: string[]
 ) => {
+  checkEvidenceUrls(evidenceUrls, userId);
+
   const dispute = await prisma.dispute.findUnique({
     where: { id: disputeId },
     include: {
@@ -623,7 +1058,15 @@ export const addDisputeEvidence = async (
   // Check if user is authorized (must be the one who raised the dispute)
   const isUser = dispute.booking.userId === userId;
   const isProvider = dispute.booking.provider.userId === userId;
-  const isRaiser = 
+
+  // Same answer as a missing dispute, so outsiders can't tell one exists
+  if (!isUser && !isProvider) {
+    throw new GraphQLError('Dispute not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+
+  const isRaiser =
     (isUser && dispute.raisedByRole === UserRole.SERVICE_USER) ||
     (isProvider && dispute.raisedByRole === UserRole.SERVICE_PROVIDER);
 
@@ -641,11 +1084,8 @@ export const addDisputeEvidence = async (
   }
 
   // Limit evidence count
-  const maxEvidence = 10;
-  if (dispute.evidence.length + evidenceUrls.length > maxEvidence) {
-    throw new GraphQLError(`Maximum ${maxEvidence} evidence files allowed`, {
-      extensions: { code: 'MAX_EVIDENCE_EXCEEDED' },
-    });
+  if (dispute.evidence.length + evidenceUrls.length > MAX_EVIDENCE) {
+    throw tooMuchEvidence();
   }
 
   const updatedDispute = await prisma.dispute.update({
@@ -655,81 +1095,34 @@ export const addDisputeEvidence = async (
         push: evidenceUrls,
       },
     },
-    include: {
-      booking: {
-        include: {
-          user: true,
-          provider: {
-            include: { user: true },
-          },
-          service: true,
-        },
-      },
-    },
+    include: disputeInclude,
   });
 
   return formatDisputeResponse(updatedDispute);
 };
 
 /**
- * Close a dispute without resolution (Admin only - for invalid disputes)
+ * Close a dispute without resolution (Admin only - for invalid disputes).
+ * The booking returns to the status it had, and a finished, paid job is
+ * released to the provider.
  */
-export const closeDispute = async (disputeId: string, adminId: string, reason: string) => {
+export const closeDispute = async (
+  disputeId: string,
+  adminId: string,
+  reason: string,
+  adminRole: string = UserRole.ADMIN
+) => {
   if (!reason || reason.trim().length < 10) {
     throw new GraphQLError('Closure reason must be at least 10 characters', {
       extensions: { code: 'INVALID_INPUT' },
     });
   }
 
-  const dispute = await prisma.dispute.findUnique({
-    where: { id: disputeId },
-    include: {
-      booking: true,
-    },
+  return settleDispute(disputeId, { id: adminId, role: adminRole }, {
+    resolution: DisputeResolution.DISMISSED,
+    notes: sanitizeBasic(reason.trim()),
+    close: true,
   });
-
-  if (!dispute) {
-    throw new GraphQLError('Dispute not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
-  }
-
-  if (dispute.status === DisputeStatus.RESOLVED || dispute.status === DisputeStatus.CLOSED) {
-    throw new GraphQLError('This dispute has already been resolved or closed', {
-      extensions: { code: 'ALREADY_CLOSED' },
-    });
-  }
-
-  // Restore booking to previous status (usually COMPLETED)
-  const [updatedDispute] = await prisma.$transaction([
-    prisma.dispute.update({
-      where: { id: disputeId },
-      data: {
-        status: DisputeStatus.CLOSED,
-        resolution: DisputeResolution.DISMISSED,
-        resolutionNotes: reason.trim(),
-        resolvedById: adminId,
-        resolvedAt: new Date(),
-      },
-      include: {
-        booking: {
-          include: {
-            user: true,
-            provider: {
-              include: { user: true },
-            },
-            service: true,
-          },
-        },
-      },
-    }),
-    prisma.booking.update({
-      where: { id: dispute.bookingId },
-      data: { status: BookingStatus.COMPLETED },
-    }),
-  ]);
-
-  return formatDisputeResponse(updatedDispute);
 };
 
 /**

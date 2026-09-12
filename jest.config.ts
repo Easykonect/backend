@@ -9,14 +9,21 @@ const config: Config = {
     '^@/(.*)$': '<rootDir>/src/$1',
   },
   transform: {
-    '^.+\\.tsx?$': ['ts-jest', {
+    // .js is included for the ES-module-only packages allowed below
+    '^.+\\.[tj]sx?$': ['ts-jest', {
       tsconfig: {
         module: 'CommonJS',
         moduleResolution: 'node',
         esModuleInterop: true,
+        allowJs: true,
       },
     }],
   },
+  // sanitize-html's parser dependencies ship ES modules only; compile them to
+  // CommonJS instead of skipping them with the rest of node_modules
+  transformIgnorePatterns: [
+    '/node_modules/(?!(sanitize-html/node_modules/)?(htmlparser2|domhandler|domutils|dom-serializer|domelementtype|entities)/)',
+  ],
   // Load .env before any test runs
   setupFiles: ['<rootDir>/src/__tests__/setup.ts'],
   // Default: run only unit tests (fast, no external deps)

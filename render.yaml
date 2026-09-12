@@ -7,9 +7,11 @@ services:
     runtime: node
     region: oregon # Change to your preferred region
     plan: free # Use 'starter' ($7/month) for always-on
-    buildCommand: npm install && npx prisma generate && npm run build
-    startCommand: npm start
-    healthCheckPath: /api/graphql
+    buildCommand: npm install && npx prisma generate && npm run build && npm run build:server
+    # The custom server runs the API together with Socket.IO and the background
+    # jobs (provider payouts, withdrawal checks, scheduled payouts)
+    startCommand: npm run start:ws
+    healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production

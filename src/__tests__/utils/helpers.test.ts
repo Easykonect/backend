@@ -12,15 +12,19 @@ import {
   sleep,
   omit,
 } from '@/utils/helpers';
+import { config } from '@/config';
 
 describe('Helper Functions', () => {
   // ==================
   // Commission
   // ==================
   describe('calculateCommission', () => {
-    it('should calculate 10% commission on a given amount', () => {
+    // The rate comes from COMMISSION_RATE (7% by default), so expectations use it
+    const rate = config.platform.commissionRate;
+
+    it('should calculate the configured commission on a given amount', () => {
       const commission = calculateCommission(1000);
-      expect(commission).toBeCloseTo(100, 2); // 10% of 1000
+      expect(commission).toBeCloseTo(1000 * rate, 2);
     });
 
     it('should return 0 commission for 0 amount', () => {
@@ -29,7 +33,7 @@ describe('Helper Functions', () => {
 
     it('should handle decimal amounts', () => {
       const commission = calculateCommission(1500.50);
-      expect(commission).toBeCloseTo(150.05, 2);
+      expect(commission).toBeCloseTo(1500.5 * rate, 2);
     });
   });
 

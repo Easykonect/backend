@@ -1,11 +1,17 @@
 /**
- * Service Service Tests — geo filters + nearbyServices
+ * Service Service Tests
  *
- * Covers the bug-fix sweep additions:
- *   - getServices() now accepts city/state/latitude/longitude/radiusKm
+ * Covers:
+ *   - getServices() accepts city/state/latitude/longitude/radiusKm
  *   - getNearbyServices() returns each service annotated with distanceKm,
  *     sorted ascending, restricted to providers within radius
+ *   - the viewer's own listings, and those of providers they blocked, are
+ *     left out of both
+ *   - createService/updateService screen the name and description, and an
+ *     edit to a live listing is flagged for admins
  */
+
+import { GraphQLError } from 'graphql';
 
 // ==================
 // Mocks
@@ -14,12 +20,25 @@
 jest.mock('@/lib/prisma', () => ({
   __esModule: true,
   default: {
+    user: {
+      findUnique: jest.fn(),
+    },
+    userBlock: {
+      findMany: jest.fn(),
+    },
+    serviceCategory: {
+      findUnique: jest.fn(),
+    },
     serviceProvider: {
       findMany: jest.fn(),
     },
     service: {
       findMany: jest.fn(),
       count: jest.fn(),
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
     },
   },
 }));
@@ -28,8 +47,26 @@ jest.mock('@/config', () => ({
   config: {
     pagination: { defaultLimit: 10, maxLimit: 100 },
     geo: { defaultRadiusKm: 25, maxRadiusKm: 100 },
+    // Service images must be in this Cloudinary account
+    cloudinary: { cloudName: 'demo' },
     redisUrl: 'redis://localhost:6379',
   },
+}));
+
+jest.mock('@/services/notification.service', () => ({
+  createNotification: jest.fn(),
+  notifyServiceApproved: jest.fn(),
+  notifyServiceRejected: jest.fn(),
+}));
+
+jest.mock('@/services/push.service', () => ({ sendPushToUser: jest.fn() }));
+
+jest.mock('@/services/audit.service', () => ({ createAuditLog: jest.fn() }));
+
+// Rating and like counts are covered in service-moderation.test.ts
+jest.mock('@/services/provider-profile.service', () => ({
+  ...jest.requireActual('@/services/provider-profile.service'),
+  loadProviderStats: async () => new Map(),
 }));
 
 jest.mock('@/lib/redis', () => ({
@@ -43,8 +80,23 @@ jest.mock('@/lib/redis', () => ({
   },
 }));
 
+jest.mock('@/services/report.service', () => ({
+  flagContent: jest.fn(),
+}));
+
+jest.mock('@/services/terms.service', () => ({
+  assertTermsAccepted: jest.fn(),
+}));
+
 import prisma from '@/lib/prisma';
-import { getServices, getNearbyServices } from '@/services/service.service';
+import { flagContent } from '@/services/report.service';
+import { assertTermsAccepted } from '@/services/terms.service';
+import {
+  getServices,
+  getNearbyServices,
+  createService,
+  updateService,
+} from '@/services/service.service';
 
 // ==================
 // Fixtures
@@ -109,6 +161,11 @@ beforeEach(() => {
   (prisma.serviceProvider.findMany as jest.Mock).mockReset();
   (prisma.service.findMany as jest.Mock).mockReset();
   (prisma.service.count as jest.Mock).mockReset();
+  // Nobody has blocked anybody unless a test says so
+  (prisma.userBlock.findMany as jest.Mock).mockReset().mockResolvedValue([]);
+  // Terms are accepted unless a test says otherwise. Reset here so a rejection
+  // set by one test can't carry into the next.
+  (assertTermsAccepted as jest.Mock).mockReset().mockResolvedValue(undefined);
 });
 
 // ==================
@@ -223,7 +280,7 @@ describe('getNearbyServices', () => {
     expect(result.items.find((i: any) => i.provider?.id === 'p_outside')).toBeUndefined();
   });
 
-  it('only considers providers with non-null lat/lng', async () => {
+  it('only considers verified providers inside the search area', async () => {
     (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
 
     const result = await getNearbyServices({
@@ -234,8 +291,12 @@ describe('getNearbyServices', () => {
 
     expect(result.items).toEqual([]);
     const providerCall = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
-    expect(providerCall.where.latitude).toEqual({ not: null });
-    expect(providerCall.where.longitude).toEqual({ not: null });
+    // A range filter also excludes providers without coordinates
+    expect(providerCall.where.latitude).toEqual({ gte: expect.any(Number), lte: expect.any(Number) });
+    expect(providerCall.where.latitude.gte).toBeLessThan(lagosLat);
+    expect(providerCall.where.latitude.lte).toBeGreaterThan(lagosLat);
+    expect(providerCall.where.longitude).toEqual({ gte: expect.any(Number), lte: expect.any(Number) });
+    expect(providerCall.take).toBeGreaterThan(0);
     expect(providerCall.where.verificationStatus).toBe('VERIFIED');
   });
 
@@ -274,11 +335,11 @@ describe('getNearbyServices', () => {
 });
 
 // ==================
-// Own-service filtering (caller is a provider)
+// Own and blocked providers' services (caller is signed in)
 // ==================
 
 describe('getServices — excludeProviderUserId', () => {
-  it('adds userId: { not: ... } to the provider relation filter', async () => {
+  it('adds userId: { notIn: [viewer] } to the provider relation filter', async () => {
     (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([]);
     (prisma.service.count as jest.Mock).mockResolvedValueOnce(0);
 
@@ -289,7 +350,11 @@ describe('getServices — excludeProviderUserId', () => {
 
     const call = (prisma.service.findMany as jest.Mock).mock.calls[0][0];
     expect(call.where.provider).toEqual({
-      is: expect.objectContaining({ userId: { not: 'user-A' } }),
+      is: expect.objectContaining({ userId: { notIn: ['user-A'] } }),
+    });
+    expect(prisma.userBlock.findMany).toHaveBeenCalledWith({
+      where: { blockerId: 'user-A' },
+      select: { blockedId: true },
     });
   });
 
@@ -305,7 +370,7 @@ describe('getServices — excludeProviderUserId', () => {
     const call = (prisma.service.findMany as jest.Mock).mock.calls[0][0];
     expect(call.where.provider.is).toMatchObject({
       city: expect.anything(),
-      userId: { not: 'user-A' },
+      userId: { notIn: ['user-A'] },
     });
   });
 
@@ -323,7 +388,32 @@ describe('getServices — excludeProviderUserId', () => {
     );
 
     const providerCall = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
-    expect(providerCall.where.userId).toEqual({ not: 'user-A' });
+    expect(providerCall.where.userId).toEqual({ notIn: ['user-A'] });
+  });
+
+  it('also leaves out providers the viewer blocked, in both the list and the count', async () => {
+    (prisma.userBlock.findMany as jest.Mock).mockResolvedValue([{ blockedId: 'user-B' }, { blockedId: 'user-C' }]);
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(0);
+
+    await getServices({ excludeProviderUserId: 'user-A' }, { page: 1, limit: 10 });
+
+    const where = (prisma.service.findMany as jest.Mock).mock.calls[0][0].where;
+    expect(where.provider).toEqual({ is: { userId: { notIn: ['user-A', 'user-B', 'user-C'] } } });
+    expect((prisma.service.count as jest.Mock).mock.calls[0][0].where).toEqual(where);
+  });
+
+  it('also leaves out providers the viewer blocked from the geo candidate-provider query', async () => {
+    (prisma.userBlock.findMany as jest.Mock).mockResolvedValue([{ blockedId: 'user-B' }]);
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+
+    await getServices(
+      { latitude: lagosLat, longitude: lagosLng, radiusKm: 10, excludeProviderUserId: 'user-A' },
+      { page: 1, limit: 10 }
+    );
+
+    const providerCall = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(providerCall.where.userId).toEqual({ notIn: ['user-A', 'user-B'] });
   });
 
   it('does nothing when excludeProviderUserId is omitted (anonymous caller)', async () => {
@@ -336,11 +426,12 @@ describe('getServices — excludeProviderUserId', () => {
     // No provider relation filter at all — the where clause should only
     // contain the public-default status filter.
     expect(call.where.provider).toBeUndefined();
+    expect(prisma.userBlock.findMany).not.toHaveBeenCalled();
   });
 });
 
 describe('getNearbyServices — excludeProviderUserId', () => {
-  it('filters the candidate-provider query by userId: { not: ... }', async () => {
+  it('filters the candidate-provider query by userId: { notIn: [viewer] }', async () => {
     (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
 
     await getNearbyServices({
@@ -350,7 +441,22 @@ describe('getNearbyServices — excludeProviderUserId', () => {
     });
 
     const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
-    expect(call.where.userId).toEqual({ not: 'user-A' });
+    expect(call.where.userId).toEqual({ notIn: ['user-A'] });
+  });
+
+  it('also leaves out providers the viewer blocked', async () => {
+    (prisma.userBlock.findMany as jest.Mock).mockResolvedValue([{ blockedId: 'user-B' }, { blockedId: 'user-C' }]);
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([]);
+
+    await getNearbyServices({
+      latitude: lagosLat,
+      longitude: lagosLng,
+      excludeProviderUserId: 'user-A',
+    });
+
+    const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
+    expect(call.where.userId).toEqual({ notIn: ['user-A', 'user-B', 'user-C'] });
+    expect(call.where.verificationStatus).toBe('VERIFIED');
   });
 
   it('omits the userId filter when excludeProviderUserId is not passed', async () => {
@@ -360,5 +466,231 @@ describe('getNearbyServices — excludeProviderUserId', () => {
 
     const call = (prisma.serviceProvider.findMany as jest.Mock).mock.calls[0][0];
     expect(call.where.userId).toBeUndefined();
+    expect(prisma.userBlock.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// ==================
+// createService / updateService — screening
+// ==================
+
+const ownerUserId = '507f1f77bcf86cd700000001';
+const ownerProvider = { id: 'p_lagos', userId: ownerUserId, verificationStatus: 'VERIFIED' };
+
+const listingInput = {
+  categoryId: 'cat1',
+  name: 'Deep Cleaning',
+  description: 'Thorough home cleaning across Lagos',
+  price: 5000,
+  duration: 60,
+};
+
+// An approved listing customers can see
+const liveService = {
+  id: 'svc1',
+  providerId: 'p_lagos',
+  name: 'Deep Cleaning',
+  description: 'Thorough home cleaning across Lagos',
+  images: ['https://res.cloudinary.com/demo/image/upload/v1/services/a.jpg'],
+  price: 5000,
+  duration: 60,
+  status: 'ACTIVE',
+};
+
+describe('createService — screening', () => {
+  beforeEach(() => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue({
+      id: ownerUserId,
+      role: 'SERVICE_PROVIDER',
+      provider: ownerProvider,
+    });
+    (prisma.serviceCategory.findUnique as jest.Mock).mockResolvedValue({ id: 'cat1', isActive: true });
+    (prisma.service.findFirst as jest.Mock).mockResolvedValue(null);
+    (prisma.service.create as jest.Mock).mockImplementation(async ({ data }: { data: Record<string, unknown> }) =>
+      makeServiceRow({ ...data, id: 'svc-new' })
+    );
+    (assertTermsAccepted as jest.Mock).mockResolvedValue(undefined);
+  });
+
+  it.each([
+    [{ name: 'Shit Hot Cleaning' }, 'INAPPROPRIATE_CONTENT'],
+    [{ description: 'No bullshit, just thorough cleaning' }, 'INAPPROPRIATE_CONTENT'],
+    [{ name: 'Cleaning 08031234567' }, 'CONTACT_DETAILS_NOT_ALLOWED'],
+    [{ description: 'Thorough cleaning. Email ada@example.com to book' }, 'CONTACT_DETAILS_NOT_ALLOWED'],
+  ])('rejects %j with %s and creates nothing', async (edit, code) => {
+    await expect(createService(ownerUserId, { ...listingInput, ...edit })).rejects.toMatchObject({
+      extensions: { code },
+    });
+    expect(prisma.service.create).not.toHaveBeenCalled();
+  });
+
+  it('checks the provider has accepted the community terms, then creates a draft', async () => {
+    await createService(ownerUserId, listingInput);
+
+    expect(assertTermsAccepted).toHaveBeenCalledWith(ownerUserId);
+    expect(prisma.service.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ name: 'Deep Cleaning', status: 'DRAFT' }),
+      })
+    );
+  });
+
+  it('creates nothing when the provider has not accepted the terms', async () => {
+    (assertTermsAccepted as jest.Mock).mockRejectedValue(
+      new GraphQLError('Please accept the community terms before posting', {
+        extensions: { code: 'TERMS_NOT_ACCEPTED' },
+      })
+    );
+
+    await expect(createService(ownerUserId, listingInput)).rejects.toMatchObject({
+      extensions: { code: 'TERMS_NOT_ACCEPTED' },
+    });
+    expect(prisma.service.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('updateService — screening and review of live listings', () => {
+  const editing = (existing: typeof liveService) => {
+    (prisma.service.findUnique as jest.Mock).mockResolvedValue(existing);
+    (prisma.service.update as jest.Mock).mockImplementation(async ({ data }: { data: Record<string, unknown> }) =>
+      makeServiceRow({ ...existing, ...data })
+    );
+  };
+
+  beforeEach(() => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue({
+      id: ownerUserId,
+      role: 'SERVICE_PROVIDER',
+      provider: ownerProvider,
+    });
+    (flagContent as jest.Mock).mockResolvedValue(undefined);
+  });
+
+  it.each([
+    [{ name: 'Fucking Good Cleaning' }, 'INAPPROPRIATE_CONTENT'],
+    [{ description: 'Proper cleaning, not this shit' }, 'INAPPROPRIATE_CONTENT'],
+    [{ name: 'Cleaning 08031234567' }, 'CONTACT_DETAILS_NOT_ALLOWED'],
+    [{ description: 'Call 0803 123 4567 and skip the app fees' }, 'CONTACT_DETAILS_NOT_ALLOWED'],
+  ])('rejects %j with %s and saves nothing', async (edit, code) => {
+    editing(liveService);
+
+    await expect(updateService(ownerUserId, 'svc1', edit)).rejects.toMatchObject({ extensions: { code } });
+    expect(prisma.service.update).not.toHaveBeenCalled();
+    expect(flagContent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ name: 'Premium Deep Cleaning' }],
+    [{ description: 'Thorough home and office cleaning across Lagos' }],
+    [{ images: ['https://res.cloudinary.com/demo/image/upload/v1/services/b.jpg'] }],
+  ])('flags an ACTIVE listing for admins after an edit of %j', async (edit) => {
+    editing(liveService);
+
+    await updateService(ownerUserId, 'svc1', edit);
+
+    const before = { name: liveService.name, description: liveService.description, images: liveService.images };
+    expect(flagContent).toHaveBeenCalledTimes(1);
+    expect(flagContent).toHaveBeenCalledWith({
+      targetType: 'SERVICE',
+      targetId: 'svc1',
+      targetUserId: ownerUserId,
+      reason: 'OTHER',
+      details: expect.any(String),
+      snapshot: { before, after: { ...before, ...edit } },
+    });
+  });
+
+  it('does not flag edits to a DRAFT listing', async () => {
+    editing({ ...liveService, status: 'DRAFT' });
+
+    await updateService(ownerUserId, 'svc1', {
+      name: 'Premium Deep Cleaning',
+      description: 'Thorough home and office cleaning across Lagos',
+    });
+
+    expect(prisma.service.update).toHaveBeenCalled();
+    expect(flagContent).not.toHaveBeenCalled();
+  });
+
+  it('does not flag a price-only change to an ACTIVE listing', async () => {
+    editing(liveService);
+
+    await updateService(ownerUserId, 'svc1', { price: 6500 });
+
+    expect(prisma.service.update).toHaveBeenCalledWith(expect.objectContaining({ data: { price: 6500 } }));
+    expect(flagContent).not.toHaveBeenCalled();
+  });
+
+  it('does not flag an ACTIVE listing saved with the same name and description', async () => {
+    editing(liveService);
+
+    await updateService(ownerUserId, 'svc1', { name: liveService.name, description: liveService.description });
+
+    expect(prisma.service.update).toHaveBeenCalled();
+    expect(flagContent).not.toHaveBeenCalled();
+  });
+});
+
+describe('updateService — community terms', () => {
+  const termsNotAccepted = () =>
+    new GraphQLError('Please accept the community terms before posting', {
+      extensions: { code: 'TERMS_NOT_ACCEPTED' },
+    });
+
+  beforeEach(() => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue({
+      id: ownerUserId,
+      role: 'SERVICE_PROVIDER',
+      provider: ownerProvider,
+    });
+    (prisma.service.findUnique as jest.Mock).mockResolvedValue(liveService);
+    (prisma.service.update as jest.Mock).mockImplementation(async ({ data }: { data: Record<string, unknown> }) =>
+      makeServiceRow({ ...liveService, ...data })
+    );
+    (flagContent as jest.Mock).mockResolvedValue(undefined);
+  });
+
+  it.each([
+    [{ name: 'Premium Deep Cleaning' }],
+    [{ description: 'Thorough home and office cleaning across Lagos' }],
+    [{ images: ['https://res.cloudinary.com/demo/image/upload/v1/services/b.jpg'] }],
+  ])('checks the provider has accepted the terms for an edit of %j', async (edit) => {
+    await updateService(ownerUserId, 'svc1', edit);
+
+    expect(assertTermsAccepted).toHaveBeenCalledWith(ownerUserId);
+    expect(prisma.service.update).toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ price: 6500 }],
+    [{ duration: 90 }],
+    [{ status: 'INACTIVE' as const }],
+  ])('does not check the terms for an edit of %j', async (edit) => {
+    (assertTermsAccepted as jest.Mock).mockRejectedValue(termsNotAccepted());
+
+    await updateService(ownerUserId, 'svc1', edit);
+
+    expect(assertTermsAccepted).not.toHaveBeenCalled();
+    expect(prisma.service.update).toHaveBeenCalled();
+  });
+
+  it('saves and flags nothing when the provider has not accepted the terms', async () => {
+    (assertTermsAccepted as jest.Mock).mockRejectedValue(termsNotAccepted());
+
+    await expect(updateService(ownerUserId, 'svc1', { name: 'Premium Deep Cleaning' })).rejects.toMatchObject({
+      extensions: { code: 'TERMS_NOT_ACCEPTED' },
+    });
+    expect(prisma.service.update).not.toHaveBeenCalled();
+    expect(flagContent).not.toHaveBeenCalled();
+  });
+
+  it('refuses a service owned by another provider with FORBIDDEN, whatever the terms', async () => {
+    (assertTermsAccepted as jest.Mock).mockRejectedValue(termsNotAccepted());
+    (prisma.service.findUnique as jest.Mock).mockResolvedValue({ ...liveService, providerId: 'p_other' });
+
+    await expect(updateService(ownerUserId, 'svc1', { name: 'Premium Deep Cleaning' })).rejects.toMatchObject({
+      extensions: { code: 'FORBIDDEN' },
+    });
+    expect(prisma.service.update).not.toHaveBeenCalled();
   });
 });

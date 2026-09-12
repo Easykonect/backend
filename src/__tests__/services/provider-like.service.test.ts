@@ -1,7 +1,8 @@
 /**
  * Provider Like Service Tests
  * Tests for likeProvider, unlikeProvider, toggleProviderLike,
- * isProviderLiked, getProviderLikeCount, getMyLikedProviders
+ * isProviderLiked, getProviderLikeCount, getMyLikedProviders,
+ * and name screening in updateUserProfile
  */
 
 import { GraphQLError } from 'graphql';
@@ -10,6 +11,10 @@ import { GraphQLError } from 'graphql';
 jest.mock('@/lib/prisma', () => ({
   __esModule: true,
   default: {
+    user: {
+      findUnique: jest.fn(),
+      update: jest.fn(),
+    },
     serviceProvider: {
       findUnique: jest.fn(),
     },
@@ -31,6 +36,7 @@ import {
   isProviderLiked,
   getProviderLikeCount,
   getMyLikedProviders,
+  updateUserProfile,
 } from '@/services/user.service';
 
 // ==================
@@ -395,5 +401,33 @@ describe('getMyLikedProviders', () => {
     expect(item.provider.images).toBeDefined();
     expect(item.provider.city).toBe('Lagos');
     expect(item.likedAt).toBe('2026-01-01T10:00:00.000Z');
+  });
+});
+
+// ==================
+// updateUserProfile — name screening
+// ==================
+
+describe('updateUserProfile — name screening', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
+      id: mockUserId,
+      firstName: 'John',
+      lastName: 'Doe',
+      phone: null,
+      profilePhoto: null,
+    });
+  });
+
+  it.each([
+    [{ firstName: 'Bastard' }],
+    [{ lastName: 'Wanker' }],
+    [{ firstName: 'B4stard' }],
+  ])('rejects %j with INAPPROPRIATE_CONTENT and saves nothing', async (data) => {
+    await expect(updateUserProfile(mockUserId, data)).rejects.toMatchObject({
+      extensions: { code: 'INAPPROPRIATE_CONTENT' },
+    });
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
   });
 });

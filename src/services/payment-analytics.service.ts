@@ -28,6 +28,40 @@ interface PaymentAnalyticsFilters extends DateRange {
   providerId?: string;
 }
 
+// Payments with a refund: fully refunded, or partly refunded and still COMPLETED
+const refundedPayments = {
+  OR: [{ status: 'REFUNDED' as const }, { refundAmount: { gt: 0 } }],
+};
+
+/**
+ * The amount refunded on a payment. Refunds recorded before refund amounts
+ * were stored count as full refunds.
+ */
+const refundedAmount = (payment: { status: string; amount: number; refundAmount: number | null }) =>
+  payment.refundAmount ?? (payment.status === 'REFUNDED' ? payment.amount : 0);
+
+/**
+ * What a payment kept after its refunds. On a payment's current split this is
+ * commission + providerPayout.
+ */
+const keptAmount = (payment: { status: string; amount: number; refundAmount: number | null }) =>
+  payment.amount - refundedAmount(payment);
+
+// A money total to the kobo, without floating-point residue
+const roundNaira = (naira: number) => Math.round(naira * 100) / 100;
+
+const sumOf = <T>(items: T[], amountOf: (item: T) => number) =>
+  roundNaira(items.reduce((sum, item) => sum + amountOf(item), 0));
+
+/**
+ * The key a payment date is grouped under: the day (YYYY-MM-DD) for daily and
+ * weekly reports, the month (YYYY-MM) otherwise
+ */
+const periodKey = (date: Date, period: PaymentPeriod): string =>
+  period === 'DAILY' || period === 'WEEKLY'
+    ? date.toISOString().split('T')[0]
+    : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+
 // ==========================================
 // Helper Functions
 // ==========================================
@@ -74,44 +108,30 @@ const getDateFilter = (
 };
 
 /**
- * Group payments by date for charts
+ * Group payments by date for charts, adding up `amountOf` each payment
  */
-const groupPaymentsByDate = (
-  payments: any[],
-  period: PaymentPeriod
+const groupPaymentsByDate = <T extends { paidAt: Date | null; createdAt: Date }>(
+  payments: T[],
+  period: PaymentPeriod,
+  amountOf: (payment: T) => number
 ): { date: string; amount: number; count: number }[] => {
   const grouped: Record<string, { amount: number; count: number }> = {};
 
   payments.forEach((payment) => {
-    let dateKey: string;
-    const date = new Date(payment.paidAt || payment.createdAt);
-
-    switch (period) {
-      case 'DAILY':
-        dateKey = date.toISOString().split('T')[0]; // YYYY-MM-DD
-        break;
-      case 'WEEKLY':
-        dateKey = date.toISOString().split('T')[0];
-        break;
-      case 'MONTHLY':
-        dateKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`; // YYYY-MM
-        break;
-      default:
-        dateKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-    }
+    const dateKey = periodKey(new Date(payment.paidAt || payment.createdAt), period);
 
     if (!grouped[dateKey]) {
       grouped[dateKey] = { amount: 0, count: 0 };
     }
 
-    grouped[dateKey].amount += payment.providerPayout || payment.amount || 0;
+    grouped[dateKey].amount += amountOf(payment);
     grouped[dateKey].count += 1;
   });
 
   return Object.entries(grouped)
     .map(([date, data]) => ({
       date,
-      amount: data.amount,
+      amount: roundNaira(data.amount),
       count: data.count,
     }))
     .sort((a, b) => a.date.localeCompare(b.date));
@@ -179,29 +199,30 @@ export const getProviderEarningsReport = async (
     orderBy: { paidAt: 'desc' },
   });
 
-  // Get refunds in the same period
+  // Get refunds (full and partial) in the same period
   const refunds = await prisma.payment.findMany({
     where: {
       booking: { providerId },
-      status: 'REFUNDED',
+      ...refundedPayments,
       ...(dateFilter.gte || dateFilter.lte ? { refundedAt: dateFilter } : {}),
     },
   });
 
-  // Calculate totals
-  const grossEarnings = payments.reduce((sum, p) => sum + p.providerPayout, 0);
-  const totalRefunds = refunds.reduce((sum, p) => sum + (p.refundAmount || 0), 0);
-  const netEarnings = grossEarnings - totalRefunds;
+  // Totals over the payments paid in the period. Each payment's split already
+  // reflects its refunds, so totalEarnings - commissionPaid - refunds on them
+  // = netEarnings, the provider's share.
+  const totalEarnings = sumOf(payments, (p) => p.amount);
+  const commissionPaid = sumOf(payments, (p) => p.commission);
+  const refundedOnPayments = sumOf(payments, refundedAmount);
+  const netEarnings = sumOf(payments, (p) => p.providerPayout);
+  // Refunds made in the period, on any payment
+  const totalRefunds = sumOf(refunds, refundedAmount);
 
-  // Get pending earnings (completed bookings not yet paid to wallet)
-  const pendingPayments = await prisma.payment.findMany({
-    where: {
-      booking: { providerId },
-      status: 'COMPLETED',
-      walletTransactionId: null,
-    },
-  });
-  const pendingPayouts = pendingPayments.reduce((sum, p) => sum + p.providerPayout, 0);
+  // The provider's share of those payments not yet released to their wallet
+  const pendingBalance = sumOf(
+    payments.filter((p) => !p.payoutAt && !p.walletTransactionId),
+    (p) => p.providerPayout
+  );
 
   // Get withdrawable balance
   const provider = await prisma.serviceProvider.findUnique({
@@ -215,25 +236,47 @@ export const getProviderEarningsReport = async (
       where: { userId: provider.userId },
     });
     if (wallet) {
-      withdrawableBalance = (wallet as any).balance / 100; // Convert kobo to naira
+      withdrawableBalance = wallet.balance / 100; // Convert kobo to naira
     }
   }
 
+  const withdrawn = await prisma.withdrawal.aggregate({
+    where: {
+      providerId,
+      status: 'COMPLETED',
+      ...(dateFilter.gte || dateFilter.lte ? { completedAt: dateFilter } : {}),
+    },
+    _sum: { amount: true },
+  });
+  const dailyBreakdown = groupPaymentsByDate(payments, period, (p) => p.providerPayout);
+  // Payments are newest first; ALL_TIME has no start filter
+  const earliestPaidAt = payments[payments.length - 1]?.paidAt;
+  const now = new Date();
+
   return {
     period,
-    startDate: dateFilter.gte?.toISOString() || null,
-    endDate: dateFilter.lte?.toISOString() || null,
+    startDate: (dateFilter.gte ?? earliestPaidAt ?? now).toISOString(),
+    endDate: (dateFilter.lte ?? now).toISOString(),
+    totalEarnings,
+    completedJobs: payments.length,
+    commissionPaid,
+    netEarnings,
+    withdrawnAmount: (withdrawn._sum.amount ?? 0) / 100, // kobo to naira
+    pendingBalance,
+    breakdown: dailyBreakdown.map((d) => ({ date: d.date, earnings: d.amount, jobs: d.count })),
     summary: {
-      grossEarnings,
+      grossEarnings: totalEarnings,
+      commissionPaid,
+      refundedOnPayments,
       totalRefunds,
       netEarnings,
       totalBookings: payments.length,
-      averageBookingValue: payments.length > 0 ? grossEarnings / payments.length : 0,
+      averageBookingValue: payments.length > 0 ? roundNaira(totalEarnings / payments.length) : 0,
       refundCount: refunds.length,
     },
-    dailyBreakdown: groupPaymentsByDate(payments, period),
+    dailyBreakdown,
     serviceBreakdown: groupPaymentsByService(payments),
-    pendingPayouts,
+    pendingPayouts: pendingBalance,
     withdrawableBalance,
     recentPayments: payments.slice(0, 10).map((p) => ({
       id: p.id,
@@ -280,9 +323,9 @@ export const getAdminPaymentAnalytics = async (
     orderBy: { paidAt: 'desc' },
   });
 
-  // Get refunds
+  // Get refunds (full and partial)
   const refundWhere: any = {
-    status: 'REFUNDED',
+    ...refundedPayments,
     ...(dateFilter.gte || dateFilter.lte ? { refundedAt: dateFilter } : {}),
   };
   if (providerId) {
@@ -293,13 +336,15 @@ export const getAdminPaymentAnalytics = async (
     where: refundWhere,
   });
 
-  // Calculate totals
-  const totalVolume = payments.reduce((sum, p) => sum + p.amount, 0);
-  const totalCommission = payments.reduce((sum, p) => sum + p.commission, 0);
-  const totalPaystackFees = payments.reduce((sum, p) => sum + (p.paystackFee || 0), 0);
-  const totalProviderPayouts = payments.reduce((sum, p) => sum + p.providerPayout, 0);
-  const totalRefunds = refunds.reduce((sum, p) => sum + (p.refundAmount || 0), 0);
-  const netRevenue = totalCommission - totalPaystackFees;
+  // Totals over the payments paid in the period, net of their refunds: volume
+  // is what those payments kept, which is totalCommission + totalProviderPayouts
+  const totalVolume = sumOf(payments, keptAmount);
+  const totalCommission = sumOf(payments, (p) => p.commission);
+  const totalPaystackFees = sumOf(payments, (p) => p.paystackFee || 0);
+  const totalProviderPayouts = sumOf(payments, (p) => p.providerPayout);
+  // Refunds made in the period, on any payment
+  const totalRefunds = sumOf(refunds, refundedAmount);
+  const netRevenue = roundNaira(totalCommission - totalPaystackFees);
 
   // Get top earning providers
   const providerEarnings: Record<string, { id: string; name: string; earnings: number; bookings: number }> = {};
@@ -321,10 +366,37 @@ export const getAdminPaymentAnalytics = async (
     .sort((a, b) => b.earnings - a.earnings)
     .slice(0, 10);
 
+  // Payments that never completed, in the same window by creation date
+  const createdWhere = {
+    ...(dateFilter.gte || dateFilter.lte ? { createdAt: dateFilter } : {}),
+    ...(providerId ? { booking: { providerId } } : {}),
+  };
+  // A partly refunded payment is still COMPLETED, so only full refunds count as
+  // refunded, and the refund rate is taken over every settled payment
+  const fullRefundCount = refunds.filter((p) => p.status === 'REFUNDED').length;
+  const settledCount = fullRefundCount + payments.length;
+
+  const [pendingCount, failedCount] = await Promise.all([
+    prisma.payment.count({ where: { ...createdWhere, status: 'PENDING' } }),
+    prisma.payment.count({ where: { ...createdWhere, status: 'FAILED' } }),
+  ]);
+
   return {
     period,
     startDate: dateFilter.gte?.toISOString() || null,
     endDate: dateFilter.lte?.toISOString() || null,
+    totalTransactions: payments.length,
+    totalVolume,
+    totalCommission,
+    totalRefunds,
+    netRevenue,
+    averageTransactionValue: payments.length > 0 ? totalVolume / payments.length : 0,
+    transactionsByStatus: {
+      completed: payments.length,
+      pending: pendingCount,
+      failed: failedCount,
+      refunded: fullRefundCount,
+    },
     summary: {
       totalVolume,
       totalCommission,
@@ -335,20 +407,69 @@ export const getAdminPaymentAnalytics = async (
       transactionCount: payments.length,
       averageTransactionValue: payments.length > 0 ? totalVolume / payments.length : 0,
       refundCount: refunds.length,
-      refundRate: payments.length > 0 ? (refunds.length / payments.length) * 100 : 0,
+      refundRate: settledCount > 0 ? (refunds.length / settledCount) * 100 : 0,
     },
-    dailyBreakdown: groupPaymentsByDate(payments, period).map((d) => ({
+    dailyBreakdown: groupPaymentsByDate(payments, period, keptAmount).map((d) => ({
       ...d,
-      commission: payments
-        .filter((p) => {
-          const date = new Date(p.paidAt || p.createdAt);
-          const dateKey = date.toISOString().split('T')[0];
-          return dateKey === d.date;
-        })
-        .reduce((sum, p) => sum + p.commission, 0),
+      commission: sumOf(
+        // Same key as the breakdown row, so monthly rows get their commission too
+        payments.filter((p) => periodKey(new Date(p.paidAt || p.createdAt), period) === d.date),
+        (p) => p.commission
+      ),
     })),
     topProviders,
   };
+};
+
+/**
+ * Providers who had the most earnings released to their wallets in the period
+ * (admin): the SERVICE_EARNING credits to each provider's wallet, highest
+ * first. `completedJobs` counts the bookings whose earnings were released.
+ */
+export const getTopEarningProviders = async (limit: number = 10, period: PaymentPeriod = 'ALL_TIME') => {
+  // The GraphQL request guard already caps limit; direct callers get the same rules
+  const take = limit >= 1 ? Math.min(Math.trunc(limit), 100) : 10;
+  const dateFilter = getDateFilter(period);
+
+  const earnings = await prisma.walletTransaction.groupBy({
+    by: ['walletId'],
+    where: {
+      type: 'CREDIT',
+      source: 'SERVICE_EARNING',
+      ...(dateFilter.gte || dateFilter.lte ? { createdAt: dateFilter } : {}),
+    },
+    _sum: { amount: true },
+    _count: { _all: true },
+    orderBy: [{ _sum: { amount: 'desc' } }, { walletId: 'asc' }],
+    take,
+  });
+
+  if (earnings.length === 0) return [];
+
+  const wallets = await prisma.wallet.findMany({
+    where: { id: { in: earnings.map((row) => row.walletId) } },
+    select: { id: true, userId: true },
+  });
+  const providers = await prisma.serviceProvider.findMany({
+    where: { userId: { in: wallets.map((wallet) => wallet.userId) } },
+    select: { id: true, userId: true, businessName: true },
+  });
+
+  const userByWallet = new Map(wallets.map((wallet) => [wallet.id, wallet.userId]));
+  const providerByUser = new Map(providers.map((provider) => [provider.userId, provider]));
+
+  // A wallet whose provider profile no longer exists is left out
+  return earnings.flatMap((row) => {
+    const provider = providerByUser.get(userByWallet.get(row.walletId) ?? '');
+    if (!provider) return [];
+
+    return [{
+      providerId: provider.id,
+      businessName: provider.businessName,
+      totalEarnings: (row._sum.amount ?? 0) / 100, // kobo to naira
+      completedJobs: row._count._all,
+    }];
+  });
 };
 
 /**
@@ -363,7 +484,7 @@ export const getRefundStats = async (
 
   const refunds = await prisma.payment.findMany({
     where: {
-      status: 'REFUNDED',
+      ...refundedPayments,
       ...(dateFilter.gte || dateFilter.lte ? { refundedAt: dateFilter } : {}),
     },
     include: {
@@ -394,10 +515,30 @@ export const getRefundStats = async (
   const fullRefunds = refunds.filter((r) => r.refundAmount === r.amount || !r.refundAmount);
   const partialRefunds = refunds.filter((r) => r.refundAmount && r.refundAmount < r.amount);
 
+  const completedCount = await prisma.payment.count({
+    where: {
+      status: 'COMPLETED',
+      ...(dateFilter.gte || dateFilter.lte ? { paidAt: dateFilter } : {}),
+    },
+  });
+  const refundsByReason = Object.entries(byReason).map(([reason, data]) => ({
+    reason,
+    count: data.count,
+    amount: data.amount,
+  }));
+  // Partially refunded payments are still COMPLETED, so already counted
+  const settledCount = fullRefunds.length + completedCount;
+
   return {
     period,
     startDate: dateFilter.gte?.toISOString() || null,
     endDate: dateFilter.lte?.toISOString() || null,
+    // Schema fields: totalRefunds is a count, totalRefundAmount the sum
+    totalRefunds: refunds.length,
+    totalRefundAmount: totalRefunds,
+    refundRate: settledCount > 0 ? (refunds.length / settledCount) * 100 : 0,
+    averageRefundAmount: refunds.length > 0 ? totalRefunds / refunds.length : 0,
+    refundsByReason,
     summary: {
       totalRefunds,
       totalCount: refunds.length,
@@ -405,11 +546,7 @@ export const getRefundStats = async (
       partialRefundCount: partialRefunds.length,
       averageRefundAmount: refunds.length > 0 ? totalRefunds / refunds.length : 0,
     },
-    byReason: Object.entries(byReason).map(([reason, data]) => ({
-      reason,
-      count: data.count,
-      amount: data.amount,
-    })),
+    byReason: refundsByReason,
     recentRefunds: refunds.slice(0, 10).map((r) => ({
       id: r.id,
       amount: r.refundAmount || r.amount,
@@ -450,10 +587,11 @@ export const getRevenueBreakdown = async (
     }),
   ]);
 
-  const totalRevenue = payments.reduce((sum, p) => sum + p.amount, 0);
-  const totalCommission = payments.reduce((sum, p) => sum + p.commission, 0);
-  const totalPaystackFees = payments.reduce((sum, p) => sum + (p.paystackFee || 0), 0);
-  const totalProviderPayouts = payments.reduce((sum, p) => sum + p.providerPayout, 0);
+  // Net of refunds, like the other payment totals
+  const totalRevenue = sumOf(payments, keptAmount);
+  const totalCommission = sumOf(payments, (p) => p.commission);
+  const totalPaystackFees = sumOf(payments, (p) => p.paystackFee || 0);
+  const totalProviderPayouts = sumOf(payments, (p) => p.providerPayout);
   const totalWithdrawals = withdrawals.reduce((sum, w) => sum + (w as any).amount, 0) / 100; // kobo to naira
   const totalWithdrawalFees = withdrawals.reduce((sum, w) => sum + (w as any).fee, 0) / 100;
 

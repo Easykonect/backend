@@ -3,6 +3,12 @@
  * Tests JWT generation/verification and password hashing
  */
 
+// Don't depend on JWT_SECRET being set locally
+jest.mock('@/config', () => {
+  const actual = jest.requireActual('@/config');
+  return { ...actual, config: { ...actual.config, jwt: { ...actual.config.jwt, secret: 'test-jwt-secret' } } };
+});
+
 import {
   generateToken,
   generateRefreshToken,

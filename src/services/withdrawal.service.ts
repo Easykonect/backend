@@ -1,36 +1,49 @@
 /**
  * Withdrawal Service
- * 
+ *
  * Handles provider withdrawal operations.
- * 
- * Features:
- * - Request withdrawal to bank account
- * - Process/reject withdrawals (admin)
- * - Handle Paystack transfer webhooks
- * - Retry failed transfers
- * 
+ *
+ * Lifecycle:
+ * - Request: the wallet is locked ("Pending withdrawal") and a PENDING
+ *   withdrawal is created with a snapshot of the bank details
+ * - Process (admin): the withdrawal is claimed (PENDING → PROCESSING), the
+ *   wallet debited, and a Paystack transfer started under a reference unique
+ *   to this attempt
+ * - Paystack reports the result by webhook. Success completes the withdrawal
+ *   and unlocks the wallet. Failure returns the money to the wallet and puts
+ *   the withdrawal back to PENDING for an admin to retry or reject, until
+ *   MAX_RETRIES attempts have failed.
+ * - If starting a transfer errors, the money is only returned once Paystack
+ *   confirms no transfer was made. Otherwise the withdrawal stays PROCESSING
+ *   and a background job checks it with Paystack.
+ *
  * Security:
- * - Distributed locking to prevent double withdrawals
- * - Wallet balance deducted at APPROVAL time (not completion)
+ * - Status changes are conditional updates, so two admins (or an admin and a
+ *   webhook) can't act on the same withdrawal twice
+ * - Each debit and reversal has a reference unique to the withdrawal attempt
  * - Bank details snapshot at request time
- * - Idempotency for transfer requests
- * - Daily withdrawal limits
- * - Max retry logic with exponential backoff
+ * - Daily and per-withdrawal limits
  */
 
 import { GraphQLError } from 'graphql';
 import prisma from '@/lib/prisma';
-import { paystack } from '@/lib/paystack';
-import { WithdrawalStatus, AdminAction } from '@prisma/client';
+import { paystack, PaystackRequestError, type PaystackTransferResponse } from '@/lib/paystack';
+import { AdminAction, type Withdrawal, type WithdrawalStatus } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
-import RedisClient from '@/lib/redis';
+import { withTransaction } from '@/lib/transaction';
+import { captureException } from '@/lib/sentry';
+import { LedgerReference, NotificationType } from '@/constants';
+import { isBanActive, isRestrictionActive } from '@/utils/security';
 import {
+  applyWalletCredit,
+  applyWalletDebit,
+  canWithdraw,
   koboToNaira,
   nairaToKobo,
-  canWithdraw,
+  MAX_SINGLE_TRANSACTION_KOBO,
 } from './wallet.service';
 import { createAuditLog } from './audit.service';
-import { createNotification } from './notification.service';
+import { createBulkNotifications, createNotification } from './notification.service';
 import { sendPushToUser } from './push.service';
 
 /**
@@ -81,71 +94,76 @@ interface PaginationInput {
   limit: number;
 }
 
+// What a Paystack transfer event or lookup tells us
+interface TransferEvent {
+  reference?: string;
+  transferCode?: string;
+}
+
+type TransferData = PaystackTransferResponse['data'];
+
+type LatePayoutOutcome =
+  | { outcome: 'recovered'; withdrawal: Withdrawal }
+  | { outcome: 'moved-on' | 'nothing' };
+
+/** Who a withdrawal belongs to */
+export interface WithdrawalProviderSummary {
+  id: string;
+  userId: string;
+  businessName: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  email: string | null;
+}
+
+interface ProviderUser {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  provider?: { businessName: string } | null;
+}
+
 // ==========================================
 // Constants
 // ==========================================
 
 const MAX_RETRIES = 5;
-const TRANSFER_FEE_KOBO = 5000; // ₦50 transfer fee (adjust as needed)
-const MIN_WITHDRAWAL_NAIRA = 1000; // Minimum ₦1,000 withdrawal
-const MIN_NET_WITHDRAWAL_KOBO = 50000; // Minimum ₦500 net after fee
-const WITHDRAWAL_LOCK_PREFIX = 'withdrawal_lock:';
-const WITHDRAWAL_LOCK_TTL_MS = 30000; // 30 seconds
+export const TRANSFER_FEE_KOBO = 5000; // ₦50 transfer fee (adjust as needed)
+export const MIN_WITHDRAWAL_NAIRA = 1000; // Minimum ₦1,000 withdrawal, well above the fee
 
-// ==========================================
-// Distributed Locking
-// ==========================================
+// A transfer still processing after this long is checked with Paystack
+const RECONCILE_AFTER_MINUTES = 30;
 
-const getRedis = () => {
-  try {
-    return RedisClient.getInstance();
-  } catch {
-    return null;
-  }
-};
+const LockReason = {
+  PENDING: 'Pending withdrawal',
+  PROCESSING: 'Processing withdrawal',
+  FAILED: 'Transfer failed - pending review',
+} as const;
 
-/**
- * Acquire withdrawal lock for a provider
- * Prevents multiple simultaneous withdrawal requests
- */
-const acquireWithdrawalLock = async (providerId: string): Promise<boolean> => {
-  const redis = getRedis();
-  if (!redis) {
-    // Fallback: check database for pending withdrawal
-    const pending = await prisma.withdrawal.findFirst({
-      where: {
-        providerId,
-        status: { in: ['PENDING', 'PROCESSING'] },
-      },
-    });
-    return !pending;
-  }
+// Transfer states in which Paystack won't deliver the money
+const FAILED_TRANSFER_STATES = new Set<string>(['failed', 'abandoned', 'blocked', 'rejected']);
 
-  const lockKey = `${WITHDRAWAL_LOCK_PREFIX}${providerId}`;
-  const lockValue = `${Date.now()}_${uuidv4()}`;
-  
-  const result = await redis.set(lockKey, lockValue, 'PX', WITHDRAWAL_LOCK_TTL_MS, 'NX');
-  return result === 'OK';
-};
-
-const releaseWithdrawalLock = async (providerId: string): Promise<void> => {
-  const redis = getRedis();
-  if (!redis) return;
-  
-  const lockKey = `${WITHDRAWAL_LOCK_PREFIX}${providerId}`;
-  await redis.del(lockKey);
-};
+// The references processWithdrawal issues
+const ATTEMPT_REFERENCE = /^wdr_[0-9a-f]{24}_\d+$/;
 
 // ==========================================
 // Helper Functions
 // ==========================================
 
 /**
- * Generate unique transfer reference
+ * Paystack transfer reference for one attempt. Paystack treats a repeated
+ * reference as the same transfer, so each retry needs its own; it also
+ * expects references in lowercase.
  */
-const generateTransferReference = (): string => {
-  return `WDR_${Date.now()}_${uuidv4().substring(0, 8)}`;
-};
+const transferReferenceFor = (withdrawalId: string, attempt: number) =>
+  `wdr_${withdrawalId}_${attempt}`.toLowerCase();
+
+/**
+ * Placeholder until the first attempt. The field is unique, so it can't be
+ * left empty.
+ */
+const generateRequestReference = (): string => `wdr_req_${uuidv4().replace(/-/g, '')}`;
 
 /**
  * Format withdrawal for response
@@ -165,8 +183,15 @@ const formatWithdrawal = (withdrawal: any) => ({
   bankName: withdrawal.bankName,
   accountNumber: withdrawal.accountNumber,
   accountName: withdrawal.accountName,
+  bankAccountSnapshot: {
+    bankCode: withdrawal.bankCode,
+    bankName: withdrawal.bankName,
+    accountNumber: withdrawal.accountNumber,
+    accountName: withdrawal.accountName,
+  },
   transferCode: withdrawal.transferCode,
   transferReference: withdrawal.transferReference,
+  transferRef: withdrawal.transferReference,
   requestedAt: withdrawal.requestedAt.toISOString(),
   processedAt: withdrawal.processedAt?.toISOString() || null,
   completedAt: withdrawal.completedAt?.toISOString() || null,
@@ -178,38 +203,163 @@ const formatWithdrawal = (withdrawal: any) => ({
   updatedAt: withdrawal.updatedAt.toISOString(),
 });
 
+/**
+ * The withdrawal a transfer belongs to. The reference is saved before the
+ * transfer starts, so it's matched first; withdrawals started before
+ * references were lowercase may come back with different casing.
+ */
+const findWithdrawalForTransfer = async ({ reference, transferCode }: TransferEvent) => {
+  if (reference) {
+    const byReference =
+      (await prisma.withdrawal.findFirst({ where: { transferReference: reference } })) ??
+      (await prisma.withdrawal.findFirst({
+        where: { transferReference: { equals: reference, mode: 'insensitive' } },
+      }));
+    if (byReference) return byReference;
+  }
+
+  if (transferCode) {
+    return prisma.withdrawal.findFirst({ where: { transferCode } });
+  }
+
+  return null;
+};
+
+const notifyProvider = async (
+  providerId: string,
+  type: string,
+  title: string,
+  message: string,
+  withdrawalId: string
+) => {
+  const provider = await prisma.serviceProvider.findUnique({
+    where: { id: providerId },
+  });
+
+  if (provider) {
+    await notifyAndPush(provider.userId, type, title, message, { withdrawalId });
+  }
+};
+
+/**
+ * In-app notification to every active admin. Errors are swallowed.
+ */
+const notifyAdmins = async (title: string, message: string, metadata: Record<string, string>) => {
+  try {
+    const admins = await prisma.user.findMany({
+      where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] }, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    await createBulkNotifications(
+      admins.map((admin) => admin.id),
+      NotificationType.SYSTEM_ANNOUNCEMENT,
+      title,
+      message,
+      'withdrawal',
+      undefined,
+      metadata
+    );
+  } catch (error) {
+    console.error('Failed to alert admins about a withdrawal:', error);
+  }
+};
+
+const toProviderSummary = (providerId: string, user: ProviderUser): WithdrawalProviderSummary => ({
+  id: providerId,
+  userId: user.id,
+  businessName: user.provider?.businessName ?? null,
+  firstName: user.firstName ?? null,
+  lastName: user.lastName ?? null,
+  email: user.email ?? null,
+});
+
+/**
+ * Who a withdrawal belongs to, for results that didn't load it with the withdrawal
+ */
+export const getWithdrawalProviderSummary = async (
+  providerId: string
+): Promise<WithdrawalProviderSummary | null> => {
+  const provider = await prisma.serviceProvider.findUnique({
+    where: { id: providerId },
+    select: {
+      businessName: true,
+      user: { select: { id: true, email: true, firstName: true, lastName: true } },
+    },
+  });
+
+  return provider
+    ? toProviderSummary(providerId, { ...provider.user, provider: { businessName: provider.businessName } })
+    : null;
+};
+
+/**
+ * Keep a scheduled payout in step with the withdrawal it created
+ */
+const updateScheduledPayout = async (
+  withdrawal: { scheduledPayoutId: string | null },
+  status: WithdrawalStatus,
+  failureReason?: string
+) => {
+  if (!withdrawal.scheduledPayoutId) return;
+
+  try {
+    await prisma.scheduledPayout.update({
+      where: { id: withdrawal.scheduledPayoutId },
+      data: {
+        status,
+        processedAt: new Date(),
+        ...(failureReason ? { failureReason } : {}),
+      },
+    });
+  } catch (error) {
+    console.error('Failed to update scheduled payout:', error);
+  }
+};
+
 // ==========================================
 // Withdrawal Request Functions
 // ==========================================
 
 /**
  * Request a withdrawal (provider only)
- * SECURITY: Uses distributed locking to prevent double withdrawals
  */
 export const requestWithdrawal = async (
   providerId: string,
   userId: string,
-  input: RequestWithdrawalInput
+  input: RequestWithdrawalInput,
+  options: { scheduledPayoutId?: string } = {}
 ) => {
   const { amount, bankAccountId } = input;
   const amountKobo = nairaToKobo(amount);
 
   // Validate minimum withdrawal
-  if (amount < MIN_WITHDRAWAL_NAIRA) {
+  if (!Number.isFinite(amount) || amount < MIN_WITHDRAWAL_NAIRA) {
     throw new GraphQLError(
       `Minimum withdrawal amount is ₦${MIN_WITHDRAWAL_NAIRA}`,
       { extensions: { code: 'MIN_WITHDRAWAL_NOT_MET' } }
     );
   }
 
-  // Calculate fees and validate net amount
+  if (amountKobo > MAX_SINGLE_TRANSACTION_KOBO) {
+    throw new GraphQLError(
+      `A single withdrawal can be at most ₦${koboToNaira(MAX_SINGLE_TRANSACTION_KOBO).toLocaleString()}`,
+      { extensions: { code: 'WITHDRAWAL_LIMIT_EXCEEDED' } }
+    );
+  }
+
+  // The minimum withdrawal is well above the fee, so the net amount is never too small
   const fee = TRANSFER_FEE_KOBO;
   const netAmount = amountKobo - fee;
-  
-  if (netAmount < MIN_NET_WITHDRAWAL_KOBO) {
+
+  const account = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { bannedAt: true, bannedUntil: true, restrictedAt: true, restrictedUntil: true },
+  });
+
+  if (!account || isBanActive(account) || isRestrictionActive(account)) {
     throw new GraphQLError(
-      `Net withdrawal after fees must be at least ₦${koboToNaira(MIN_NET_WITHDRAWAL_KOBO)}`,
-      { extensions: { code: 'NET_AMOUNT_TOO_LOW' } }
+      'Your account is restricted, so you can’t withdraw right now. Please contact support.',
+      { extensions: { code: 'ACCOUNT_RESTRICTED' } }
     );
   }
 
@@ -217,129 +367,118 @@ export const requestWithdrawal = async (
   const limitCheck = await canWithdraw(userId, amountKobo);
   if (!limitCheck.allowed) {
     throw new GraphQLError(limitCheck.reason || 'Daily withdrawal limit reached', {
-      extensions: { 
+      extensions: {
         code: 'DAILY_LIMIT_EXCEEDED',
-        remainingLimit: limitCheck.remainingLimit,
+        // In naira, like every other amount the API returns
+        remainingLimit: koboToNaira(limitCheck.remainingLimit ?? 0),
       },
     });
   }
 
-  // Acquire distributed lock to prevent double withdrawal
-  const lockAcquired = await acquireWithdrawalLock(providerId);
-  if (!lockAcquired) {
+  const pendingWithdrawal = await prisma.withdrawal.findFirst({
+    where: {
+      providerId,
+      status: { in: ['PENDING', 'PROCESSING'] },
+    },
+  });
+
+  if (pendingWithdrawal) {
     throw new GraphQLError(
-      'A withdrawal request is already being processed. Please wait.',
-      { extensions: { code: 'WITHDRAWAL_IN_PROGRESS' } }
+      'You have a pending withdrawal. Please wait for it to complete.',
+      { extensions: { code: 'PENDING_WITHDRAWAL_EXISTS' } }
     );
   }
 
-  try {
-    // Double-check for existing pending withdrawal (inside lock)
-    const pendingWithdrawal = await prisma.withdrawal.findFirst({
-      where: {
-        providerId,
-        status: { in: ['PENDING', 'PROCESSING'] },
-      },
+  // Get provider's wallet
+  const wallet = await prisma.wallet.findUnique({
+    where: { userId },
+  });
+
+  if (!wallet) {
+    throw new GraphQLError('Wallet not found', {
+      extensions: { code: 'WALLET_NOT_FOUND' },
     });
-
-    if (pendingWithdrawal) {
-      throw new GraphQLError(
-        'You have a pending withdrawal. Please wait for it to complete.',
-        { extensions: { code: 'PENDING_WITHDRAWAL_EXISTS' } }
-      );
-    }
-
-    // Get provider's wallet
-    const wallet = await prisma.wallet.findUnique({
-      where: { userId },
-    });
-
-    if (!wallet) {
-      throw new GraphQLError('Wallet not found', {
-        extensions: { code: 'WALLET_NOT_FOUND' },
-      });
-    }
-
-    // Check if wallet is locked
-    if (wallet.isLocked) {
-      throw new GraphQLError(
-        `Wallet is locked: ${wallet.lockedReason || 'Pending operation'}`,
-        { extensions: { code: 'WALLET_LOCKED' } }
-      );
-    }
-
-    // Check sufficient balance
-    if (wallet.balance < amountKobo) {
-      throw new GraphQLError(
-        'Insufficient balance for this withdrawal',
-        { extensions: { code: 'INSUFFICIENT_BALANCE' } }
-      );
-    }
-
-    // Get bank account (with snapshot)
-    const bankAccount = await prisma.providerBankAccount.findFirst({
-      where: {
-        id: bankAccountId,
-        providerId,
-      },
-    });
-
-    if (!bankAccount) {
-      throw new GraphQLError('Bank account not found', {
-        extensions: { code: 'BANK_ACCOUNT_NOT_FOUND' },
-      });
-    }
-
-    // Generate unique idempotency key for this withdrawal
-    const transferReference = generateTransferReference();
-
-    // Create withdrawal in transaction with ATOMIC wallet lock
-    const withdrawal = await prisma.$transaction(async (tx) => {
-      // ATOMIC: Lock wallet only if not already locked
-      const lockResult = await tx.wallet.updateMany({
-        where: { 
-          id: wallet.id,
-          isLocked: false,
-          balance: { gte: amountKobo }, // Double-check balance atomically
-        },
-        data: {
-          isLocked: true,
-          lockedReason: 'Pending withdrawal',
-          updatedAt: new Date(),
-        },
-      });
-
-      if (lockResult.count === 0) {
-        throw new GraphQLError(
-          'Unable to process withdrawal. Wallet may be locked or balance changed.',
-          { extensions: { code: 'WALLET_LOCK_FAILED' } }
-        );
-      }
-
-      // Create withdrawal with bank details snapshot
-      return tx.withdrawal.create({
-        data: {
-          walletId: wallet.id,
-          providerId,
-          amount: amountKobo,
-          fee,
-          netAmount,
-          status: 'PENDING',
-          bankCode: bankAccount.bankCode,
-          bankName: bankAccount.bankName,
-          accountNumber: bankAccount.accountNumber,
-          accountName: bankAccount.accountName,
-          transferReference,
-          requestedAt: new Date(),
-        },
-      });
-    });
-
-    return formatWithdrawal(withdrawal);
-  } finally {
-    // Always release the distributed lock
-    await releaseWithdrawalLock(providerId);
   }
+
+  // Check if wallet is locked
+  if (wallet.isLocked) {
+    throw new GraphQLError(
+      `Wallet is locked: ${wallet.lockedReason || 'Pending operation'}`,
+      { extensions: { code: 'WALLET_LOCKED' } }
+    );
+  }
+
+  // Check sufficient balance
+  if (wallet.balance < amountKobo) {
+    throw new GraphQLError(
+      'Insufficient balance for this withdrawal',
+      { extensions: { code: 'INSUFFICIENT_BALANCE' } }
+    );
+  }
+
+  // Get bank account (with snapshot)
+  const bankAccount = await prisma.providerBankAccount.findFirst({
+    where: {
+      id: bankAccountId,
+      providerId,
+    },
+  });
+
+  if (!bankAccount) {
+    throw new GraphQLError('Bank account not found', {
+      extensions: { code: 'BANK_ACCOUNT_NOT_FOUND' },
+    });
+  }
+
+  // Lock the wallet and create the withdrawal together. The lock only takes
+  // an unlocked wallet with enough balance, so concurrent requests can't both
+  // succeed.
+  const withdrawal = await withTransaction(async (tx) => {
+    const lockResult = await tx.wallet.updateMany({
+      where: {
+        id: wallet.id,
+        isLocked: false,
+        balance: { gte: amountKobo },
+      },
+      data: {
+        isLocked: true,
+        lockedReason: LockReason.PENDING,
+      },
+    });
+
+    if (lockResult.count === 0) {
+      throw new GraphQLError(
+        'Unable to process withdrawal. Wallet may be locked or balance changed.',
+        { extensions: { code: 'WALLET_LOCK_FAILED' } }
+      );
+    }
+
+    return tx.withdrawal.create({
+      data: {
+        walletId: wallet.id,
+        providerId,
+        amount: amountKobo,
+        fee,
+        netAmount,
+        status: 'PENDING',
+        bankCode: bankAccount.bankCode,
+        bankName: bankAccount.bankName,
+        accountNumber: bankAccount.accountNumber,
+        accountName: bankAccount.accountName,
+        transferReference: generateRequestReference(),
+        requestedAt: new Date(),
+        scheduledPayoutId: options.scheduledPayoutId,
+      },
+    });
+  });
+
+  await notifyAdmins(
+    'New withdrawal request',
+    `${options.scheduledPayoutId ? 'A scheduled payout' : 'A withdrawal'} of ₦${koboToNaira(amountKobo).toLocaleString('en-US')} to ${bankAccount.accountName} (${bankAccount.bankName}) is waiting for approval.`,
+    { withdrawalId: withdrawal.id }
+  );
+
+  return formatWithdrawal(withdrawal);
 };
 
 /**
@@ -355,7 +494,6 @@ export const cancelWithdrawal = async (
       id: withdrawalId,
       providerId,
     },
-    include: { wallet: true },
   });
 
   if (!withdrawal) {
@@ -371,20 +509,29 @@ export const cancelWithdrawal = async (
     );
   }
 
-  // Update withdrawal and unlock wallet
-  await prisma.$transaction([
-    prisma.withdrawal.update({
-      where: { id: withdrawalId },
+  // A pending withdrawal holds no money, so cancelling only releases the lock
+  await withTransaction(async (tx) => {
+    const { count } = await tx.withdrawal.updateMany({
+      where: { id: withdrawalId, providerId, status: 'PENDING' },
       data: { status: 'CANCELLED' },
-    }),
-    prisma.wallet.update({
+    });
+
+    if (count === 0) {
+      throw new GraphQLError('This withdrawal can no longer be cancelled', {
+        extensions: { code: 'INVALID_STATUS' },
+      });
+    }
+
+    await tx.wallet.update({
       where: { id: withdrawal.walletId },
       data: {
         isLocked: false,
         lockedReason: null,
       },
-    }),
-  ]);
+    });
+  });
+
+  await updateScheduledPayout(withdrawal, 'CANCELLED', 'Cancelled by the provider');
 
   const updated = await prisma.withdrawal.findUnique({
     where: { id: withdrawalId },
@@ -402,7 +549,7 @@ export const cancelWithdrawal = async (
  */
 export const getProviderWithdrawals = async (
   providerId: string,
-  filters: WithdrawalFilters,
+  filters: WithdrawalFilters = {},
   pagination: PaginationInput
 ) => {
   const { page, limit } = pagination;
@@ -434,8 +581,15 @@ export const getProviderWithdrawals = async (
     prisma.withdrawal.count({ where }),
   ]);
 
+  const items = withdrawals.map(formatWithdrawal);
+
   return {
-    withdrawals: withdrawals.map(formatWithdrawal),
+    items,
+    total,
+    page,
+    totalPages: Math.ceil(total / limit),
+    hasNextPage: page * limit < total,
+    withdrawals: items,
     pagination: {
       page,
       limit,
@@ -452,10 +606,21 @@ export const getProviderWithdrawals = async (
 // ==========================================
 
 /**
+ * Get one of the provider's withdrawals
+ */
+export const getProviderWithdrawalById = async (withdrawalId: string, providerId: string) => {
+  const withdrawal = await prisma.withdrawal.findFirst({
+    where: { id: withdrawalId, providerId },
+  });
+
+  return withdrawal ? formatWithdrawal(withdrawal) : null;
+};
+
+/**
  * Get all withdrawals (admin)
  */
 export const getAllWithdrawals = async (
-  filters: WithdrawalFilters,
+  filters: WithdrawalFilters = {},
   pagination: PaginationInput
 ) => {
   const { page, limit } = pagination;
@@ -496,6 +661,7 @@ export const getAllWithdrawals = async (
                 email: true,
                 firstName: true,
                 lastName: true,
+                provider: { select: { businessName: true } },
               },
             },
           },
@@ -505,11 +671,18 @@ export const getAllWithdrawals = async (
     prisma.withdrawal.count({ where }),
   ]);
 
+  const items = withdrawals.map((w) => ({
+    ...formatWithdrawal(w),
+    provider: w.wallet?.user ? toProviderSummary(w.providerId, w.wallet.user) : null,
+  }));
+
   return {
-    withdrawals: withdrawals.map((w) => ({
-      ...formatWithdrawal(w),
-      user: w.wallet?.user,
-    })),
+    items,
+    total,
+    page,
+    totalPages: Math.ceil(total / limit),
+    hasNextPage: page * limit < total,
+    withdrawals: items,
     pagination: {
       page,
       limit,
@@ -528,6 +701,377 @@ export const getPendingWithdrawalsCount = async () => {
   return prisma.withdrawal.count({
     where: { status: 'PENDING' },
   });
+};
+
+/**
+ * Get the Paystack recipient for the withdrawal's bank account, creating it
+ * if needed
+ */
+const getRecipientCode = async (withdrawal: Withdrawal): Promise<string> => {
+  const bankAccount = await prisma.providerBankAccount.findFirst({
+    where: {
+      providerId: withdrawal.providerId,
+      accountNumber: withdrawal.accountNumber,
+      bankCode: withdrawal.bankCode,
+    },
+  });
+
+  if (bankAccount?.recipientCode) {
+    return bankAccount.recipientCode;
+  }
+
+  const response = await paystack.createTransferRecipient({
+    type: 'nuban',
+    name: withdrawal.accountName,
+    account_number: withdrawal.accountNumber,
+    bank_code: withdrawal.bankCode,
+    currency: 'NGN',
+  });
+
+  if (!response.status) {
+    throw new GraphQLError('Failed to create transfer recipient', {
+      extensions: { code: 'PAYSTACK_ERROR' },
+    });
+  }
+
+  const recipientCode = response.data.recipient_code;
+
+  if (bankAccount) {
+    await prisma.providerBankAccount.update({
+      where: { id: bankAccount.id },
+      data: { recipientCode },
+    });
+  }
+
+  return recipientCode;
+};
+
+/**
+ * Return a failed attempt's debit to the wallet. Changes nothing unless the
+ * withdrawal is still PROCESSING on this attempt, so a repeated or late event
+ * can't return the money twice. Before MAX_RETRIES attempts have failed the
+ * withdrawal goes back to PENDING, with the wallet locked, for an admin to
+ * retry or reject; after that it fails for good and the wallet is unlocked.
+ */
+const reverseAttempt = async (withdrawalId: string, reference: string, failureReason: string) => {
+  return withTransaction(async (tx) => {
+    const current = await tx.withdrawal.findUnique({ where: { id: withdrawalId } });
+
+    if (
+      !current ||
+      current.status !== 'PROCESSING' ||
+      current.transferReference?.toLowerCase() !== reference.toLowerCase()
+    ) {
+      return null;
+    }
+
+    const attempt = current.retryCount;
+    const final = attempt + 1 >= MAX_RETRIES;
+
+    const { count } = await tx.withdrawal.updateMany({
+      where: { id: withdrawalId, status: 'PROCESSING', retryCount: attempt },
+      data: final
+        ? {
+            status: 'FAILED',
+            failureReason: `Failed after ${MAX_RETRIES} attempts. Last error: ${failureReason}`,
+            lastRetryAt: new Date(),
+          }
+        : {
+            status: 'PENDING',
+            retryCount: attempt + 1,
+            lastRetryAt: new Date(),
+            failureReason,
+            transferCode: null,
+          },
+    });
+
+    if (count === 0) return null;
+
+    await applyWalletCredit(tx, {
+      walletId: current.walletId,
+      amount: current.amount,
+      source: 'WITHDRAWAL_REVERSAL',
+      description: final
+        ? `Refund: withdrawal to ${current.bankName} failed after ${MAX_RETRIES} attempts`
+        : `Refund: transfer to ${current.bankName} failed`,
+      reference: LedgerReference.withdrawalReversal(current.id, attempt),
+      withdrawalId: current.id,
+    });
+
+    await tx.wallet.update({
+      where: { id: current.walletId },
+      data: final
+        ? { isLocked: false, lockedReason: null }
+        : { isLocked: true, lockedReason: LockReason.FAILED },
+    });
+
+    return { withdrawal: current, final };
+  });
+};
+
+/**
+ * Alert admins to a withdrawal that needs a person to look at it
+ */
+const alertAdmins = async (title: string, message: string, metadata: Record<string, string>) => {
+  captureException(new Error(title), { tags: { area: 'withdrawals' }, extra: { message, ...metadata } });
+  await notifyAdmins(title, message, metadata);
+};
+
+/**
+ * The attempt number in one of our transfer references
+ */
+const attemptFromReference = (reference: string): number | null => {
+  const normalized = reference.toLowerCase();
+  return ATTEMPT_REFERENCE.test(normalized)
+    ? Number(normalized.slice(normalized.lastIndexOf('_') + 1))
+    : null;
+};
+
+/**
+ * The attempt a withdrawal's current transfer reference belongs to
+ */
+const currentAttempt = (withdrawal: Pick<Withdrawal, 'transferReference' | 'retryCount'>): number => {
+  const fromReference = withdrawal.transferReference ? attemptFromReference(withdrawal.transferReference) : null;
+  return fromReference ?? withdrawal.retryCount;
+};
+
+/**
+ * Paystack paid a transfer after its amount had been returned to the wallet.
+ * Take the returned amount back and complete the withdrawal. If that can't be
+ * done (most likely the provider has already used the money), alert admins.
+ */
+const recordLatePayout = async (withdrawalId: string, reference: string) => {
+  try {
+    const result = await withTransaction(async (tx): Promise<LatePayoutOutcome> => {
+      const current = await tx.withdrawal.findUnique({ where: { id: withdrawalId } });
+
+      if (!current) return { outcome: 'nothing' };
+
+      // Retried under a later attempt since: this payout may be one of two
+      if (current.transferReference?.toLowerCase() !== reference.toLowerCase()) {
+        return { outcome: 'moved-on' };
+      }
+
+      if (!(['PENDING', 'FAILED', 'CANCELLED'] as string[]).includes(current.status)) {
+        return { outcome: 'nothing' };
+      }
+
+      // Paid and then returned by the bank: this success event is a repeat
+      if (current.status === 'FAILED' && current.completedAt) {
+        return { outcome: 'nothing' };
+      }
+
+      // A failure before the last attempt moves the withdrawal on to the next one
+      const attempt =
+        attemptFromReference(reference) ??
+        (current.status === 'FAILED' ? current.retryCount : current.retryCount - 1);
+
+      // This late payout was recorded already
+      const recorded = await tx.walletTransaction.findUnique({
+        where: { reference: LedgerReference.withdrawalLatePayout(current.id, attempt) },
+      });
+
+      if (recorded) return { outcome: 'nothing' };
+
+      const reversal = await tx.walletTransaction.findUnique({
+        where: { reference: LedgerReference.withdrawalReversal(current.id, attempt) },
+      });
+
+      if (!reversal) return { outcome: 'nothing' };
+
+      const { count } = await tx.withdrawal.updateMany({
+        where: { id: current.id, status: current.status, transferReference: current.transferReference },
+        data: { status: 'COMPLETED', completedAt: new Date(), failureReason: null },
+      });
+
+      // Changed while this ran, e.g. retried by an admin
+      if (count === 0) return { outcome: 'moved-on' };
+
+      await applyWalletDebit(tx, {
+        walletId: current.walletId,
+        amount: reversal.amount,
+        source: 'WITHDRAWAL',
+        description: `Withdrawal to ${current.bankName} went through after the amount was returned`,
+        reference: LedgerReference.withdrawalLatePayout(current.id, attempt),
+        withdrawalId: current.id,
+        allowLocked: true,
+      });
+
+      // A withdrawal waiting for review holds the wallet's lock
+      if (current.status === 'PENDING') {
+        await tx.wallet.update({
+          where: { id: current.walletId },
+          data: { isLocked: false, lockedReason: null },
+        });
+      }
+
+      return { outcome: 'recovered', withdrawal: current };
+    });
+
+    if (result.outcome === 'moved-on') {
+      await alertAdmins(
+        'Earlier withdrawal attempt was paid',
+        `Paystack paid ${reference} for withdrawal ${withdrawalId} after the withdrawal had moved on. Check whether the provider was paid twice.`,
+        { withdrawalId, reference }
+      );
+      return;
+    }
+
+    if (result.outcome !== 'recovered') return;
+
+    const recovered = result.withdrawal;
+
+    await updateScheduledPayout(recovered, 'COMPLETED');
+
+    await notifyProvider(
+      recovered.providerId,
+      'PAYMENT_RECEIVED',
+      'Withdrawal Successful',
+      `₦${koboToNaira(recovered.netAmount)} has been sent to your ${recovered.bankName} account.`,
+      recovered.id
+    );
+  } catch (error) {
+    captureException(error, { tags: { area: 'withdrawals' }, extra: { withdrawalId, reference } });
+    await alertAdmins(
+      'Withdrawal paid after a refund',
+      `Paystack paid withdrawal ${withdrawalId} (${reference}) after its amount had been returned to the provider's wallet, and the amount couldn't be taken back automatically. Recover it from the provider's wallet.`,
+      { withdrawalId, reference }
+    );
+  }
+};
+
+/**
+ * A successful transfer that matches no current withdrawal attempt. If it's an
+ * earlier attempt of one of our withdrawals, the provider may have been paid
+ * twice.
+ */
+const flagUnmatchedPayout = async ({ reference, transferCode }: TransferEvent) => {
+  const attempt = reference ? attemptFromReference(reference) : null;
+
+  if (!reference || attempt === null) {
+    console.log(`Transfer not found: ${reference ?? transferCode}`);
+    return;
+  }
+
+  const withdrawalId = reference.toLowerCase().split('_')[1];
+  const withdrawal = await prisma.withdrawal.findUnique({ where: { id: withdrawalId } });
+
+  if (!withdrawal) {
+    console.log(`Transfer not found: ${reference}`);
+    return;
+  }
+
+  await alertAdmins(
+    'Earlier withdrawal attempt was paid',
+    `Paystack paid attempt ${attempt + 1} (${reference}) of withdrawal ${withdrawal.id} after it had moved on to a later attempt. Check whether the provider was paid twice.`,
+    { withdrawalId: withdrawal.id, reference }
+  );
+};
+
+/**
+ * The last attempt failed and its amount is back in the wallet: update a
+ * linked scheduled payout and tell the provider. Best effort, since the money
+ * has already moved.
+ */
+const finishFailedWithdrawal = async (withdrawal: Withdrawal, failureReason: string) => {
+  try {
+    await updateScheduledPayout(withdrawal, 'FAILED', failureReason);
+
+    await notifyProvider(
+      withdrawal.providerId,
+      'PAYMENT_FAILED',
+      'Withdrawal Failed',
+      `Your withdrawal of ₦${koboToNaira(withdrawal.amount)} failed after multiple attempts. The amount has been refunded to your wallet.`,
+      withdrawal.id
+    );
+  } catch (error) {
+    captureException(error, { tags: { area: 'withdrawals' }, extra: { withdrawalId: withdrawal.id } });
+  }
+};
+
+/**
+ * Starting a transfer errored. If Paystack has the transfer after all, carry
+ * on with it. The money goes back to the wallet straight away only when
+ * Paystack rejected the request and confirms no transfer exists. After a
+ * timeout or server error the transfer may still be created, so the
+ * withdrawal stays PROCESSING and reconciliation settles it later, rather
+ * than risk paying the provider twice.
+ */
+const resolveTransferStartError = async (
+  withdrawal: Withdrawal,
+  reference: string,
+  error: unknown
+): Promise<TransferData> => {
+  const message = error instanceof Error ? error.message : 'Transfer initiation failed';
+  const rejected =
+    error instanceof PaystackRequestError &&
+    error.httpStatus !== undefined &&
+    error.httpStatus >= 400 &&
+    error.httpStatus < 500;
+  let transferMissing = false;
+
+  try {
+    const existing = await paystack.verifyTransfer(reference);
+    if (existing.status && existing.data) {
+      return existing.data;
+    }
+  } catch (verifyError) {
+    transferMissing = verifyError instanceof PaystackRequestError && verifyError.httpStatus === 404;
+  }
+
+  if (!rejected || !transferMissing) {
+    await prisma.withdrawal.updateMany({
+      where: { id: withdrawal.id, status: 'PROCESSING', transferReference: reference },
+      data: { failureReason: `Transfer status unknown: ${message}` },
+    });
+    captureException(error, { tags: { area: 'withdrawals' }, extra: { withdrawalId: withdrawal.id, reference } });
+
+    throw new GraphQLError(
+      'Paystack didn’t confirm whether the transfer was made. It will be checked again automatically, so don’t retry it.',
+      { extensions: { code: 'TRANSFER_UNCONFIRMED' } }
+    );
+  }
+
+  const reversed = await reverseAttempt(withdrawal.id, reference, message);
+
+  if (reversed?.final) {
+    await finishFailedWithdrawal(reversed.withdrawal, message);
+  }
+
+  throw new GraphQLError(`Transfer initiation failed: ${message}. The amount is back in the provider's wallet.`, {
+    extensions: { code: 'TRANSFER_FAILED' },
+  });
+};
+
+/**
+ * Record a transfer Paystack accepted, and apply its state if it's already final
+ */
+const applyTransferState = async (withdrawalId: string, reference: string, transfer: TransferData) => {
+  try {
+    // Webhooks match on the reference, so the code is for display and lookups
+    await prisma.withdrawal.updateMany({
+      where: { id: withdrawalId, transferReference: reference },
+      data: { transferCode: transfer.transfer_code },
+    });
+
+    const event = { reference, transferCode: transfer.transfer_code };
+
+    if (transfer.status === 'success') {
+      await handleTransferSuccess(event);
+    } else if (transfer.status === 'reversed') {
+      await handleTransferReversed(event);
+    } else if (FAILED_TRANSFER_STATES.has(transfer.status)) {
+      await handleTransferFailed(event, `Transfer ${transfer.status}`);
+    } else if (transfer.status === 'otp') {
+      captureException(new Error('Withdrawal transfer is waiting for OTP approval in Paystack'), {
+        tags: { area: 'withdrawals' },
+        extra: { withdrawalId, reference },
+      });
+    }
+  } catch (error) {
+    // The webhook and reconciliation apply the same state later
+    captureException(error, { tags: { area: 'withdrawals' }, extra: { withdrawalId, reference } });
+  }
 };
 
 /**
@@ -557,183 +1101,135 @@ export const processWithdrawal = async (
     );
   }
 
-  // Get or create Paystack recipient code
-  const bankAccount = await prisma.providerBankAccount.findFirst({
-    where: {
-      providerId: withdrawal.providerId,
-      accountNumber: withdrawal.accountNumber,
-      bankCode: withdrawal.bankCode,
-    },
+  const account = await prisma.user.findUnique({
+    where: { id: withdrawal.wallet.userId },
+    select: { bannedAt: true, bannedUntil: true, restrictedAt: true, restrictedUntil: true },
   });
 
-  let recipientCode = bankAccount?.recipientCode;
+  if (!account) {
+    throw new GraphQLError('The provider’s account no longer exists', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
 
-  if (!recipientCode) {
-    // Create recipient on-the-fly
-    const response = await paystack.createTransferRecipient({
-      type: 'nuban',
-      name: withdrawal.accountName,
-      account_number: withdrawal.accountNumber,
-      bank_code: withdrawal.bankCode,
-      currency: 'NGN',
+  // A ban or restriction may have started since the withdrawal was requested
+  if (isBanActive(account) || isRestrictionActive(account)) {
+    throw new GraphQLError(
+      'The provider’s account is banned or restricted, so this withdrawal can’t be processed. Reject it, or process it once the restriction ends.',
+      { extensions: { code: 'PROVIDER_RESTRICTED' } }
+    );
+  }
+
+  // A failed attempt returns its debit before the withdrawal waits for a retry.
+  // One that came back to PENDING without that (under the earlier payout
+  // process) still holds its debit, so another attempt would debit it twice.
+  if (withdrawal.retryCount > 0) {
+    const previousReversal = await prisma.walletTransaction.findUnique({
+      where: { reference: LedgerReference.withdrawalReversal(withdrawal.id, withdrawal.retryCount - 1) },
+      select: { id: true },
     });
 
-    if (!response.status) {
-      throw new GraphQLError('Failed to create transfer recipient', {
-        extensions: { code: 'PAYSTACK_ERROR' },
-      });
-    }
-
-    recipientCode = response.data.recipient_code;
-
-    // Update bank account with recipient code if it exists
-    if (bankAccount) {
-      await prisma.providerBankAccount.update({
-        where: { id: bankAccount.id },
-        data: { recipientCode },
-      });
+    if (!previousReversal) {
+      throw new GraphQLError(
+        'The amount of this withdrawal’s last failed attempt was never returned to the wallet, so it can’t be retried. Check the provider’s wallet history, then correct the balance or reject the withdrawal.',
+        { extensions: { code: 'MANUAL_REVIEW_REQUIRED' } }
+      );
     }
   }
 
-  // CRITICAL FIX: Debit wallet balance NOW (at approval time)
-  // This prevents the vulnerability where balance stays unchanged until transfer completes
-  const wallet = withdrawal.wallet;
-  
-  // Verify wallet still has sufficient balance and debit atomically
-  await prisma.$transaction(async (tx) => {
-    // Atomic debit with balance check
-    const updateResult = await tx.wallet.updateMany({
-      where: {
-        id: wallet.id,
-        balance: { gte: withdrawal.amount },
-      },
-      data: {
-        balance: { decrement: withdrawal.amount },
-        // Keep wallet locked until transfer completes
-        isLocked: true,
-        lockedReason: 'Processing withdrawal',
-        updatedAt: new Date(),
-      },
+  // The amount only counts towards the daily limit once it's debited
+  const limitCheck = await canWithdraw(withdrawal.wallet.userId, withdrawal.amount);
+  if (!limitCheck.allowed) {
+    throw new GraphQLError(limitCheck.reason || 'Daily withdrawal limit reached', {
+      extensions: { code: 'DAILY_LIMIT_EXCEEDED', remainingLimit: koboToNaira(limitCheck.remainingLimit ?? 0) },
     });
+  }
 
-    if (updateResult.count === 0) {
-      throw new GraphQLError(
-        'Insufficient balance. The balance may have changed since withdrawal was requested.',
-        { extensions: { code: 'INSUFFICIENT_BALANCE' } }
-      );
-    }
+  const recipientCode = await getRecipientCode(withdrawal);
 
-    // Get updated wallet for balance record
-    const updatedWallet = await tx.wallet.findUnique({
-      where: { id: wallet.id },
-    });
+  const attempt = withdrawal.retryCount;
+  const reference = transferReferenceFor(withdrawal.id, attempt);
 
-    // Create wallet transaction for the debit
-    const walletTxn = await tx.walletTransaction.create({
-      data: {
-        walletId: wallet.id,
-        type: 'DEBIT',
-        source: 'WITHDRAWAL',
-        amount: withdrawal.amount,
-        balanceBefore: wallet.balance,
-        balanceAfter: updatedWallet!.balance,
-        description: `Withdrawal to ${withdrawal.bankName} - ${withdrawal.accountNumber}`,
-        reference: `WDR_TXN_${withdrawal.id}`,
-        withdrawalId: withdrawal.id,
-      },
-    });
-
-    // Update withdrawal status to PROCESSING
-    const updatedWithdrawal = await tx.withdrawal.update({
-      where: { id: withdrawalId },
+  // Claim the withdrawal and debit the wallet together; a second admin's
+  // claim matches nothing
+  await withTransaction(async (tx) => {
+    const { count } = await tx.withdrawal.updateMany({
+      where: { id: withdrawalId, status: 'PENDING', retryCount: attempt },
       data: {
         status: 'PROCESSING',
         processedAt: new Date(),
         processedBy: adminId,
+        transferReference: reference,
+        transferCode: null,
+        failureReason: null,
       },
     });
 
-    return { updatedWithdrawal, walletTxn };
-  });
-
-  // Initiate Paystack transfer
-  try {
-    const transferResponse = await paystack.initiateTransfer({
-      source: 'balance',
-      amount: withdrawal.netAmount, // Already in kobo
-      recipient: recipientCode,
-      reason: `Withdrawal: ${withdrawal.transferReference}`,
-      reference: withdrawal.transferReference!,
-    });
-
-    if (!transferResponse.status) {
-      throw new Error(transferResponse.message || 'Transfer initiation failed');
+    if (count === 0) {
+      throw new GraphQLError('This withdrawal is already being processed', {
+        extensions: { code: 'INVALID_STATUS' },
+      });
     }
 
-    // Update with transfer code
-    const updated = await prisma.withdrawal.update({
-      where: { id: withdrawalId },
-      data: {
-        transferCode: transferResponse.data.transfer_code,
-      },
+    await applyWalletDebit(tx, {
+      walletId: withdrawal.walletId,
+      amount: withdrawal.amount,
+      source: 'WITHDRAWAL',
+      description: `Withdrawal to ${withdrawal.bankName} - ${withdrawal.accountNumber}`,
+      reference: LedgerReference.withdrawal(withdrawal.id, attempt),
+      withdrawalId: withdrawal.id,
+      // The wallet is locked by this withdrawal
+      allowLocked: true,
     });
 
-    // Create audit log
+    await tx.wallet.update({
+      where: { id: withdrawal.walletId },
+      data: { isLocked: true, lockedReason: LockReason.PROCESSING },
+    });
+  });
+
+  // Logged before the transfer starts, so the attempt is recorded whatever happens next
+  try {
     await createAuditLog({
-      action: 'PROCESS_WITHDRAWAL' as AdminAction,
+      action: AdminAction.PROCESS_WITHDRAWAL,
       targetType: 'Withdrawal',
       targetId: withdrawalId,
       performedBy: adminId,
       performedByRole: adminRole,
-      newValue: { status: 'PROCESSING', transferCode: transferResponse.data.transfer_code },
+      previousValue: { status: 'PENDING' },
+      newValue: { status: 'PROCESSING', reference, attempt },
       reason: 'Withdrawal approved and transfer initiated',
     });
-
-    return formatWithdrawal(updated);
-  } catch (error: any) {
-    // CRITICAL: If transfer fails, refund the wallet and revert status
-    await prisma.$transaction([
-      // Refund the wallet
-      prisma.wallet.update({
-        where: { id: wallet.id },
-        data: {
-          balance: { increment: withdrawal.amount },
-          isLocked: true, // Keep locked pending manual review
-          lockedReason: 'Transfer failed - pending review',
-        },
-      }),
-      // Create refund transaction
-      prisma.walletTransaction.create({
-        data: {
-          walletId: wallet.id,
-          type: 'CREDIT',
-          source: 'WITHDRAWAL', // Refund from failed withdrawal
-          amount: withdrawal.amount,
-          balanceBefore: wallet.balance - withdrawal.amount,
-          balanceAfter: wallet.balance,
-          description: `Refund: Transfer failed for withdrawal ${withdrawal.id}`,
-          reference: `WDR_REFUND_${withdrawal.id}_${Date.now()}`,
-          withdrawalId: withdrawal.id,
-        },
-      }),
-      // Revert withdrawal status
-      prisma.withdrawal.update({
-        where: { id: withdrawalId },
-        data: {
-          status: 'PENDING',
-          processedAt: null,
-          processedBy: null,
-          failureReason: error.message,
-          retryCount: { increment: 1 },
-          lastRetryAt: new Date(),
-        },
-      }),
-    ]);
-
-    throw new GraphQLError(`Transfer initiation failed: ${error.message}`, {
-      extensions: { code: 'TRANSFER_FAILED' },
-    });
+  } catch (error) {
+    captureException(error, { tags: { area: 'withdrawals' }, extra: { withdrawalId } });
   }
+
+  let transfer: TransferData;
+  try {
+    const response = await paystack.initiateTransfer({
+      source: 'balance',
+      amount: withdrawal.netAmount, // Already in kobo
+      recipient: recipientCode,
+      reason: `Easykonnet withdrawal ${withdrawal.id}`,
+      reference,
+    });
+
+    if (!response.status) {
+      throw new PaystackRequestError(response.message || 'Transfer initiation failed', 400);
+    }
+
+    transfer = response.data;
+  } catch (error) {
+    transfer = await resolveTransferStartError(withdrawal, reference, error);
+  }
+
+  await applyTransferState(withdrawal.id, reference, transfer);
+
+  const updated = await prisma.withdrawal.findUniqueOrThrow({
+    where: { id: withdrawalId },
+  });
+
+  return formatWithdrawal(updated);
 };
 
 /**
@@ -747,7 +1243,6 @@ export const rejectWithdrawal = async (
 ) => {
   const withdrawal = await prisma.withdrawal.findUnique({
     where: { id: withdrawalId },
-    include: { wallet: true },
   });
 
   if (!withdrawal) {
@@ -763,52 +1258,57 @@ export const rejectWithdrawal = async (
     );
   }
 
-  // Update withdrawal and unlock wallet
-  await prisma.$transaction([
-    prisma.withdrawal.update({
-      where: { id: withdrawalId },
+  // A pending withdrawal holds no money, so rejecting only releases the lock
+  await withTransaction(async (tx) => {
+    const { count } = await tx.withdrawal.updateMany({
+      where: { id: withdrawalId, status: 'PENDING' },
       data: {
         status: 'CANCELLED',
         failureReason: reason,
         processedAt: new Date(),
         processedBy: adminId,
       },
-    }),
-    prisma.wallet.update({
+    });
+
+    if (count === 0) {
+      throw new GraphQLError('This withdrawal is no longer pending', {
+        extensions: { code: 'INVALID_STATUS' },
+      });
+    }
+
+    await tx.wallet.update({
       where: { id: withdrawal.walletId },
       data: {
         isLocked: false,
         lockedReason: null,
       },
-    }),
-  ]);
-
-  // Create audit log
-  await createAuditLog({
-    action: 'REJECT_WITHDRAWAL' as AdminAction,
-    targetType: 'Withdrawal',
-    targetId: withdrawalId,
-    performedBy: adminId,
-    performedByRole: adminRole,
-    previousValue: { status: 'PENDING' },
-    newValue: { status: 'CANCELLED', reason },
-    reason,
+    });
   });
 
-  // Notify provider
-  const provider = await prisma.serviceProvider.findUnique({
-    where: { id: withdrawal.providerId },
-  });
-
-  if (provider) {
-    await notifyAndPush(
-      provider.userId,
-      'PAYMENT_FAILED',
-      'Withdrawal Rejected',
-      `Your withdrawal of ₦${koboToNaira(withdrawal.amount)} has been rejected. Reason: ${reason}`,
-      { withdrawalId },
-    );
+  try {
+    await createAuditLog({
+      action: AdminAction.REJECT_WITHDRAWAL,
+      targetType: 'Withdrawal',
+      targetId: withdrawalId,
+      performedBy: adminId,
+      performedByRole: adminRole,
+      previousValue: { status: 'PENDING' },
+      newValue: { status: 'CANCELLED', reason },
+      reason,
+    });
+  } catch (error) {
+    captureException(error, { tags: { area: 'withdrawals' }, extra: { withdrawalId } });
   }
+
+  await updateScheduledPayout(withdrawal, 'CANCELLED', reason);
+
+  await notifyProvider(
+    withdrawal.providerId,
+    'PAYMENT_FAILED',
+    'Withdrawal Rejected',
+    `Your withdrawal of ₦${koboToNaira(withdrawal.amount)} has been rejected. Reason: ${reason}`,
+    withdrawalId
+  );
 
   const updated = await prisma.withdrawal.findUnique({
     where: { id: withdrawalId },
@@ -822,149 +1322,194 @@ export const rejectWithdrawal = async (
 // ==========================================
 
 /**
- * Handle successful transfer webhook
- * NOTE: Balance was already debited at approval time, so we just:
- * - Mark withdrawal as COMPLETED
- * - Unlock wallet
+ * Handle a successful transfer. The balance was debited when the withdrawal
+ * was processed, so this completes it and unlocks the wallet.
  */
-export const handleTransferSuccess = async (transferCode: string) => {
-  const withdrawal = await prisma.withdrawal.findFirst({
-    where: { transferCode },
-    include: { wallet: true },
-  });
+export const handleTransferSuccess = async (event: TransferEvent) => {
+  const withdrawal = await findWithdrawalForTransfer(event);
 
   if (!withdrawal) {
-    console.log(`Transfer not found: ${transferCode}`);
+    await flagUnmatchedPayout(event);
     return;
   }
 
-  if (withdrawal.status === 'COMPLETED') {
-    return; // Already processed (idempotency)
-  }
-
-  // Update withdrawal to COMPLETED and unlock wallet
-  // Balance was already debited when withdrawal was processed (approved)
-  await prisma.$transaction([
-    prisma.withdrawal.update({
-      where: { id: withdrawal.id },
+  const completed = await withTransaction(async (tx) => {
+    // Only a withdrawal still processing completes, so a repeat does nothing
+    const { count } = await tx.withdrawal.updateMany({
+      where: { id: withdrawal.id, status: 'PROCESSING' },
       data: {
         status: 'COMPLETED',
         completedAt: new Date(),
+        ...(event.transferCode ? { transferCode: event.transferCode } : {}),
       },
-    }),
-    prisma.wallet.update({
+    });
+
+    if (count === 0) return false;
+
+    await tx.wallet.update({
       where: { id: withdrawal.walletId },
       data: {
         isLocked: false,
         lockedReason: null,
       },
-    }),
-  ]);
+    });
 
-  // Notify provider
-  const provider = await prisma.serviceProvider.findUnique({
-    where: { id: withdrawal.providerId },
+    return true;
   });
 
-  if (provider) {
-    await notifyAndPush(
-      provider.userId,
-      'PAYMENT_RECEIVED',
-      'Withdrawal Successful',
-      `₦${koboToNaira(withdrawal.netAmount)} has been sent to your ${withdrawal.bankName} account.`,
-      { withdrawalId: withdrawal.id },
-    );
-  }
-};
-
-/**
- * Handle failed transfer webhook
- * IMPORTANT: Since balance was debited at approval, we need to refund if transfer fails
- */
-export const handleTransferFailed = async (
-  transferCode: string,
-  failureReason: string
-) => {
-  const withdrawal = await prisma.withdrawal.findFirst({
-    where: { transferCode },
-    include: { wallet: true },
-  });
-
-  if (!withdrawal) {
-    console.log(`Transfer not found: ${transferCode}`);
+  if (!completed) {
+    // Paid after the money had been returned to the wallet
+    if (withdrawal.status !== 'COMPLETED' && withdrawal.transferReference) {
+      await recordLatePayout(withdrawal.id, withdrawal.transferReference);
+    }
     return;
   }
 
-  // Check retry count
-  if (withdrawal.retryCount < MAX_RETRIES) {
-    // Mark for retry - keep balance debited, keep wallet locked
-    await prisma.withdrawal.update({
-      where: { id: withdrawal.id },
-      data: {
-        status: 'PENDING',
-        retryCount: { increment: 1 },
-        lastRetryAt: new Date(),
-        failureReason,
-        transferCode: null, // Clear transfer code for retry
-      },
-    });
-  } else {
-    // Max retries reached - REFUND the wallet and mark as failed
-    const wallet = withdrawal.wallet;
-    
-    await prisma.$transaction([
-      // Refund the debited amount to wallet
-      prisma.wallet.update({
-        where: { id: withdrawal.walletId },
-        data: {
-          balance: { increment: withdrawal.amount },
-          isLocked: false,
-          lockedReason: null,
-        },
-      }),
-      // Create refund transaction record
-      prisma.walletTransaction.create({
-        data: {
-          walletId: wallet.id,
-          type: 'CREDIT',
-          source: 'WITHDRAWAL',
-          amount: withdrawal.amount,
-          balanceBefore: wallet.balance,
-          balanceAfter: wallet.balance + withdrawal.amount,
-          description: `Refund: Withdrawal failed after ${MAX_RETRIES} attempts - ${withdrawal.bankName}`,
-          reference: `WDR_REFUND_${withdrawal.id}_${Date.now()}`,
-          withdrawalId: withdrawal.id,
-        },
-      }),
-      // Mark withdrawal as failed
-      prisma.withdrawal.update({
-        where: { id: withdrawal.id },
-        data: {
-          status: 'FAILED',
-          failureReason: `Max retries exceeded. Last error: ${failureReason}`,
-        },
-      }),
-    ]);
+  await updateScheduledPayout(withdrawal, 'COMPLETED');
 
-    // Notify provider
-    const provider = await prisma.serviceProvider.findUnique({
-      where: { id: withdrawal.providerId },
-    });
+  await notifyProvider(
+    withdrawal.providerId,
+    'PAYMENT_RECEIVED',
+    'Withdrawal Successful',
+    `₦${koboToNaira(withdrawal.netAmount)} has been sent to your ${withdrawal.bankName} account.`,
+    withdrawal.id
+  );
+};
 
-    if (provider) {
-      await notifyAndPush(
-        provider.userId,
-        'PAYMENT_FAILED',
-        'Withdrawal Failed',
-        `Your withdrawal of ₦${koboToNaira(withdrawal.amount)} failed after multiple attempts. The amount has been refunded to your wallet.`,
-        { withdrawalId: withdrawal.id },
-      );
-    }
+/**
+ * Handle a failed transfer: return the money to the wallet
+ */
+export const handleTransferFailed = async (event: TransferEvent, failureReason: string) => {
+  const withdrawal = await findWithdrawalForTransfer(event);
+
+  if (!withdrawal?.transferReference) {
+    console.log(`Transfer not found: ${event.reference ?? event.transferCode}`);
+    return;
+  }
+
+  const reversed = await reverseAttempt(withdrawal.id, withdrawal.transferReference, failureReason);
+
+  if (reversed?.final) {
+    await finishFailedWithdrawal(reversed.withdrawal, failureReason);
   }
 };
 
 /**
- * Retry a failed withdrawal (admin)
+ * Handle a reversed transfer. Before completion it's a failure; after
+ * completion the bank has returned money we'd already sent.
+ */
+export const handleTransferReversed = async (event: TransferEvent) => {
+  const withdrawal = await findWithdrawalForTransfer(event);
+
+  if (!withdrawal) {
+    console.log(`Transfer not found: ${event.reference ?? event.transferCode}`);
+    return;
+  }
+
+  if (withdrawal.status === 'PROCESSING') {
+    await handleTransferFailed(event, 'Transfer reversed');
+    return;
+  }
+
+  if (withdrawal.status !== 'COMPLETED') return;
+
+  const returned = await withTransaction(async (tx) => {
+    const { count } = await tx.withdrawal.updateMany({
+      where: { id: withdrawal.id, status: 'COMPLETED' },
+      data: { status: 'FAILED', failureReason: 'The bank returned the transfer' },
+    });
+
+    if (count === 0) return false;
+
+    await applyWalletCredit(tx, {
+      walletId: withdrawal.walletId,
+      amount: withdrawal.amount,
+      source: 'WITHDRAWAL_REVERSAL',
+      description: `Refund: transfer to ${withdrawal.bankName} was returned by the bank`,
+      // Its own event: the same attempt may already have had a reversal, if it
+      // failed and was then paid late
+      reference: LedgerReference.withdrawalReturn(withdrawal.id, currentAttempt(withdrawal)),
+      withdrawalId: withdrawal.id,
+    });
+
+    return true;
+  });
+
+  if (!returned) return;
+
+  await updateScheduledPayout(withdrawal, 'FAILED', 'The bank returned the transfer');
+
+  await notifyProvider(
+    withdrawal.providerId,
+    'PAYMENT_FAILED',
+    'Withdrawal Returned',
+    `Your bank returned the transfer of ₦${koboToNaira(withdrawal.netAmount)}. ₦${koboToNaira(withdrawal.amount)} is back in your wallet. Please check your bank details.`,
+    withdrawal.id
+  );
+};
+
+/**
+ * Check withdrawals that have been processing for a while with Paystack and
+ * apply the result, for transfers whose webhook never arrived or whose start
+ * couldn't be confirmed. Called by a background job.
+ */
+export const reconcileProcessingWithdrawals = async () => {
+  const cutoff = new Date(Date.now() - RECONCILE_AFTER_MINUTES * 60 * 1000);
+
+  const processing = await prisma.withdrawal.findMany({
+    where: { status: 'PROCESSING', processedAt: { lt: cutoff } },
+    orderBy: { processedAt: 'asc' },
+    take: 50,
+  });
+
+  let settled = 0;
+
+  for (const withdrawal of processing) {
+    const reference = withdrawal.transferReference;
+    if (!reference) continue;
+
+    try {
+      const response = withdrawal.transferCode
+        ? await paystack.fetchTransfer(withdrawal.transferCode)
+        : await paystack.verifyTransfer(reference);
+      const transfer = response.data;
+      const event = { reference, transferCode: transfer.transfer_code };
+
+      if (transfer.status === 'success') {
+        await handleTransferSuccess(event);
+        settled++;
+      } else if (transfer.status === 'reversed') {
+        await handleTransferReversed(event);
+        settled++;
+      } else if (FAILED_TRANSFER_STATES.has(transfer.status)) {
+        await handleTransferFailed(event, `Transfer ${transfer.status}`);
+        settled++;
+      }
+      // pending, otp, received: still under way
+    } catch (error) {
+      const notFound = error instanceof PaystackRequestError && error.httpStatus === 404;
+
+      // Only a transfer started under one of our attempt references is known
+      // never to have been made when Paystack has no record of it
+      if (notFound && !withdrawal.transferCode && ATTEMPT_REFERENCE.test(reference)) {
+        await handleTransferFailed({ reference }, 'Paystack has no record of this transfer');
+        settled++;
+      } else {
+        captureException(error, {
+          tags: { area: 'withdrawals' },
+          extra: { withdrawalId: withdrawal.id, reference },
+        });
+      }
+    }
+  }
+
+  return { checked: processing.length, settled };
+};
+
+/**
+ * Start a new transfer attempt for a PENDING withdrawal whose last attempt
+ * failed (admin). A FAILED withdrawal is final: its amount is back in the
+ * wallet, and the provider requests a new withdrawal.
  */
 export const retryWithdrawal = async (
   withdrawalId: string,
@@ -987,13 +1532,7 @@ export const retryWithdrawal = async (
     });
   }
 
-  if (withdrawal.retryCount >= MAX_RETRIES) {
-    throw new GraphQLError('Maximum retry attempts exceeded', {
-      extensions: { code: 'MAX_RETRIES_EXCEEDED' },
-    });
-  }
-
-  // Process as new
+  // A PENDING withdrawal has had fewer than MAX_RETRIES attempts
   return processWithdrawal(withdrawalId, adminId, adminRole);
 };
 

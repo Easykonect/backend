@@ -31,6 +31,7 @@ interface AuditLogFilters {
   targetType?: string;
   targetId?: string;
   performedBy?: string;
+  adminId?: string;
   startDate?: string;
   endDate?: string;
 }
@@ -76,10 +77,15 @@ const formatAuditLog = (log: any) => ({
   action: log.action,
   targetType: log.targetType,
   targetId: log.targetId,
+  adminId: log.performedBy,
   performedBy: log.performedBy,
   performedByRole: log.performedByRole,
   previousValue: safeParse(log.previousValue),
   newValue: safeParse(log.newValue),
+  // The schema exposes the before/after state as one JSON string
+  metadata: log.previousValue || log.newValue
+    ? JSON.stringify({ previousValue: safeParse(log.previousValue), newValue: safeParse(log.newValue) })
+    : null,
   reason: log.reason,
   ipAddress: log.ipAddress,
   userAgent: log.userAgent,
@@ -139,7 +145,8 @@ export const getAuditLogs = async (
   const where: any = {};
 
   if (filters.action) {
-    where.action = filters.action;
+    // REMOVE_RESTRICTION is the older GraphQL name for UNRESTRICT_USER
+    where.action = (filters.action as string) === 'REMOVE_RESTRICTION' ? 'UNRESTRICT_USER' : filters.action;
   }
 
   if (filters.targetType) {
@@ -150,8 +157,8 @@ export const getAuditLogs = async (
     where.targetId = filters.targetId;
   }
 
-  if (filters.performedBy) {
-    where.performedBy = filters.performedBy;
+  if (filters.performedBy || filters.adminId) {
+    where.performedBy = filters.performedBy ?? filters.adminId;
   }
 
   if (filters.startDate || filters.endDate) {
@@ -174,8 +181,21 @@ export const getAuditLogs = async (
     prisma.adminAuditLog.count({ where }),
   ]);
 
+  // The schema identifies who acted by email
+  const adminIds = [...new Set(logs.map((log) => log.performedBy))];
+  const admins = adminIds.length > 0
+    ? await prisma.user.findMany({ where: { id: { in: adminIds } }, select: { id: true, email: true } })
+    : [];
+  const emails = new Map(admins.map((admin) => [admin.id, admin.email]));
+  const items = logs.map((log) => ({ ...formatAuditLog(log), adminEmail: emails.get(log.performedBy) ?? '' }));
+
   return {
-    logs: logs.map(formatAuditLog),
+    items,
+    total,
+    page,
+    totalPages: Math.ceil(total / limit),
+    hasNextPage: page * limit < total,
+    logs: items,
     pagination: {
       page,
       limit,

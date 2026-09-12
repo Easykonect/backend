@@ -1,10 +1,10 @@
 /**
  * WebSocket Server Setup for Next.js
- * 
+ *
  * This file provides Socket.io integration with Next.js.
  * Since Next.js uses serverless functions, we need a custom approach
  * to maintain WebSocket connections.
- * 
+ *
  * For production deployment on platforms like Render or Railway,
  * you can use a separate Socket.io server or integrate with Next.js custom server.
  */
@@ -17,17 +17,22 @@ import { queueManager } from '@/queues';
 import { initializeEmailWorker } from '@/queues/email.worker';
 import { initializeNotificationWorker } from '@/queues/notification.worker';
 import { initializeBackgroundWorker, scheduleRecurringJobs } from '@/queues/background.worker';
-import { config } from '@/config';
+import { config, validateEnv } from '@/config';
 
 const dev = !config.isProduction;
 const hostname = config.hostname;
 const port = config.port;
+
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 /**
  * Initialize the complete server with WebSockets and background workers
  */
 export async function startServer(): Promise<void> {
   console.log('🚀 Starting EasyKonnect Server...');
+
+  // Stop with a clear message if an essential setting is missing
+  validateEnv();
 
   // Create Next.js app
   const app = next({ dev, hostname, port });
@@ -49,27 +54,11 @@ export async function startServer(): Promise<void> {
     console.error('❌ Failed to initialize WebSocket server:', error);
   }
 
-  // Initialize queue system
-  try {
-    await queueManager.initialize();
-    
-    // Initialize workers
-    initializeEmailWorker();
-    initializeNotificationWorker();
-    initializeBackgroundWorker();
-    
-    // Schedule recurring jobs
-    await scheduleRecurringJobs();
-    
-    console.log('✅ Queue system initialized');
-  } catch (error) {
-    console.error('❌ Failed to initialize queue system:', error);
-    console.log('⚠️ Running without background job processing');
-  }
+  // Start listening before the queue system: scheduling jobs waits for Redis,
+  // and Redis being unavailable mustn't keep the API offline
+  await new Promise<void>((resolve) => httpServer.listen(port, resolve));
 
-  // Start server
-  httpServer.listen(port, () => {
-    console.log(`
+  console.log(`
 ╔════════════════════════════════════════════════════════╗
 ║                                                        ║
 ║   🎉 EasyKonnect Server Started Successfully!          ║
@@ -81,13 +70,18 @@ export async function startServer(): Promise<void> {
 ║   📊 Mode: ${dev ? 'Development' : 'Production'}                              ║
 ║                                                        ║
 ╚════════════════════════════════════════════════════════╝
-    `);
-  });
+  `);
 
   // Graceful shutdown
   const gracefulShutdown = async (signal: string) => {
     console.log(`\n⚠️ Received ${signal}. Shutting down gracefully...`);
-    
+
+    // Closing the queues waits on Redis; don't let an outage keep the process alive
+    setTimeout(() => {
+      console.error('❌ Shutdown timed out, exiting');
+      process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS).unref();
+
     try {
       await queueManager.shutdown();
       httpServer.close(() => {
@@ -102,6 +96,25 @@ export async function startServer(): Promise<void> {
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+  // Initialize queue system: workers for emails, notifications and the
+  // background jobs (provider payouts, withdrawal checks, scheduled payouts)
+  try {
+    await queueManager.initialize();
+
+    // Initialize workers
+    initializeEmailWorker();
+    initializeNotificationWorker();
+    initializeBackgroundWorker();
+
+    // Schedule recurring jobs
+    await scheduleRecurringJobs();
+
+    console.log('✅ Queue system initialized');
+  } catch (error) {
+    console.error('❌ Failed to initialize queue system:', error);
+    console.log('⚠️ Running without background job processing');
+  }
 }
 
 // Export for custom server usage

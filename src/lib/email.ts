@@ -1,12 +1,43 @@
 /**
  * Email Service
  * Uses Resend HTTP API — avoids SMTP port blocking on shared hosting.
+ *
+ * The send helpers used by request handlers hand emails off for delivery in
+ * the background, with retries, so a slow or failing Resend call never holds
+ * up the request.
  */
 
 import { Resend } from 'resend';
 import { config } from '@/config';
+import { captureException } from '@/lib/sentry';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+// Created on first use: constructing it at import time threw when
+// RESEND_API_KEY was missing, which took down every module that sends email
+let resendClient: Resend | null = null;
+
+const getResend = (): Resend | null => {
+  if (!process.env.RESEND_API_KEY) return null;
+  resendClient ??= new Resend(process.env.RESEND_API_KEY);
+  return resendClient;
+};
+
+// How long to wait for Resend before treating the attempt as failed
+const SEND_TIMEOUT_MS = 10_000;
+
+// Waits before the second and third delivery attempts
+const RETRY_DELAYS_MS = [2_000, 10_000];
+
+/**
+ * Escape a value for HTML. Names, business names and reasons come from users;
+ * unescaped, they could put links or markup into a genuine Easykonnet email.
+ */
+export const escapeHtml = (value: string): string =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 // ==========================================
 // Shared Email Layout Helpers
@@ -56,7 +87,7 @@ const emailTemplates = {
   verificationOtp: (otp: string, firstName: string): { subject: string; html: string; text: string } => ({
     subject: 'Verify Your Easykonnet Account',
     html: emailWrapper(`
-      <h2 style="color: #333; margin-top: 0;">Hello ${firstName},</h2>
+      <h2 style="color: #333; margin-top: 0;">Hello ${escapeHtml(firstName)},</h2>
       <p>Welcome to Easykonnet! To complete your registration, please verify your email address using the code below:</p>
       <div style="background: #f0f7f7; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0; border: 2px dashed ${BRAND_COLOR};">
         <span style="font-size: 36px; font-weight: bold; letter-spacing: 10px; color: ${BRAND_COLOR};">${otp}</span>
@@ -86,7 +117,7 @@ If you didn't create an account with Easykonnet, please ignore this email.
   passwordResetOtp: (otp: string, firstName: string): { subject: string; html: string; text: string } => ({
     subject: 'Reset Your Easykonnet Password',
     html: emailWrapper(`
-      <h2 style="color: #333; margin-top: 0;">Hello ${firstName},</h2>
+      <h2 style="color: #333; margin-top: 0;">Hello ${escapeHtml(firstName)},</h2>
       <p>We received a request to reset your password. Use the code below to proceed:</p>
       <div style="background: #f0f7f7; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0; border: 2px dashed ${BRAND_COLOR};">
         <span style="font-size: 36px; font-weight: bold; letter-spacing: 10px; color: ${BRAND_COLOR};">${otp}</span>
@@ -116,11 +147,11 @@ This code will expire in 10 minutes.
   loginAlert: (firstName: string, ip: string, time: string): { subject: string; html: string; text: string } => ({
     subject: 'New Login to Your Easykonnet Account',
     html: emailWrapper(`
-      <h2 style="color: #333; margin-top: 0;">Hello ${firstName},</h2>
+      <h2 style="color: #333; margin-top: 0;">Hello ${escapeHtml(firstName)},</h2>
       <p>We detected a new login to your Easykonnet account:</p>
       <div style="background: #f0f7f7; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid ${BRAND_COLOR};">
-        <p style="margin: 5px 0;"><strong>Time:</strong> ${time}</p>
-        <p style="margin: 5px 0;"><strong>IP Address:</strong> ${ip}</p>
+        <p style="margin: 5px 0;"><strong>Time:</strong> ${escapeHtml(time)}</p>
+        <p style="margin: 5px 0;"><strong>IP Address:</strong> ${escapeHtml(ip)}</p>
       </div>
       <p style="color: #666; font-size: 14px;">If this was you, no action is needed.</p>
       <p style="color: #e74c3c; font-size: 14px;"><strong>⚠️ Not you?</strong> Please change your password immediately and contact our support team.</p>
@@ -148,8 +179,8 @@ If this was you, no action is needed.
   providerApproved: (firstName: string, businessName: string): { subject: string; html: string; text: string } => ({
     subject: 'Your Provider Account Has Been Approved!',
     html: emailWrapper(`
-      <h2 style="color: #333; margin-top: 0;">Hello ${firstName},</h2>
-      <p>Great news! Your provider account <strong>"${businessName}"</strong> has been verified and approved.</p>
+      <h2 style="color: #333; margin-top: 0;">Hello ${escapeHtml(firstName)},</h2>
+      <p>Great news! Your provider account <strong>"${escapeHtml(businessName)}"</strong> has been verified and approved.</p>
       <div style="background: #e6f4f1; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid ${BRAND_COLOR};">
         <h3 style="margin: 0 0 10px 0; color: ${BRAND_COLOR};">✅ You're Now Verified!</h3>
         <p style="margin: 0; color: #004d40;">You can now:</p>
@@ -189,11 +220,11 @@ Dashboard: ${config.platform.frontendUrl}/provider/dashboard
   providerRejected: (firstName: string, businessName: string, reason: string): { subject: string; html: string; text: string } => ({
     subject: 'Update on Your Provider Application',
     html: emailWrapper(`
-      <h2 style="color: #333; margin-top: 0;">Hello ${firstName},</h2>
-      <p>We've reviewed your provider application for <strong>"${businessName}"</strong>, and unfortunately, we're unable to approve it at this time.</p>
+      <h2 style="color: #333; margin-top: 0;">Hello ${escapeHtml(firstName)},</h2>
+      <p>We've reviewed your provider application for <strong>"${escapeHtml(businessName)}"</strong>, and unfortunately, we're unable to approve it at this time.</p>
       <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ffc107;">
         <h3 style="margin: 0 0 10px 0; color: #856404;">Reason for Rejection:</h3>
-        <p style="margin: 0; color: #856404;">${reason}</p>
+        <p style="margin: 0; color: #856404;">${escapeHtml(reason)}</p>
       </div>
       <h3 style="color: #333;">What You Can Do:</h3>
       <ol style="color: #666;">
@@ -233,8 +264,8 @@ Need help? Contact ${config.platform.supportEmail}
   providerSubmissionReceived: (firstName: string, businessName: string): { subject: string; html: string; text: string } => ({
     subject: 'We Received Your Provider Application!',
     html: emailWrapper(`
-      <h2 style="color: #333; margin-top: 0;">Hello ${firstName},</h2>
-      <p>Thank you for submitting your provider application for <strong>"${businessName}"</strong>!</p>
+      <h2 style="color: #333; margin-top: 0;">Hello ${escapeHtml(firstName)},</h2>
+      <p>Thank you for submitting your provider application for <strong>"${escapeHtml(businessName)}"</strong>!</p>
       <div style="background: #f0f7f7; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid ${BRAND_COLOR};">
         <h3 style="margin: 0 0 10px 0; color: ${BRAND_COLOR};">📋 Application Status: Under Review</h3>
         <p style="margin: 0; color: #004d40;">Our team is reviewing your application. This typically takes 1-2 business days.</p>
@@ -273,10 +304,10 @@ Questions? Contact ${config.platform.supportEmail}
   profileUpdated: (firstName: string, changedFields: string[]): { subject: string; html: string; text: string } => ({
     subject: `Your Easykonnet Profile Has Been Updated`,
     html: emailWrapper(`
-      <h2 style="color: #333; margin-top: 0;">Hello ${firstName},</h2>
+      <h2 style="color: #333; margin-top: 0;">Hello ${escapeHtml(firstName)},</h2>
       <p>Your profile was updated successfully. The following fields were changed:</p>
       <ul style="color: #555;">
-        ${changedFields.map(f => `<li><strong>${f}</strong></li>`).join('')}
+        ${changedFields.map(f => `<li><strong>${escapeHtml(f)}</strong></li>`).join('')}
       </ul>
       <p style="color: #e74c3c; font-size: 14px;"><strong>⚠️ Not you?</strong> Contact support immediately at ${config.platform.supportEmail}.</p>
       ${emailFooter()}
@@ -299,8 +330,8 @@ ${changedFields.map(f => `- ${f}`).join('\n')}
   emailChangeOtp: (firstName: string, newEmail: string, otp: string): { subject: string; html: string; text: string } => ({
     subject: `Confirm Your New Email Address — Easykonnet`,
     html: emailWrapper(`
-      <h2 style="color: #333; margin-top: 0;">Hello ${firstName},</h2>
-      <p>We received a request to change your account email to <strong>${newEmail}</strong>.</p>
+      <h2 style="color: #333; margin-top: 0;">Hello ${escapeHtml(firstName)},</h2>
+      <p>We received a request to change your account email to <strong>${escapeHtml(newEmail)}</strong>.</p>
       <p>Use the code below to confirm this change:</p>
       <div style="background: #f0f7f7; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0; border: 2px dashed ${BRAND_COLOR};">
         <span style="font-size: 36px; font-weight: bold; letter-spacing: 10px; color: ${BRAND_COLOR};">${otp}</span>
@@ -336,25 +367,75 @@ interface SendEmailOptions {
 }
 
 export const sendEmail = async (options: SendEmailOptions): Promise<boolean> => {
+  const resend = getResend();
+  if (!resend) {
+    console.error(`❌ Email "${options.subject}" not sent: RESEND_API_KEY is not set`);
+    return false;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Resend did not respond within ${SEND_TIMEOUT_MS / 1000} seconds`)),
+      SEND_TIMEOUT_MS
+    );
+  });
+
   try {
-    const { error } = await resend.emails.send({
-      from: `${config.email.fromName} <${config.email.fromAddress}>`,
-      to: options.to,
-      subject: options.subject,
-      html: options.html,
-      text: options.text,
-    });
+    const { data, error } = await Promise.race([
+      resend.emails.send({
+        from: `${config.email.fromName} <${config.email.fromAddress}>`,
+        to: options.to,
+        subject: options.subject,
+        html: options.html,
+        text: options.text,
+      }),
+      timeout,
+    ]);
 
     if (error) {
-      console.error('❌ Email sending failed:', error);
+      console.error(`❌ Email "${options.subject}" failed:`, error);
       return false;
     }
 
+    console.log(`📧 Email "${options.subject}" accepted by Resend (${data?.id ?? 'no id'})`);
     return true;
   } catch (error) {
-    console.error('❌ Email sending failed:', error);
+    console.error(`❌ Email "${options.subject}" failed:`, error);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
+ * Hand an email off for delivery without making the caller wait. Delivery is
+ * retried with backoff, and a final failure is reported to Sentry. Returns
+ * false only when email isn't configured at all.
+ */
+export const sendEmailInBackground = (options: SendEmailOptions): boolean => {
+  if (!getResend()) {
+    console.error(`❌ Email "${options.subject}" not sent: RESEND_API_KEY is not set`);
     return false;
   }
+
+  void (async () => {
+    for (let attempt = 0; ; attempt++) {
+      if (await sendEmail(options)) return;
+
+      if (attempt >= RETRY_DELAYS_MS.length) {
+        captureException(new Error('Email delivery failed after retries'), {
+          tags: { area: 'email' },
+          extra: { subject: options.subject },
+        });
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
+    }
+  })();
+
+  return true;
 };
 
 /**
@@ -366,7 +447,7 @@ export const sendVerificationEmail = async (
   otp: string
 ): Promise<boolean> => {
   const template = emailTemplates.verificationOtp(otp, firstName);
-  return sendEmail({
+  return sendEmailInBackground({
     to: email,
     ...template,
   });
@@ -381,7 +462,7 @@ export const sendPasswordResetEmail = async (
   otp: string
 ): Promise<boolean> => {
   const template = emailTemplates.passwordResetOtp(otp, firstName);
-  return sendEmail({
+  return sendEmailInBackground({
     to: email,
     ...template,
   });
@@ -400,7 +481,7 @@ export const sendLoginAlertEmail = async (
     timeStyle: 'long',
   });
   const template = emailTemplates.loginAlert(firstName, ip, time);
-  return sendEmail({
+  return sendEmailInBackground({
     to: email,
     ...template,
   });
@@ -415,7 +496,7 @@ export const sendProviderApprovedEmail = async (
   businessName: string
 ): Promise<boolean> => {
   const template = emailTemplates.providerApproved(firstName, businessName);
-  return sendEmail({
+  return sendEmailInBackground({
     to: email,
     ...template,
   });
@@ -431,7 +512,7 @@ export const sendProviderRejectedEmail = async (
   reason: string
 ): Promise<boolean> => {
   const template = emailTemplates.providerRejected(firstName, businessName, reason);
-  return sendEmail({
+  return sendEmailInBackground({
     to: email,
     ...template,
   });
@@ -446,7 +527,7 @@ export const sendProviderSubmissionEmail = async (
   businessName: string
 ): Promise<boolean> => {
   const template = emailTemplates.providerSubmissionReceived(firstName, businessName);
-  return sendEmail({
+  return sendEmailInBackground({
     to: email,
     ...template,
   });
@@ -461,7 +542,7 @@ export const sendProfileUpdatedEmail = async (
   changedFields: string[]
 ): Promise<boolean> => {
   const template = emailTemplates.profileUpdated(firstName, changedFields);
-  return sendEmail({
+  return sendEmailInBackground({
     to: email,
     ...template,
   });
@@ -476,7 +557,7 @@ export const sendEmailChangeOtpEmail = async (
   otp: string
 ): Promise<boolean> => {
   const template = emailTemplates.emailChangeOtp(firstName, newEmail, otp);
-  return sendEmail({
+  return sendEmailInBackground({
     to: newEmail,
     ...template,
   });
@@ -484,6 +565,7 @@ export const sendEmailChangeOtpEmail = async (
 
 const emailService = {
   sendEmail,
+  sendEmailInBackground,
   sendVerificationEmail,
   sendPasswordResetEmail,
   sendLoginAlertEmail,

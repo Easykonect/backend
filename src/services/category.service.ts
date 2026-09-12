@@ -4,8 +4,10 @@
  */
 
 import { GraphQLError } from 'graphql';
+import type { Prisma, ServiceCategory } from '@prisma/client';
 import prisma from '@/lib/prisma';
-import { sanitizeBasic, validateName, validateText, validateUrl, MAX_LENGTHS } from '@/utils/security';
+import { sanitizeBasic, validateBusinessName, validateText, validateUrl, MAX_LENGTHS } from '@/utils/security';
+import { slugOrFallback } from '@/utils/slug';
 
 // ==================
 // Types
@@ -29,19 +31,15 @@ interface UpdateCategoryInput {
 // ==================
 
 /**
- * Generate slug from name
+ * Slug for a category name. A name with no letters or digits to build one from
+ * gets `category-{random}`.
  */
-const generateSlug = (name: string): string => {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '');
-};
+const categorySlug = (name: string): string => slugOrFallback(name, 'category');
 
 /**
  * Format category response
  */
-const formatCategory = (category: any) => ({
+const formatCategory = (category: ServiceCategory) => ({
   id: category.id,
   name: category.name,
   slug: category.slug,
@@ -57,7 +55,8 @@ const formatCategory = (category: any) => ({
 // ==================
 
 /**
- * Get All Categories
+ * Get All Categories. Inactive ones are only included when asked for, which
+ * the resolver allows for admins only.
  */
 export const getCategories = async (pagination: { page: number; limit: number }, includeInactive = false) => {
   const { page, limit } = pagination;
@@ -112,14 +111,14 @@ export const createCategory = async (input: CreateCategoryInput) => {
   const { name, description, icon } = input;
 
   // Sanitize and validate inputs
-  const sanitizedName = validateName(name, 'Category name');
-  const sanitizedDescription = description 
-    ? validateText(sanitizeBasic(description), 'Description', MAX_LENGTHS.MEDIUM_TEXT)
+  const sanitizedName = validateBusinessName(name, 'Category name');
+  const sanitizedDescription = description
+    ? validateText(sanitizeBasic(description), 'Description', 0, MAX_LENGTHS.MEDIUM_TEXT)
     : undefined;
   const sanitizedIcon = icon ? validateUrl(icon) : undefined;
 
   // Generate slug
-  const slug = generateSlug(sanitizedName);
+  const slug = categorySlug(sanitizedName);
 
   // Check if category with same name or slug exists
   const existing = await prisma.serviceCategory.findFirst({
@@ -165,27 +164,34 @@ export const updateCategory = async (categoryId: string, input: UpdateCategoryIn
   }
 
   // Build update data with sanitization
-  const updateData: any = {};
+  const updateData: Prisma.ServiceCategoryUpdateInput = {};
 
   if (input.name !== undefined) {
-    updateData.name = validateName(input.name, 'Category name');
-    updateData.slug = generateSlug(updateData.name);
+    const name = validateBusinessName(input.name, 'Category name');
 
-    // Check for duplicate
-    const existing = await prisma.serviceCategory.findFirst({
-      where: {
-        id: { not: categoryId },
-        OR: [
-          { name: { equals: updateData.name, mode: 'insensitive' } },
-          { slug: updateData.slug },
-        ],
-      },
-    });
+    // The slug only changes with the name
+    if (name !== category.name) {
+      const slug = categorySlug(name);
 
-    if (existing) {
-      throw new GraphQLError('A category with this name already exists', {
-        extensions: { code: 'DUPLICATE_CATEGORY' },
+      // Check for duplicate
+      const existing = await prisma.serviceCategory.findFirst({
+        where: {
+          id: { not: categoryId },
+          OR: [
+            { name: { equals: name, mode: 'insensitive' } },
+            { slug },
+          ],
+        },
       });
+
+      if (existing) {
+        throw new GraphQLError('A category with this name already exists', {
+          extensions: { code: 'DUPLICATE_CATEGORY' },
+        });
+      }
+
+      updateData.name = name;
+      updateData.slug = slug;
     }
   }
 
@@ -193,6 +199,7 @@ export const updateCategory = async (categoryId: string, input: UpdateCategoryIn
     updateData.description = validateText(
       sanitizeBasic(input.description),
       'Description',
+      0,
       MAX_LENGTHS.MEDIUM_TEXT
     );
   }

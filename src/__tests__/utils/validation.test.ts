@@ -83,16 +83,18 @@ describe('Validation Schemas', () => {
   // Phone Validation
   // ==================
   describe('phoneSchema', () => {
-    it('should accept valid phone numbers', () => {
+    it('should accept Nigerian mobile numbers in local or international form', () => {
       expect(() => phoneSchema.parse('+2348012345678')).not.toThrow();
-      expect(() => phoneSchema.parse('+12345678901')).not.toThrow();
       expect(() => phoneSchema.parse('2348012345678')).not.toThrow();
+      expect(() => phoneSchema.parse('08012345678')).not.toThrow();
+      expect(() => phoneSchema.parse('0801 234 5678')).not.toThrow();
     });
 
     it('should reject invalid phone numbers', () => {
       expect(() => phoneSchema.parse('not-a-number')).toThrow();
       expect(() => phoneSchema.parse('')).toThrow();
       expect(() => phoneSchema.parse('+0')).toThrow();
+      expect(() => phoneSchema.parse('+12345678901')).toThrow();
     });
   });
 

@@ -4,11 +4,40 @@
  */
 
 import { GraphQLError } from 'graphql';
+import type { Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import { config } from '@/config';
-import { UserRole, ServiceStatus, VerificationStatus, type ServiceStatusType } from '@/constants';
-import { sanitizeBasic, validateName, validateText, validateAmount, sanitizeSearchQuery, MAX_LENGTHS } from '@/utils/security';
-import { haversineDistance } from '@/services/browse.service';
+import { UserRole, ServiceStatus, VerificationStatus, NotificationType, type ServiceStatusType } from '@/constants';
+import {
+  sanitizeBasic,
+  validateBusinessName,
+  validateText,
+  validateAmount,
+  sanitizeSearchQuery,
+  MAX_LENGTHS,
+} from '@/utils/security';
+import { slugify, slugSuffix } from '@/utils/slug';
+import { haversineDistance, boundingBox, MAX_NEARBY_CANDIDATES } from '@/services/browse.service';
+import { assertAcceptableText } from '@/lib/content-filter';
+import { getBlockedUserIds, isBlockedBetween } from '@/services/block.service';
+import { flagContent } from '@/services/report.service';
+import { assertTermsAccepted } from '@/services/terms.service';
+import {
+  createNotification,
+  notifyServiceApproved,
+  notifyServiceRejected,
+} from '@/services/notification.service';
+import { sendPushToUser } from '@/services/push.service';
+import {
+  formatProviderProfile,
+  isAdminRole,
+  loadProviderStats,
+  notifySafely,
+  recordModeration,
+  validateModerationReason,
+  type ModerationActor,
+  type ProviderStats,
+} from '@/services/provider-profile.service';
 
 // ==================
 // Types
@@ -20,17 +49,17 @@ interface CreateServiceInput {
   description: string;
   price: number;
   duration: number;
-  images?: string[];
+  images?: string[] | null;
 }
 
 interface UpdateServiceInput {
-  categoryId?: string;
+  categoryId?: string | null;
   name?: string;
   description?: string;
   price?: number;
   duration?: number;
-  images?: string[];
-  status?: ServiceStatusType;
+  images?: string[] | null;
+  status?: ServiceStatusType | null;
 }
 
 interface ServiceFiltersInput {
@@ -45,47 +74,120 @@ interface ServiceFiltersInput {
   latitude?: number;
   longitude?: number;
   radiusKm?: number;
-  // Not exposed in GraphQL — populated by the resolver from the auth context
-  // so that a logged-in provider doesn't see their own services in the
-  // customer-facing service list.
+  // Not exposed in GraphQL — the signed-in viewer's user ID, populated by the
+  // resolver from the auth context. The viewer's own services, and those of
+  // providers they blocked, are left out of the customer-facing list.
   excludeProviderUserId?: string;
 }
+
+/**
+ * The signed-in user asking for a service
+ */
+export interface ServiceViewer {
+  userId: string;
+  role: string;
+}
+
+type ServiceWithRelations = Prisma.ServiceGetPayload<{ include: { provider: true; category: true } }>;
+
+type ServiceDecision = 'approved' | 'reinstated' | 'rejected' | 'suspended';
 
 // ==================
 // Helper Functions
 // ==================
 
+// Most images a service can have, the same limit as uploadServiceImages
+const MAX_SERVICE_IMAGES = 10;
+
+const serviceNotFound = () =>
+  new GraphQLError('Service not found', {
+    extensions: { code: 'NOT_FOUND' },
+  });
+
+const emptyPage = (page: number, limit: number) => ({
+  items: [],
+  total: 0,
+  page,
+  limit,
+  totalPages: 0,
+  hasNextPage: false,
+  hasPreviousPage: false,
+});
+
 /**
- * Generate slug from name
+ * The URL, if it's an https image in the platform's Cloudinary account
  */
-const generateSlug = (name: string): string => {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '');
+const parseOwnImageUrl = (value: unknown): URL | null => {
+  const { cloudName } = config.cloudinary;
+  if (!cloudName || typeof value !== 'string' || value.length > MAX_LENGTHS.URL) return null;
+
+  try {
+    const url = new URL(value);
+    const isOwnImage =
+      url.protocol === 'https:' &&
+      url.hostname === 'res.cloudinary.com' &&
+      !url.port &&
+      !url.username &&
+      !url.password &&
+      url.pathname.startsWith(`/${cloudName}/image/upload/`);
+    return isOwnImage ? url : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Service images: at most 10, each an https image URL in the platform's
+ * Cloudinary account, which is what uploadServiceImages produces
+ */
+const validateServiceImages = (images: string[] | null | undefined): string[] => {
+  const list = images ?? [];
+
+  if (list.length > MAX_SERVICE_IMAGES) {
+    throw new GraphQLError(`A service can have at most ${MAX_SERVICE_IMAGES} images`, {
+      extensions: { code: 'MAX_IMAGES_EXCEEDED' },
+    });
+  }
+
+  return list.map((image) => {
+    const url = parseOwnImageUrl(image);
+    if (!url) {
+      throw new GraphQLError('Each image must be a photo uploaded to Easykonnet', {
+        extensions: { code: 'INVALID_IMAGE_URL' },
+      });
+    }
+    return url.href;
+  });
+};
+
+/**
+ * A slug for the service name that none of the provider's other services use.
+ * A slug that's taken, or a name with no letters or digits to build one from,
+ * gets a random suffix.
+ */
+const uniqueServiceSlug = async (providerId: string, name: string, serviceId?: string): Promise<string> => {
+  const baseSlug = slugify(name);
+  if (!baseSlug) return `service-${slugSuffix()}`;
+
+  const taken = await prisma.service.findFirst({
+    where: {
+      providerId,
+      slug: baseSlug,
+      ...(serviceId ? { id: { not: serviceId } } : {}),
+    },
+    select: { id: true },
+  });
+
+  return taken ? `${baseSlug}-${slugSuffix()}` : baseSlug;
 };
 
 /**
  * Format service response
  */
-const formatService = (service: any) => ({
+const formatService = (service: ServiceWithRelations, stats: Map<string, ProviderStats>) => ({
   id: service.id,
-  provider: service.provider ? {
-    id: service.provider.id,
-    businessName: service.provider.businessName,
-    businessDescription: service.provider.businessDescription,
-    verificationStatus: service.provider.verificationStatus,
-    address: service.provider.address,
-    city: service.provider.city,
-    state: service.provider.state,
-    country: service.provider.country,
-    latitude: service.provider.latitude,
-    longitude: service.provider.longitude,
-    documents: service.provider.documents,
-    createdAt: service.provider.createdAt.toISOString(),
-    updatedAt: service.provider.updatedAt.toISOString(),
-  } : null,
-  category: service.category ? {
+  provider: formatProviderProfile(service.provider, stats.get(service.providerId)),
+  category: {
     id: service.category.id,
     name: service.category.name,
     slug: service.category.slug,
@@ -94,17 +196,39 @@ const formatService = (service: any) => ({
     isActive: service.category.isActive,
     createdAt: service.category.createdAt.toISOString(),
     updatedAt: service.category.updatedAt.toISOString(),
-  } : null,
+  },
   name: service.name,
   slug: service.slug,
   description: service.description,
   price: service.price,
   duration: service.duration,
   status: service.status,
+  // Only returned to the owning provider and admins (see the type resolvers)
+  rejectionReason: service.rejectionReason ?? null,
+  suspensionReason: service.suspensionReason ?? null,
   images: service.images,
   createdAt: service.createdAt.toISOString(),
   updatedAt: service.updatedAt.toISOString(),
 });
+
+/**
+ * Format services, with each provider's rating and like counts
+ */
+const formatServices = async (services: ServiceWithRelations[]) => {
+  const stats = await loadProviderStats(services.map((service) => service.providerId));
+  return services.map((service) => formatService(service, stats));
+};
+
+const formatOneService = async (service: ServiceWithRelations) => {
+  const [formatted] = await formatServices([service]);
+  return formatted;
+};
+
+const findServiceWithRelations = (serviceId: string) =>
+  prisma.service.findUnique({
+    where: { id: serviceId },
+    include: { provider: true, category: true },
+  });
 
 /**
  * Get provider for user
@@ -136,24 +260,35 @@ const getProviderForUser = async (userId: string) => {
 
 /**
  * Get All Services (Public)
+ *
+ * Everyone sees ACTIVE services only. `filters.status` is honoured for admins,
+ * and for a provider listing their own services (`filters.providerId` is their
+ * profile), whose own services then aren't left out.
  */
 export const getServices = async (
   filters: ServiceFiltersInput = {},
   pagination: { page: number; limit: number },
-  includeNonActive = false
+  viewerRole?: string | null
 ) => {
-  const { page, limit } = pagination;
+  const { page = 1, limit: rawLimit = 20 } = pagination;
+  const limit = Math.min(rawLimit, config.pagination.maxLimit);
   const skip = (page - 1) * limit;
 
-  // Build where clause
-  const where: any = {};
+  const viewerId = filters.excludeProviderUserId;
+  const isAdmin = isAdminRole(viewerRole);
 
-  // Only show active services for public queries
-  if (!includeNonActive) {
-    where.status = ServiceStatus.ACTIVE;
-  } else if (filters.status) {
-    where.status = filters.status;
+  let isOwnList = false;
+  if (viewerId && filters.providerId && !isAdmin) {
+    const listedProvider = await prisma.serviceProvider.findUnique({
+      where: { id: filters.providerId },
+      select: { userId: true },
+    });
+    isOwnList = listedProvider?.userId === viewerId;
   }
+
+  const where: Prisma.ServiceWhereInput = {
+    status: (isAdmin || isOwnList) && filters.status ? filters.status : ServiceStatus.ACTIVE,
+  };
 
   if (filters.categoryId) {
     where.categoryId = filters.categoryId;
@@ -163,10 +298,11 @@ export const getServices = async (
     where.providerId = filters.providerId;
   }
 
-  if (filters.minPrice !== undefined || filters.maxPrice !== undefined) {
-    where.price = {};
-    if (filters.minPrice !== undefined) where.price.gte = filters.minPrice;
-    if (filters.maxPrice !== undefined) where.price.lte = filters.maxPrice;
+  if (filters.minPrice != null || filters.maxPrice != null) {
+    where.price = {
+      ...(filters.minPrice != null ? { gte: filters.minPrice } : {}),
+      ...(filters.maxPrice != null ? { lte: filters.maxPrice } : {}),
+    };
   }
 
   if (filters.search) {
@@ -179,21 +315,23 @@ export const getServices = async (
   }
 
   // Provider-relation filters (city, state, geo radius, exclude-self)
-  const providerWhere: any = {};
+  const providerWhere: Prisma.ServiceProviderWhereInput = {};
   if (filters.city) {
     providerWhere.city = { equals: sanitizeSearchQuery(filters.city), mode: 'insensitive' };
   }
   if (filters.state) {
     providerWhere.state = { equals: sanitizeSearchQuery(filters.state), mode: 'insensitive' };
   }
-  if (filters.excludeProviderUserId) {
-    providerWhere.userId = { not: filters.excludeProviderUserId };
+  if (viewerId && !isOwnList) {
+    // The viewer's own listings, and providers they've blocked
+    providerWhere.userId = {
+      notIn: [viewerId, ...(await getBlockedUserIds(viewerId))],
+    };
   }
 
   // Geo radius requires lat + lon. radiusKm falls back to config default.
-  const hasGeo =
-    filters.latitude !== undefined && filters.longitude !== undefined;
-  if (hasGeo) {
+  const { latitude, longitude } = filters;
+  if (latitude != null && longitude != null) {
     const radius = Math.min(
       filters.radiusKm ?? config.geo.defaultRadiusKm,
       config.geo.maxRadiusKm
@@ -203,34 +341,24 @@ export const getServices = async (
     const candidateProviders = await prisma.serviceProvider.findMany({
       where: {
         ...providerWhere,
-        latitude: { not: null },
-        longitude: { not: null },
+        ...boundingBox(latitude, longitude, radius),
       },
       select: { id: true, latitude: true, longitude: true },
+      take: MAX_NEARBY_CANDIDATES,
     });
 
     const nearbyIds = candidateProviders
       .filter((p) =>
-        haversineDistance(filters.latitude!, filters.longitude!, p.latitude!, p.longitude!) <= radius
+        haversineDistance(latitude, longitude, p.latitude!, p.longitude!) <= radius
       )
       .map((p) => p.id);
 
-    if (nearbyIds.length === 0) {
-      return {
-        items: [],
-        total: 0,
-        page,
-        limit,
-        totalPages: 0,
-        hasNextPage: false,
-        hasPreviousPage: false,
-      };
+    // Nobody nearby, or the requested provider isn't
+    if (nearbyIds.length === 0 || (filters.providerId && !nearbyIds.includes(filters.providerId))) {
+      return emptyPage(page, limit);
     }
 
-    if (where.providerId) {
-      // Intersect explicit providerId with the geo set
-      where.providerId = nearbyIds.includes(where.providerId) ? where.providerId : '__no_match__';
-    } else {
+    if (!filters.providerId) {
       where.providerId = { in: nearbyIds };
     }
   } else if (Object.keys(providerWhere).length > 0) {
@@ -255,7 +383,7 @@ export const getServices = async (
   const totalPages = Math.ceil(total / limit);
 
   return {
-    items: items.map(formatService),
+    items: await formatServices(items),
     total,
     page,
     limit,
@@ -293,15 +421,20 @@ export const getNearbyServices = async (input: {
   const rawLimit = input.pagination?.limit ?? 20;
   const limit = Math.min(rawLimit, config.pagination.maxLimit);
 
+  // The viewer's own listings, and providers they've blocked
+  const hiddenUserIds = excludeProviderUserId
+    ? [excludeProviderUserId, ...(await getBlockedUserIds(excludeProviderUserId))]
+    : [];
+
   // Resolve providers within radius
   const candidateProviders = await prisma.serviceProvider.findMany({
     where: {
       verificationStatus: VerificationStatus.VERIFIED,
-      latitude: { not: null },
-      longitude: { not: null },
-      ...(excludeProviderUserId ? { userId: { not: excludeProviderUserId } } : {}),
+      ...boundingBox(latitude, longitude, radius),
+      ...(hiddenUserIds.length > 0 ? { userId: { notIn: hiddenUserIds } } : {}),
     },
     select: { id: true, latitude: true, longitude: true },
+    take: MAX_NEARBY_CANDIDATES,
   });
 
   const distanceById = new Map<string, number>();
@@ -314,28 +447,23 @@ export const getNearbyServices = async (input: {
 
   if (distanceById.size === 0) {
     return {
-      items: [],
-      total: 0,
-      page,
-      limit,
-      totalPages: 0,
-      hasNextPage: false,
-      hasPreviousPage: false,
+      ...emptyPage(page, limit),
       radiusKm: radius,
       searchLocation: { latitude, longitude },
     };
   }
 
-  const where: any = {
+  const where: Prisma.ServiceWhereInput = {
     status: ServiceStatus.ACTIVE,
     providerId: { in: Array.from(distanceById.keys()) },
   };
 
   if (categoryId) where.categoryId = categoryId;
-  if (minPrice !== undefined || maxPrice !== undefined) {
-    where.price = {};
-    if (minPrice !== undefined) where.price.gte = minPrice;
-    if (maxPrice !== undefined) where.price.lte = maxPrice;
+  if (minPrice != null || maxPrice != null) {
+    where.price = {
+      ...(minPrice != null ? { gte: minPrice } : {}),
+      ...(maxPrice != null ? { lte: maxPrice } : {}),
+    };
   }
   if (search) {
     const sanitizedSearch = sanitizeSearchQuery(search);
@@ -350,6 +478,7 @@ export const getNearbyServices = async (input: {
   const allMatches = await prisma.service.findMany({
     where,
     include: { provider: true, category: true },
+    take: MAX_NEARBY_CANDIDATES,
   });
 
   const sorted = allMatches
@@ -360,11 +489,12 @@ export const getNearbyServices = async (input: {
   const totalPages = Math.ceil(total / limit);
   const skip = (page - 1) * limit;
   const pageItems = sorted.slice(skip, skip + limit);
+  const formatted = await formatServices(pageItems.map(({ service }) => service));
 
   return {
-    items: pageItems.map(({ service, distanceKm }) => ({
-      ...formatService(service),
-      distanceKm,
+    items: formatted.map((service, index) => ({
+      ...service,
+      distanceKm: pageItems[index].distanceKm,
     })),
     total,
     page,
@@ -379,23 +509,32 @@ export const getNearbyServices = async (input: {
 
 /**
  * Get Service by ID
+ *
+ * An ACTIVE service is public, except between a viewer and a provider where
+ * either has blocked the other. Services in any other status are only shown to
+ * the owning provider and admins. Everyone else gets NOT_FOUND.
  */
-export const getServiceById = async (serviceId: string) => {
-  const service = await prisma.service.findUnique({
-    where: { id: serviceId },
-    include: {
-      provider: true,
-      category: true,
-    },
-  });
+export const getServiceById = async (serviceId: string, viewer?: ServiceViewer | null) => {
+  const service = await findServiceWithRelations(serviceId);
 
   if (!service) {
-    throw new GraphQLError('Service not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw serviceNotFound();
   }
 
-  return formatService(service);
+  const canSeeAnyStatus =
+    isAdminRole(viewer?.role) || (viewer != null && service.provider.userId === viewer.userId);
+
+  if (!canSeeAnyStatus) {
+    if (service.status !== ServiceStatus.ACTIVE) {
+      throw serviceNotFound();
+    }
+
+    if (viewer && (await isBlockedBetween(viewer.userId, service.provider.userId))) {
+      throw serviceNotFound();
+    }
+  }
+
+  return formatOneService(service);
 };
 
 /**
@@ -403,7 +542,7 @@ export const getServiceById = async (serviceId: string) => {
  */
 export const getMyServices = async (userId: string, pagination: { page: number; limit: number }) => {
   const provider = await getProviderForUser(userId);
-  
+
   const { page, limit } = pagination;
   const skip = (page - 1) * limit;
 
@@ -426,7 +565,7 @@ export const getMyServices = async (userId: string, pagination: { page: number; 
   const totalPages = Math.ceil(total / limit);
 
   return {
-    items: items.map(formatService),
+    items: await formatServices(items),
     total,
     page,
     limit,
@@ -452,15 +591,20 @@ export const createService = async (userId: string, input: CreateServiceInput) =
   const { categoryId, name, description, price, duration, images } = input;
 
   // Sanitize and validate inputs
-  const sanitizedName = validateName(name, 'Service name');
+  const sanitizedName = validateBusinessName(name, 'Service name');
   const sanitizedDescription = validateText(
     sanitizeBasic(description),
     'Description',
     10,
     MAX_LENGTHS.DESCRIPTION
   );
+  assertAcceptableText(sanitizedName, 'Service name');
+  assertAcceptableText(sanitizedDescription, 'Description');
   const validatedPrice = validateAmount(price, 'Price');
   const validatedDuration = validateAmount(duration, 'Duration');
+  const validatedImages = validateServiceImages(images);
+
+  await assertTermsAccepted(userId);
 
   // Validate category exists
   const category = await prisma.serviceCategory.findUnique({
@@ -479,20 +623,7 @@ export const createService = async (userId: string, input: CreateServiceInput) =
     });
   }
 
-  // Generate slug
-  const baseSlug = generateSlug(sanitizedName);
-  
-  // Check for duplicate slug for this provider
-  const existingService = await prisma.service.findFirst({
-    where: {
-      providerId: provider.id,
-      slug: baseSlug,
-    },
-  });
-
-  const slug = existingService
-    ? `${baseSlug}-${Date.now()}`
-    : baseSlug;
+  const slug = await uniqueServiceSlug(provider.id, sanitizedName);
 
   // Create service
   const service = await prisma.service.create({
@@ -504,7 +635,7 @@ export const createService = async (userId: string, input: CreateServiceInput) =
       description: sanitizedDescription,
       price: validatedPrice,
       duration: validatedDuration,
-      images: images || [],
+      images: validatedImages,
       status: ServiceStatus.DRAFT,
     },
     include: {
@@ -513,7 +644,7 @@ export const createService = async (userId: string, input: CreateServiceInput) =
     },
   });
 
-  return formatService(service);
+  return formatOneService(service);
 };
 
 /**
@@ -528,9 +659,7 @@ export const updateService = async (userId: string, serviceId: string, input: Up
   });
 
   if (!service) {
-    throw new GraphQLError('Service not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw serviceNotFound();
   }
 
   // Check ownership
@@ -540,11 +669,16 @@ export const updateService = async (userId: string, serviceId: string, input: Up
     });
   }
 
-  // Build update data
-  const updateData: any = {};
+  // Changing what customers see counts as posting
+  if (input.name !== undefined || input.description !== undefined || input.images !== undefined) {
+    await assertTermsAccepted(userId);
+  }
 
-  if (input.categoryId !== undefined) {
-    // Validate category
+  // Build update data
+  const updateData: Prisma.ServiceUncheckedUpdateInput = {};
+
+  // Moving to another category needs an active one; keeping the current one is fine
+  if (input.categoryId != null && input.categoryId !== service.categoryId) {
     const category = await prisma.serviceCategory.findUnique({
       where: { id: input.categoryId },
     });
@@ -555,34 +689,58 @@ export const updateService = async (userId: string, serviceId: string, input: Up
       });
     }
 
+    if (!category.isActive) {
+      throw new GraphQLError('Cannot add services to an inactive category', {
+        extensions: { code: 'CATEGORY_INACTIVE' },
+      });
+    }
+
     updateData.categoryId = input.categoryId;
   }
 
+  let newName: string | undefined;
   if (input.name !== undefined) {
-    updateData.name = validateName(input.name, 'Service name');
-    updateData.slug = generateSlug(updateData.name);
+    newName = validateBusinessName(input.name, 'Service name');
+    assertAcceptableText(newName, 'Service name');
+    updateData.name = newName;
   }
 
   if (input.description !== undefined) {
-    updateData.description = validateText(
+    const description = validateText(
       sanitizeBasic(input.description),
       'Description',
       10,
       MAX_LENGTHS.DESCRIPTION
     );
+    assertAcceptableText(description, 'Description');
+    updateData.description = description;
   }
   if (input.price !== undefined) updateData.price = validateAmount(input.price, 'Price');
   if (input.duration !== undefined) updateData.duration = validateAmount(input.duration, 'Duration');
-  if (input.images !== undefined) updateData.images = input.images;
-  
+  if (input.images !== undefined) updateData.images = validateServiceImages(input.images);
+
   // Status can only be changed to DRAFT or INACTIVE by provider
   if (input.status !== undefined) {
+    // A suspension stays until an admin acts on it, so the provider can't
+    // move the service out of it and resubmit
+    if (service.status === ServiceStatus.SUSPENDED) {
+      throw new GraphQLError("This service has been suspended by an admin, so its status can't be changed", {
+        extensions: { code: 'SERVICE_SUSPENDED' },
+      });
+    }
+
     if (input.status !== ServiceStatus.DRAFT && input.status !== ServiceStatus.INACTIVE) {
       throw new GraphQLError('Invalid status. You can only set status to DRAFT or INACTIVE', {
         extensions: { code: 'INVALID_STATUS' },
       });
     }
     updateData.status = input.status;
+  }
+
+  // Once everything else is valid, give a renamed service a slug no other of
+  // the provider's services uses
+  if (newName !== undefined && newName !== service.name) {
+    updateData.slug = await uniqueServiceSlug(provider.id, newName, service.id);
   }
 
   const updated = await prisma.service.update({
@@ -594,7 +752,28 @@ export const updateService = async (userId: string, serviceId: string, input: Up
     },
   });
 
-  return formatService(updated);
+  // An approved listing stays live when edited, so admins get to check what
+  // customers now see
+  const listingChanged =
+    updated.name !== service.name ||
+    updated.description !== service.description ||
+    JSON.stringify(updated.images) !== JSON.stringify(service.images);
+
+  if (service.status === ServiceStatus.ACTIVE && listingChanged) {
+    await flagContent({
+      targetType: 'SERVICE',
+      targetId: service.id,
+      targetUserId: userId,
+      reason: 'OTHER',
+      details: 'Automatic: live listing edited after approval',
+      snapshot: {
+        before: { name: service.name, description: service.description, images: service.images },
+        after: { name: updated.name, description: updated.description, images: updated.images },
+      },
+    });
+  }
+
+  return formatOneService(updated);
 };
 
 /**
@@ -612,9 +791,7 @@ export const deleteService = async (userId: string, serviceId: string) => {
   });
 
   if (!service) {
-    throw new GraphQLError('Service not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw serviceNotFound();
   }
 
   // Check ownership
@@ -654,9 +831,7 @@ export const submitServiceForApproval = async (userId: string, serviceId: string
   });
 
   if (!service) {
-    throw new GraphQLError('Service not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw serviceNotFound();
   }
 
   // Check ownership
@@ -684,7 +859,7 @@ export const submitServiceForApproval = async (userId: string, serviceId: string
     },
   });
 
-  return formatService(updated);
+  return formatOneService(updated);
 };
 
 // ==================
@@ -721,7 +896,7 @@ export const getPendingServices = async (pagination: { page: number; limit: numb
   const totalPages = Math.ceil(total / limit);
 
   return {
-    items: items.map(formatService),
+    items: await formatServices(items),
     total,
     page,
     limit,
@@ -731,96 +906,209 @@ export const getPendingServices = async (pagination: { page: number; limit: numb
   };
 };
 
+const cannotApprove = () =>
+  new GraphQLError('Only services that are pending approval or suspended can be approved', {
+    extensions: { code: 'INVALID_STATUS' },
+  });
+
+const notPendingApproval = () =>
+  new GraphQLError('Only services pending approval can be rejected', {
+    extensions: { code: 'INVALID_STATUS' },
+  });
+
+const alreadySuspended = () =>
+  new GraphQLError('Service is already suspended', {
+    extensions: { code: 'ALREADY_SUSPENDED' },
+  });
+
 /**
- * Approve Service (Admin)
+ * Tell the provider about an admin's decision on their service, in the app and
+ * by push
  */
-export const approveService = async (serviceId: string) => {
-  const service = await prisma.service.findUnique({
-    where: { id: serviceId },
-  });
+const notifyServiceDecision = async (
+  service: ServiceWithRelations,
+  decision: ServiceDecision,
+  reason = ''
+) => {
+  const userId = service.provider.userId;
+  const { name } = service;
 
-  if (!service) {
-    throw new GraphQLError('Service not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
-  }
+  const sendInApp: Record<ServiceDecision, () => Promise<unknown>> = {
+    approved: () => notifyServiceApproved(userId, service.id, name),
+    rejected: () => notifyServiceRejected(userId, service.id, name, reason),
+    suspended: () =>
+      createNotification({
+        userId,
+        type: NotificationType.SERVICE_SUSPENDED,
+        title: 'Service Suspended',
+        message: `Your service "${name}" has been suspended: ${reason}`,
+        entityType: 'service',
+        entityId: service.id,
+      }),
+    reinstated: () =>
+      createNotification({
+        userId,
+        type: NotificationType.SERVICE_APPROVED,
+        title: 'Service Reinstated',
+        message: `Your service "${name}" has been reinstated and is live again`,
+        entityType: 'service',
+        entityId: service.id,
+      }),
+  };
 
-  const updated = await prisma.service.update({
-    where: { id: serviceId },
-    data: {
-      status: ServiceStatus.ACTIVE,
-    },
-    include: {
-      provider: true,
-      category: true,
-    },
-  });
+  const push: Record<ServiceDecision, { title: string; message: string }> = {
+    approved: { title: 'Service Approved', message: `Your service "${name}" has been approved and is now live` },
+    rejected: { title: 'Service Rejected', message: `Your service "${name}" was rejected: ${reason}` },
+    suspended: { title: 'Service Suspended', message: `Your service "${name}" has been suspended: ${reason}` },
+    reinstated: { title: 'Service Reinstated', message: `Your service "${name}" has been reinstated and is live again` },
+  };
 
-  // TODO: Send approval notification to provider
-
-  return formatService(updated);
+  await notifySafely('service notification', sendInApp[decision]);
+  await notifySafely('service push notification', () =>
+    sendPushToUser(userId, {
+      ...push[decision],
+      data: { type: 'SERVICE', serviceId: service.id, action: decision },
+    })
+  );
 };
 
 /**
- * Reject Service (Admin)
+ * Approve Service (Admin). Makes a service pending approval live, or reinstates
+ * a suspended one. Approval clears any rejection or suspension reason.
  */
-// TODO(notify): `reason` is required by the schema but never stored or sent,
-// so providers are not told why their service was rejected.
-export const rejectService = async (serviceId: string, _reason: string) => {
+export const approveService = async (serviceId: string, actor?: ModerationActor) => {
   const service = await prisma.service.findUnique({
     where: { id: serviceId },
   });
 
   if (!service) {
-    throw new GraphQLError('Service not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw serviceNotFound();
   }
 
-  const updated = await prisma.service.update({
-    where: { id: serviceId },
-    data: {
-      status: ServiceStatus.DRAFT,
-    },
-    include: {
-      provider: true,
-      category: true,
-    },
+  const isReinstatement = service.status === ServiceStatus.SUSPENDED;
+
+  if (service.status !== ServiceStatus.PENDING_APPROVAL && !isReinstatement) {
+    throw cannotApprove();
+  }
+
+  // Only while the status is still the one checked, in case another admin decided meanwhile
+  const { count } = await prisma.service.updateMany({
+    where: { id: serviceId, status: service.status },
+    data: { status: ServiceStatus.ACTIVE, rejectionReason: null, suspensionReason: null },
   });
 
-  // TODO: Send rejection notification with reason
+  if (count === 0) {
+    throw cannotApprove();
+  }
 
-  return formatService(updated);
+  const updated = await findServiceWithRelations(serviceId);
+  if (!updated) {
+    throw serviceNotFound();
+  }
+
+  await notifyServiceDecision(updated, isReinstatement ? 'reinstated' : 'approved');
+  await recordModeration(actor, {
+    action: 'APPROVE_SERVICE',
+    targetType: 'Service',
+    targetId: serviceId,
+    previousValue: isReinstatement
+      ? { status: service.status, suspensionReason: service.suspensionReason }
+      : { status: service.status },
+    newValue: { status: ServiceStatus.ACTIVE },
+  });
+
+  return formatOneService(updated);
 };
 
 /**
- * Suspend Service (Admin)
+ * Reject Service (Admin). Sends a service pending approval back to DRAFT, with
+ * the reason saved for the provider.
  */
-// TODO(notify): `reason` is required by the schema but never stored or sent,
-// so providers are not told why their service was suspended.
-export const suspendService = async (serviceId: string, _reason: string) => {
+export const rejectService = async (serviceId: string, reason: string, actor?: ModerationActor) => {
+  const safeReason = validateModerationReason(reason);
+
   const service = await prisma.service.findUnique({
     where: { id: serviceId },
   });
 
   if (!service) {
-    throw new GraphQLError('Service not found', {
-      extensions: { code: 'NOT_FOUND' },
-    });
+    throw serviceNotFound();
   }
 
-  const updated = await prisma.service.update({
-    where: { id: serviceId },
-    data: {
-      status: ServiceStatus.SUSPENDED,
-    },
-    include: {
-      provider: true,
-      category: true,
-    },
+  if (service.status !== ServiceStatus.PENDING_APPROVAL) {
+    throw notPendingApproval();
+  }
+
+  const { count } = await prisma.service.updateMany({
+    where: { id: serviceId, status: ServiceStatus.PENDING_APPROVAL },
+    data: { status: ServiceStatus.DRAFT, rejectionReason: safeReason },
   });
 
-  // TODO: Send suspension notification with reason
+  if (count === 0) {
+    throw notPendingApproval();
+  }
 
-  return formatService(updated);
+  const updated = await findServiceWithRelations(serviceId);
+  if (!updated) {
+    throw serviceNotFound();
+  }
+
+  await notifyServiceDecision(updated, 'rejected', safeReason);
+  await recordModeration(actor, {
+    action: 'REJECT_SERVICE',
+    targetType: 'Service',
+    targetId: serviceId,
+    previousValue: { status: service.status },
+    newValue: { status: ServiceStatus.DRAFT },
+    reason: safeReason,
+  });
+
+  return formatOneService(updated);
+};
+
+/**
+ * Suspend Service (Admin, and report decisions). Takes down a service in any
+ * status except SUSPENDED, with the reason saved for the provider. The audit
+ * log is written when an actor is given.
+ */
+export const suspendService = async (serviceId: string, reason: string, actor?: ModerationActor) => {
+  const safeReason = validateModerationReason(reason);
+
+  const service = await prisma.service.findUnique({
+    where: { id: serviceId },
+  });
+
+  if (!service) {
+    throw serviceNotFound();
+  }
+
+  if (service.status === ServiceStatus.SUSPENDED) {
+    throw alreadySuspended();
+  }
+
+  const { count } = await prisma.service.updateMany({
+    where: { id: serviceId, status: { not: ServiceStatus.SUSPENDED } },
+    data: { status: ServiceStatus.SUSPENDED, suspensionReason: safeReason },
+  });
+
+  if (count === 0) {
+    throw alreadySuspended();
+  }
+
+  const updated = await findServiceWithRelations(serviceId);
+  if (!updated) {
+    throw serviceNotFound();
+  }
+
+  await notifyServiceDecision(updated, 'suspended', safeReason);
+  await recordModeration(actor, {
+    action: 'SUSPEND_SERVICE',
+    targetType: 'Service',
+    targetId: serviceId,
+    previousValue: { status: service.status },
+    newValue: { status: ServiceStatus.SUSPENDED },
+    reason: safeReason,
+  });
+
+  return formatOneService(updated);
 };

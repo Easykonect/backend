@@ -30,12 +30,17 @@ jest.mock('@/services/push.service', () => ({
   updatePushPreference: jest.fn(),
 }));
 
+jest.mock('@/services/token.service', () => ({
+  endAllSessions: jest.fn(),
+}));
+
 import prisma from '@/lib/prisma';
 import {
   registerPushToken,
   unregisterPushToken,
   updatePushPreference,
 } from '@/services/push.service';
+import { endAllSessions } from '@/services/token.service';
 
 import {
   enablePushNotifications,
@@ -61,6 +66,7 @@ const mockUser = {
   pushEnabled: true,
   oneSignalPlayerId: playerId,
   status: 'ACTIVE',
+  deletedAt: null,
 };
 
 const mockUserNoPush = {
@@ -142,13 +148,13 @@ describe('getPushStatus', () => {
 describe('enablePushNotifications', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('calls registerPushToken with userId and playerId', async () => {
+  it('registers the device and switches push on, even after the user switched it off', async () => {
     (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
     (registerPushToken as jest.Mock).mockResolvedValue(pushResult);
 
     const result = await enablePushNotifications(userId, playerId);
 
-    expect(registerPushToken).toHaveBeenCalledWith(userId, playerId);
+    expect(registerPushToken).toHaveBeenCalledWith(userId, playerId, { enable: true });
     expect(result.success).toBe(true);
     expect(result.pushEnabled).toBe(true);
   });
@@ -329,6 +335,52 @@ describe('updateMySettings', () => {
     ).rejects.toMatchObject({ extensions: { code: 'VALIDATION_ERROR' } });
   });
 
+  it.each([
+    [{ language: '' }, 'Invalid language code. Use ISO 639-1 format (e.g. "en", "fr")'],
+    [{ currency: '' }, 'Invalid currency code. Use ISO 4217 format (e.g. "NGN", "USD")'],
+    [{ timezone: '' }, 'Invalid timezone. Use an IANA time zone name (e.g. "Africa/Lagos")'],
+  ])('rejects the empty string in %j instead of saving it', async (input, message) => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
+
+    await expect(updateMySettings(userId, input)).rejects.toMatchObject({
+      message,
+      extensions: { code: 'VALIDATION_ERROR' },
+    });
+    expect(prisma.userSettings.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each(['Mars/Olympus', 'Lagos', 'Africa Lagos', '+01:00', `Africa/${'x'.repeat(70)}`])(
+    'rejects the timezone %p',
+    async (timezone) => {
+      (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
+
+      await expect(updateMySettings(userId, { timezone })).rejects.toMatchObject({
+        extensions: { code: 'VALIDATION_ERROR' },
+      });
+    }
+  );
+
+  it.each(['Africa/Lagos', 'Europe/London', 'America/Argentina/Buenos_Aires', 'UTC', 'Etc/GMT+1'])(
+    'accepts the timezone %p',
+    async (timezone) => {
+      (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
+      (prisma.userSettings.upsert as jest.Mock).mockResolvedValue({ ...mockSettings, timezone });
+
+      await expect(updateMySettings(userId, { timezone })).resolves.toMatchObject({ success: true });
+    }
+  );
+
+  it('keeps the current value for fields sent as null', async () => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
+    (prisma.userSettings.upsert as jest.Mock).mockResolvedValue(mockSettings);
+
+    await updateMySettings(userId, { language: null, notifyPromotions: null, notifyMessages: false });
+
+    const upsertCall = (prisma.userSettings.upsert as jest.Mock).mock.calls[0][0];
+    expect(upsertCall.update).toEqual({ notifyMessages: false });
+    expect(upsertCall.create).toMatchObject({ language: 'en', notifyPromotions: false, notifyMessages: false });
+  });
+
   it('accepts valid ISO 639-1 language codes', async () => {
     (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
     (prisma.userSettings.upsert as jest.Mock).mockResolvedValue({ ...mockSettings, language: 'fr' });
@@ -405,17 +457,62 @@ describe('resetMySettings', () => {
 describe('deactivateMyAccount', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('sets user status to DEACTIVATED', async () => {
+  const lastUpdateData = () => (prisma.user.update as jest.Mock).mock.calls[0][0].data;
+
+  it('sets user status to DEACTIVATED and records when', async () => {
     (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
     (prisma.user.update as jest.Mock).mockResolvedValue({ ...mockUser, status: 'DEACTIVATED' });
     (unregisterPushToken as jest.Mock).mockResolvedValue({ success: true, pushEnabled: false });
 
     const result = await deactivateMyAccount(userId);
 
-    expect(prisma.user.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { status: 'DEACTIVATED' } })
-    );
-    expect(result.success).toBe(true);
+    expect(lastUpdateData()).toEqual({
+      status: 'DEACTIVATED',
+      deactivatedAt: expect.any(Date),
+      deactivationReason: null,
+      tokenInvalidatedAt: expect.any(Date),
+    });
+    expect(result).toEqual({
+      success: true,
+      message: 'Your account has been deactivated. Sign in again to reactivate it.',
+    });
+  });
+
+  it('ends every session', async () => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
+    (prisma.user.update as jest.Mock).mockResolvedValue({ ...mockUser, status: 'DEACTIVATED' });
+
+    await deactivateMyAccount(userId);
+
+    expect(endAllSessions).toHaveBeenCalledWith(userId);
+  });
+
+  it('stores the reason as plain text', async () => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
+    (prisma.user.update as jest.Mock).mockResolvedValue({ ...mockUser, status: 'DEACTIVATED' });
+
+    await deactivateMyAccount(userId, '  <b>Moving</b> abroad & taking a break ');
+
+    expect(lastUpdateData().deactivationReason).toBe('Moving abroad & taking a break');
+  });
+
+  it('stores no reason for a blank one', async () => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
+    (prisma.user.update as jest.Mock).mockResolvedValue({ ...mockUser, status: 'DEACTIVATED' });
+
+    await deactivateMyAccount(userId, '   ');
+
+    expect(lastUpdateData().deactivationReason).toBeNull();
+  });
+
+  it('refuses a reason over 500 characters', async () => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
+
+    await expect(deactivateMyAccount(userId, 'x'.repeat(501))).rejects.toMatchObject({
+      message: 'Reason must be at most 500 characters',
+      extensions: { code: 'INVALID_INPUT' },
+    });
+    expect(prisma.user.update).not.toHaveBeenCalled();
   });
 
   it('also removes push token on deactivation', async () => {
@@ -444,6 +541,16 @@ describe('deactivateMyAccount', () => {
       extensions: { code: 'NOT_FOUND' },
     });
   });
+
+  it('refuses to deactivate a suspended account', async () => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue({ ...mockUser, status: 'SUSPENDED' });
+
+    await expect(deactivateMyAccount(userId)).rejects.toMatchObject({
+      extensions: { code: 'BAD_REQUEST' },
+    });
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(endAllSessions).not.toHaveBeenCalled();
+  });
 });
 
 // ==================
@@ -453,14 +560,16 @@ describe('deactivateMyAccount', () => {
 describe('reactivateMyAccount', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('sets user status back to ACTIVE', async () => {
+  it('sets user status back to ACTIVE and clears the deactivation', async () => {
     (prisma.user.findUnique as jest.Mock).mockResolvedValue({ ...mockUser, status: 'DEACTIVATED' });
     (prisma.user.update as jest.Mock).mockResolvedValue({ ...mockUser, status: 'ACTIVE' });
 
     const result = await reactivateMyAccount(userId);
 
     expect(prisma.user.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { status: 'ACTIVE' } })
+      expect.objectContaining({
+        data: { status: 'ACTIVE', deactivatedAt: null, deactivationReason: null },
+      })
     );
     expect(result.success).toBe(true);
   });
@@ -480,5 +589,18 @@ describe('reactivateMyAccount', () => {
     await expect(reactivateMyAccount(userId)).rejects.toMatchObject({
       extensions: { code: 'NOT_FOUND' },
     });
+  });
+
+  it('throws NOT_FOUND for a deleted account', async () => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue({
+      ...mockUser,
+      status: 'DEACTIVATED',
+      deletedAt: new Date(),
+    });
+
+    await expect(reactivateMyAccount(userId)).rejects.toMatchObject({
+      extensions: { code: 'NOT_FOUND' },
+    });
+    expect(prisma.user.update).not.toHaveBeenCalled();
   });
 });

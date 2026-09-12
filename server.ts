@@ -15,6 +15,19 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 require('dotenv').config();
 
+// The compiled server keeps tsconfig's `@/…` import paths, which Node can't
+// resolve by itself. Map them to the src folder next to this file (dist/src
+// when built, src when run from the repository).
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const Module = require('module');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const path = require('path');
+const resolveFilename = Module._resolveFilename;
+Module._resolveFilename = function (this: unknown, request: string, ...rest: unknown[]) {
+  const mapped = request.startsWith('@/') ? path.join(__dirname, 'src', request.slice(2)) : request;
+  return resolveFilename.call(this, mapped, ...rest);
+};
+
 // Import and start the server
 import('./src/lib/server').then((module) => {
   module.startServer().catch((error) => {

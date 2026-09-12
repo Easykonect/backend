@@ -159,9 +159,11 @@ import {
   uploadServiceImages,
   removeServiceImage,
   uploadProviderDocuments,
+  addProviderDocuments,
   removeProviderDocument,
   generateSignedUploadParams,
   getUploadStats,
+  getDocumentViewUrl,
 } from '@/services/upload.service';
 
 import {
@@ -169,6 +171,7 @@ import {
   getConversationById,
   getMyConversations,
   archiveConversation,
+  unarchiveConversation,
   sendMessage,
   getConversationMessages,
   markMessagesAsRead,
@@ -187,11 +190,10 @@ import {
   deleteReadNotifications,
   getUnreadNotificationCount,
   getNotificationStats,
-  sendSystemAnnouncement,
-  broadcastNotification,
-  type BroadcastTarget,
+  sendAdminAnnouncement,
+  sendAdminBroadcast,
+  type BroadcastInput,
 } from '@/services/notification.service';
-import { rateLimit } from '@/lib/redis';
 
 import {
   registerPushToken,
@@ -202,6 +204,7 @@ import {
 import {
   initializePayment,
   verifyPayment,
+  payWithWallet,
   processRefund,
   getPaymentById,
   getPaymentByBookingId,
@@ -214,9 +217,9 @@ import {
 
 // Wallet & Bank Services (use bank.service for comprehensive bank functions)
 import {
+  ensureWallet,
   getOrCreateWallet,
   getWalletTransactions,
-  payWithWallet,
   adjustWalletBalance,
 } from '@/services/wallet.service';
 
@@ -239,6 +242,9 @@ import {
   processWithdrawal,
   rejectWithdrawal,
   retryWithdrawal,
+  getProviderWithdrawalById,
+  getWithdrawalProviderSummary,
+  type WithdrawalProviderSummary,
 } from '@/services/withdrawal.service';
 
 import {
@@ -255,7 +261,32 @@ import {
   getProviderEarningsReport,
   getAdminPaymentAnalytics,
   getRefundStats,
+  getTopEarningProviders,
 } from '@/services/payment-analytics.service';
+
+import {
+  getPlatformSettings,
+  updateCommissionRate,
+} from '@/services/platform-settings.service';
+
+import type { ModerationAction, ReportReason, ReportStatus, ReportTargetType } from '@prisma/client';
+
+import {
+  blockUser,
+  unblockUser,
+  getMyBlockedUsers,
+} from '@/services/block.service';
+
+import {
+  createReport,
+  getMyReports,
+  getReports,
+  getReportById,
+  getReportedConversationMessages,
+  resolveReport,
+} from '@/services/report.service';
+
+import { acceptTerms, getTermsStatus } from '@/services/terms.service';
 
 import {
   setPayoutSchedule,
@@ -267,10 +298,9 @@ import {
 
 import {
   getAuditLogs,
-  getAuditLogsForTarget,
 } from '@/services/audit.service';
 
-import { requireAuth, requireRole, requireAnyRole, type GraphQLContext } from '@/middleware';
+import { requireAuth, requireRole, requireAnyRole, getBearerToken, type GraphQLContext } from '@/middleware';
 import { UserRole, type ServiceStatusType } from '@/constants';
 
 import {
@@ -306,58 +336,47 @@ const requireSuperAdminAuth = (context: GraphQLContext) => {
 };
 
 /**
- * Translate the GraphQL BroadcastTargetInput into the service-layer
- * BroadcastTarget discriminated union, validating that the fields
- * required for the chosen mode are present.
+ * Helper: Require a service provider. Checked by exact role: requireRole ranks
+ * roles, which would let admins into provider-only operations.
  */
-const buildBroadcastTarget = (input: {
-  mode: 'USER_IDS' | 'ROLE' | 'ALL' | 'LOCATION';
-  userIds?: string[];
-  roles?: string[];
-  city?: string;
-  state?: string;
-}): BroadcastTarget => {
-  switch (input.mode) {
-    case 'USER_IDS':
-      if (!input.userIds || input.userIds.length === 0) {
-        throw new GraphQLError('USER_IDS target requires a non-empty userIds list', {
-          extensions: { code: 'INVALID_INPUT' },
-        });
-      }
-      return { mode: 'USER_IDS', userIds: input.userIds };
-    case 'ROLE':
-      if (!input.roles || input.roles.length === 0) {
-        throw new GraphQLError('ROLE target requires a non-empty roles list', {
-          extensions: { code: 'INVALID_INPUT' },
-        });
-      }
-      return { mode: 'ROLE', roles: input.roles };
-    case 'ALL':
-      return { mode: 'ALL' };
-    case 'LOCATION':
-      if (!input.city && !input.state) {
-        throw new GraphQLError('LOCATION target requires city and/or state', {
-          extensions: { code: 'INVALID_INPUT' },
-        });
-      }
-      return { mode: 'LOCATION', city: input.city, state: input.state };
-  }
+const requireProviderAuth = (context: GraphQLContext) => {
+  return requireAnyRole(context, [UserRole.SERVICE_PROVIDER]);
 };
 
-const parseMetadataJson = (raw?: string | null): Record<string, any> | undefined => {
-  if (!raw) return undefined;
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('metadataJson must encode a JSON object');
-    }
-    return parsed;
-  } catch (err) {
-    throw new GraphQLError(`metadataJson is not valid JSON: ${(err as Error).message}`, {
-      extensions: { code: 'INVALID_INPUT' },
-    });
-  }
+const providerNotFound = () =>
+  new GraphQLError('Provider profile not found', {
+    extensions: { code: 'PROVIDER_NOT_FOUND' },
+  });
+
+/**
+ * The signed-in admin behind a provider or service decision, for the audit log
+ */
+const moderationActor = (admin: { userId: string; role: string }, context: GraphQLContext) => ({
+  id: admin.userId,
+  role: admin.role,
+  ipAddress: context.request ? getClientIp(context.request) : undefined,
+  userAgent: context.request?.headers.get('user-agent') ?? undefined,
+});
+
+/**
+ * Whether the viewer may see a provider's private fields: they are that provider, or an admin
+ */
+const isProviderOrAdmin = (providerUserId: string | undefined, context: GraphQLContext): boolean => {
+  const viewer = context.user;
+  if (!viewer) return false;
+  const isAdmin = viewer.role === UserRole.ADMIN || viewer.role === UserRole.SUPER_ADMIN;
+  return isAdmin || (Boolean(providerUserId) && providerUserId === viewer.userId);
 };
+
+/**
+ * The review fields moderation affects, as they reach the Review type
+ */
+type ModeratedReview = {
+  isHidden?: boolean | null;
+  comment?: string | null;
+  response?: string | null;
+};
+
 
 export const resolvers = {
   Query: {
@@ -416,10 +435,15 @@ export const resolvers = {
      */
     categories: async (
       _: unknown,
-      args: { pagination?: { page?: number; limit?: number } }
+      args: { pagination?: { page?: number; limit?: number }; includeInactive?: boolean | null },
+      context: GraphQLContext
     ) => {
+      // Inactive categories are for the admin dashboard only
+      if (args.includeInactive) {
+        requireAdminAuth(context);
+      }
       const { page = 1, limit = 50 } = args.pagination || {};
-      return getCategories({ page, limit });
+      return getCategories({ page, limit }, Boolean(args.includeInactive));
     },
 
     /**
@@ -460,14 +484,17 @@ export const resolvers = {
         // Customer-only accounts will simply have no matching services to exclude.
         excludeProviderUserId: context.user?.userId,
       };
-      return getServices(filters, { page, limit });
+      // The role decides whether filters.status is honoured
+      return getServices(filters, { page, limit }, context.user?.role);
     },
 
     /**
-     * Get service by ID
+     * Get service by ID. Non-active services are only for their provider and
+     * admins, and blocks hide the service between the viewer and the provider.
      */
-    service: async (_: unknown, args: { id: string }) => {
-      return getServiceById(args.id);
+    service: async (_: unknown, args: { id: string }, context: GraphQLContext) => {
+      const viewer = context.user ? { userId: context.user.userId, role: context.user.role } : null;
+      return getServiceById(args.id, viewer);
     },
 
     /**
@@ -479,7 +506,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       const { page = 1, limit = 20 } = args.pagination || {};
       return getMyServices(user.userId, { page, limit });
     },
@@ -493,7 +520,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return getVerificationStatus(user.userId);
     },
 
@@ -506,7 +533,7 @@ export const resolvers = {
       __: unknown,
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       return getUserWithProvider(user.userId);
     },
 
@@ -707,7 +734,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       const { page = 1, limit = 10 } = args.pagination || {};
       return getProviderBookings(user.userId, args.filters || {}, { page, limit });
     },
@@ -733,7 +760,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return getProviderBookingStats(user.userId);
     },
 
@@ -872,9 +899,11 @@ export const resolvers = {
      */
     providerProfile: async (
       _: unknown,
-      args: { providerId: string }
+      args: { providerId: string },
+      context: GraphQLContext
     ) => {
-      return getProviderPublicProfile(args.providerId);
+      // Unverified providers are visible only to themselves and admins
+      return getProviderPublicProfile(args.providerId, context.user);
     },
 
     /**
@@ -1041,7 +1070,7 @@ export const resolvers = {
       __: unknown,
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       return generateSignedUploadParams('service', user.userId);
     },
 
@@ -1053,7 +1082,7 @@ export const resolvers = {
       __: unknown,
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       return generateSignedUploadParams('document', user.userId);
     },
 
@@ -1090,11 +1119,11 @@ export const resolvers = {
      */
     myConversations: async (
       _: unknown,
-      args: { pagination?: { page?: number; limit?: number } },
+      args: { pagination?: { page?: number; limit?: number }; archived?: boolean | null },
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      return getMyConversations(user.userId, args.pagination);
+      return getMyConversations(user.userId, args.pagination, { archived: args.archived ?? false });
     },
 
     /**
@@ -1245,7 +1274,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      return getPaymentById(args.id, user.userId);
+      return getPaymentById(args.id, user.userId, user.role);
     },
 
     /**
@@ -1256,8 +1285,8 @@ export const resolvers = {
       args: { bookingId: string },
       context: GraphQLContext
     ) => {
-      requireAuth(context);
-      return getPaymentByBookingId(args.bookingId);
+      const user = requireAuth(context);
+      return getPaymentByBookingId(args.bookingId, { userId: user.userId, role: user.role });
     },
 
     /**
@@ -1290,7 +1319,7 @@ export const resolvers = {
       },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       return getProviderPayments(
         user.userId,
         args.filters || {},
@@ -1306,7 +1335,7 @@ export const resolvers = {
       __: unknown,
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       return getProviderEarnings(user.userId);
     },
 
@@ -1340,6 +1369,97 @@ export const resolvers = {
     ) => {
       requireSuperAdminAuth(context);
       return getPaymentStats();
+    },
+
+    /**
+     * Platform settings, including the commission rate (Admin)
+     */
+    platformSettings: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getPlatformSettings();
+    },
+
+    /**
+     * People the current user has blocked
+     */
+    myBlockedUsers: async (
+      _: unknown,
+      args: { pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getMyBlockedUsers(user.userId, args.pagination);
+    },
+
+    /**
+     * Reports the current user has made
+     */
+    myReports: async (
+      _: unknown,
+      args: { pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getMyReports(user.userId, args.pagination);
+    },
+
+    /**
+     * Which community terms the current user has accepted
+     */
+    termsStatus: async (
+      _: unknown,
+      __: unknown,
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return getTermsStatus(user.userId);
+    },
+
+    /**
+     * Report queue (Admin)
+     */
+    reports: async (
+      _: unknown,
+      args: {
+        filters?: { status?: ReportStatus; targetType?: ReportTargetType; reason?: ReportReason };
+        pagination?: { page?: number; limit?: number };
+      },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getReports(args.filters ?? {}, args.pagination);
+    },
+
+    /**
+     * One report (Admin)
+     */
+    report: async (
+      _: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      requireAdminAuth(context);
+      return getReportById(args.id);
+    },
+
+    /**
+     * Messages in a reported conversation, audit-logged (Admin)
+     */
+    reportedConversationMessages: async (
+      _: unknown,
+      args: { reportId: string; pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return getReportedConversationMessages(
+        args.reportId,
+        { id: admin.userId, role: admin.role },
+        args.pagination
+      );
     },
 
     /**
@@ -1406,9 +1526,11 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
+      // Only the wallet's ID is needed, not its balances
+      const wallet = await ensureWallet(user.userId);
       return getWalletTransactions(
-        user.userId,
-        args.filters as Parameters<typeof getWalletTransactions>[1],
+        wallet.id,
+        (args.filters ?? {}) as Parameters<typeof getWalletTransactions>[1],
         { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
       );
     },
@@ -1425,12 +1547,12 @@ export const resolvers = {
       __: unknown,
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       return getProviderBankAccounts(provider.id);
     },
@@ -1443,12 +1565,12 @@ export const resolvers = {
       args: { id: string },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       return getBankAccountById(args.id, provider.id);
     },
@@ -1472,12 +1594,12 @@ export const resolvers = {
       },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       return getProviderWithdrawals(
         provider.id,
@@ -1494,18 +1616,14 @@ export const resolvers = {
       args: { id: string },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
-      // Get withdrawal directly from prisma since getWithdrawalById doesn't exist
-      const withdrawal = await prisma.withdrawal.findFirst({
-        where: { id: args.id, providerId: provider.id },
-      });
-      return withdrawal;
+      return getProviderWithdrawalById(args.id, provider.id);
     },
 
     // ==================
@@ -1520,12 +1638,12 @@ export const resolvers = {
       __: unknown,
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       return getPayoutSchedule(provider.id);
     },
@@ -1538,14 +1656,14 @@ export const resolvers = {
       __: unknown,
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
-      return getProviderPendingEarnings(provider.id);
+      return getProviderPendingEarnings(provider.id, user.userId);
     },
 
     /**
@@ -1556,12 +1674,12 @@ export const resolvers = {
       args: { pagination?: { page?: number; limit?: number } },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       return getScheduledPayoutHistory(
         provider.id,
@@ -1587,12 +1705,12 @@ export const resolvers = {
       },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       return getProviderEarningsReport(
         provider.id,
@@ -1623,17 +1741,19 @@ export const resolvers = {
     },
 
     /**
-     * Get top earning providers - using payment analytics with filtering
+     * Providers with the most earnings released to their wallets in the
+     * period, highest first (Admin)
      */
     topEarningProviders: async (
       _: unknown,
-      args: { limit?: number; period?: string },
+      args: { limit?: number | null; period?: string | null },
       context: GraphQLContext
     ) => {
       requireAdminAuth(context);
-      // TODO: Implement getTopEarningProviders in payment-analytics.service.ts
-      // For now return empty array
-      return [];
+      return getTopEarningProviders(
+        args.limit ?? undefined,
+        (args.period ?? undefined) as Parameters<typeof getTopEarningProviders>[1]
+      );
     },
 
     /**
@@ -1669,6 +1789,9 @@ export const resolvers = {
           searchTerm?: string;
           startDate?: string;
           endDate?: string;
+          verificationStatus?: string;
+          city?: string;
+          state?: string;
         };
         pagination?: { page?: number; limit?: number };
       },
@@ -1751,10 +1874,9 @@ export const resolvers = {
       args: { targetId: string; pagination?: { page?: number; limit?: number } },
       context: GraphQLContext
     ) => {
-      const admin = requireAdminAuth(context);
-      return getAuditLogsForTarget(
-        admin.userId,
-        args.targetId,
+      requireAdminAuth(context);
+      return getAuditLogs(
+        { targetId: args.targetId },
         { page: args.pagination?.page || 1, limit: args.pagination?.limit || 10 }
       );
     },
@@ -1785,6 +1907,7 @@ export const resolvers = {
           status?: string;
           startDate?: string;
           endDate?: string;
+          providerId?: string;
         };
         pagination?: { page?: number; limit?: number };
       },
@@ -1897,12 +2020,15 @@ export const resolvers = {
      * Logout
      */
     logout: async (
-      _: unknown, 
-      args: { refreshToken?: string }, 
+      _: unknown,
+      args: { refreshToken?: string | null },
       context: GraphQLContext
     ) => {
-      requireAuth(context);
-      return logout(args.refreshToken);
+      const user = requireAuth(context);
+      return logout(args.refreshToken, {
+        payload: user,
+        accessToken: getBearerToken(context.request),
+      });
     },
 
     // ==================
@@ -1955,9 +2081,13 @@ export const resolvers = {
     /**
      * Delete own account
      */
-    deleteAccount: async (_: unknown, __: unknown, context: GraphQLContext) => {
+    deleteAccount: async (
+      _: unknown,
+      args: { password?: string | null },
+      context: GraphQLContext
+    ) => {
       const user = requireAuth(context);
-      return deleteOwnAccount(user.userId);
+      return deleteOwnAccount(user.userId, args.password);
     },
 
     // ==================
@@ -2002,12 +2132,13 @@ export const resolvers = {
           country?: string;
           latitude?: number;
           longitude?: number;
+          profilePhoto?: string | null;
         };
       },
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return updateProviderProfile(user.userId, args.input);
     },
 
@@ -2020,7 +2151,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return submitForVerification(user.userId);
     },
 
@@ -2059,7 +2190,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return createService(user.userId, args.input);
     },
 
@@ -2083,7 +2214,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       const input = {
         ...args.input,
         status: args.input.status as ServiceStatusType | undefined,
@@ -2100,7 +2231,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return deleteService(user.userId, args.id);
     },
 
@@ -2113,7 +2244,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return submitServiceForApproval(user.userId, args.id);
     },
 
@@ -2190,7 +2321,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return acceptBooking(args.id, user.userId);
     },
 
@@ -2203,7 +2334,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return rejectBooking(args.id, user.userId, args.reason);
     },
 
@@ -2216,7 +2347,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return startService(args.id, user.userId);
     },
 
@@ -2229,13 +2360,13 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       return completeService(args.id, user.userId);
     },
 
     /**
-     * Confirm service delivery - starts 24-hour dispute window (USER only)
-     * After 24 hours without dispute, payment is automatically released to provider
+     * Confirm service delivery (USER only). The payment is released to the
+     * provider 24 hours later unless a dispute is opened before then.
      */
     confirmServiceDelivery: async (
       _: unknown,
@@ -2259,8 +2390,8 @@ export const resolvers = {
       args: { id: string; reason: string },
       context: GraphQLContext
     ) => {
-      requireAdminAuth(context);
-      return adminCancelBooking(args.id, args.reason);
+      const admin = requireAdminAuth(context);
+      return adminCancelBooking(args.id, args.reason, { id: admin.userId, role: admin.role });
     },
 
     // ==================
@@ -2287,8 +2418,8 @@ export const resolvers = {
       args: { transactionRef: string },
       context: GraphQLContext
     ) => {
-      requireAuth(context);
-      return verifyPayment(args.transactionRef);
+      const user = requireAuth(context);
+      return verifyPayment(args.transactionRef, { userId: user.userId, role: user.role });
     },
 
     /**
@@ -2301,7 +2432,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireSuperAdminAuth(context);
-      return processRefund(admin.userId, args.input);
+      return processRefund(admin.userId, args.input, admin.role);
     },
 
     // ==================
@@ -2317,14 +2448,8 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      // Get the booking amount first
-      const booking = await prisma.booking.findUnique({
-        where: { id: args.input.bookingId },
-      });
-      if (!booking) {
-        throw new Error('Booking not found');
-      }
-      return payWithWallet(user.userId, args.input.bookingId, booking.totalAmount);
+      // The amount comes from the booking on the server
+      return payWithWallet(user.userId, args.input.bookingId);
     },
 
     // ==================
@@ -2339,12 +2464,12 @@ export const resolvers = {
       args: { input: { bankCode: string; accountNumber: string } },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       return addProviderBankAccount(
         provider.id,
@@ -2361,12 +2486,12 @@ export const resolvers = {
       args: { id: string },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       return setDefaultBankAccount(args.id, provider.id);
     },
@@ -2379,15 +2504,15 @@ export const resolvers = {
       args: { id: string },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       await deleteBankAccount(args.id, provider.id);
-      return { message: 'Bank account removed successfully' };
+      return { success: true, message: 'Bank account removed successfully' };
     },
 
     // ==================
@@ -2402,18 +2527,19 @@ export const resolvers = {
       args: { input: { amount: number; bankAccountId: string } },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
-      return requestWithdrawal(
-        provider.id,
-        user.userId,
-        args.input
-      );
+      const withdrawal = await requestWithdrawal(provider.id, user.userId, args.input);
+      return {
+        success: true,
+        message: 'Withdrawal requested. It will be processed after review.',
+        withdrawal,
+      };
     },
 
     /**
@@ -2424,12 +2550,12 @@ export const resolvers = {
       args: { id: string },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       return cancelWithdrawal(args.id, provider.id, user.userId);
     },
@@ -2443,15 +2569,23 @@ export const resolvers = {
      */
     setPayoutSchedule: async (
       _: unknown,
-      args: { input: { frequency: string; minimumAmount?: number } },
+      args: {
+        input: {
+          frequency: string;
+          dayOfWeek?: number;
+          dayOfMonth?: number;
+          minimumAmount?: number;
+          bankAccountId?: string;
+        };
+      },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       return setPayoutSchedule(
         provider.id,
@@ -2468,15 +2602,15 @@ export const resolvers = {
       __: unknown,
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const provider = await prisma.serviceProvider.findUnique({
         where: { userId: user.userId },
       });
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       await pausePayoutSchedule(provider.id);
-      return { message: 'Payout schedule disabled' };
+      return { success: true, message: 'Payout schedule disabled' };
     },
 
     // ==================
@@ -2492,7 +2626,8 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireSuperAdminAuth(context);
-      return processWithdrawal(args.id, admin.userId, admin.role);
+      const withdrawal = await processWithdrawal(args.id, admin.userId, admin.role);
+      return { success: true, message: 'Withdrawal approved and transfer started', withdrawal };
     },
 
     /**
@@ -2504,7 +2639,8 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireSuperAdminAuth(context);
-      return rejectWithdrawal(args.id, admin.userId, admin.role, args.reason);
+      const withdrawal = await rejectWithdrawal(args.id, admin.userId, admin.role, args.reason);
+      return { success: true, message: 'Withdrawal rejected', withdrawal };
     },
 
     /**
@@ -2516,7 +2652,8 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireSuperAdminAuth(context);
-      return retryWithdrawal(args.id, admin.userId, admin.role);
+      const withdrawal = await retryWithdrawal(args.id, admin.userId, admin.role);
+      return { success: true, message: 'Transfer retried', withdrawal };
     },
 
     // ==================
@@ -2528,14 +2665,16 @@ export const resolvers = {
      */
     banUser: async (
       _: unknown,
-      args: { input: { userId: string; reason: string; durationDays?: number } },
+      args: { input: { userId: string; reason: string; durationDays?: number | null } },
       context: GraphQLContext
     ) => {
       const admin = requireAdminAuth(context);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
       return banUser(
         { userId: args.input.userId, reason: args.input.reason, days: args.input.durationDays },
         admin.userId,
-        admin.role
+        admin.role,
+        clientIp
       );
     },
 
@@ -2548,7 +2687,8 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireAdminAuth(context);
-      return unbanUser(args.userId, admin.userId, admin.role);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
+      return unbanUser(args.userId, admin.userId, admin.role, clientIp);
     },
 
     /**
@@ -2560,10 +2700,12 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireAdminAuth(context);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
       return restrictUser(
         { userId: args.input.userId, reason: args.input.reason, days: args.input.durationDays },
         admin.userId,
-        admin.role
+        admin.role,
+        clientIp
       );
     },
 
@@ -2576,14 +2718,14 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireAdminAuth(context);
-      return removeRestriction(args.userId, admin.userId, admin.role);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
+      return removeRestriction(args.userId, admin.userId, admin.role, clientIp);
     },
 
     /**
-     * Adjust wallet balance (Admin)
-     * Adjust wallet balance (SUPER_ADMIN only)
+     * Adjust a customer's or provider's wallet balance (SUPER_ADMIN only)
      * For manual corrections or compensations
-     * 
+     *
      * SECURITY: Super Admin only, max ₦1,000,000 per adjustment
      */
     adjustWalletBalance: async (
@@ -2594,9 +2736,24 @@ export const resolvers = {
       const admin = requireSuperAdminAuth(context);
       // Determine CREDIT or DEBIT based on amount sign
       const type = args.amount >= 0 ? 'CREDIT' : 'DEBIT';
-      const amountKobo = Math.abs(args.amount * 100); // Convert to kobo
+      const amountKobo = Math.round(Math.abs(args.amount) * 100); // Convert to kobo
       // Pass admin role for limit enforcement
-      return adjustWalletBalance(args.userId, amountKobo, type, args.reason, admin.userId, admin.role);
+      await adjustWalletBalance(args.userId, amountKobo, type, args.reason, admin.userId, admin.role);
+      // The mutation returns the updated wallet, not the ledger entry
+      return getOrCreateWallet(args.userId);
+    },
+
+    /**
+     * Set the commission rate for new bookings (SUPER_ADMIN only)
+     * `rate` is a percentage: 7.5 means 7.5%
+     */
+    updateCommissionRate: async (
+      _: unknown,
+      args: { rate: number },
+      context: GraphQLContext
+    ) => {
+      const admin = requireSuperAdminAuth(context);
+      return updateCommissionRate(args.rate, admin.userId, admin.role);
     },
 
     /**
@@ -2604,103 +2761,37 @@ export const resolvers = {
      * ADMIN can target SERVICE_USER + SERVICE_PROVIDER only. Targeting the
      * ADMIN role is reserved for the super-admin endpoint below.
      *
-     * Rate-limited per admin to 50 broadcasts per 24 hours.
+     * Checked first, then counted against the admin's daily cap of 50, shared
+     * with superAdminBroadcastNotification and sendSystemAnnouncement.
      */
     adminBroadcastNotification: async (
       _: unknown,
-      args: {
-        input: {
-          title: string;
-          message: string;
-          target: {
-            mode: 'USER_IDS' | 'ROLE' | 'ALL' | 'LOCATION';
-            userIds?: string[];
-            roles?: string[];
-            city?: string;
-            state?: string;
-          };
-          metadataJson?: string | null;
-        };
-      },
+      args: { input: BroadcastInput },
       context: GraphQLContext
     ) => {
       const admin = requireAdminAuth(context);
-
-      // Daily cap — protects against compromised admin accounts spamming pushes.
-      const rl = await rateLimit.check(
-        `broadcast:admin:${admin.userId}`,
-        50,
-        24 * 60 * 60
-      );
-      if (!rl.allowed) {
-        throw new GraphQLError(
-          `Broadcast rate limit reached (50/day). Resets in ${rl.resetIn}s.`,
-          { extensions: { code: 'RATE_LIMITED' } }
-        );
-      }
-
-      const target = buildBroadcastTarget(args.input.target);
-      const metadata = parseMetadataJson(args.input.metadataJson);
-
-      return broadcastNotification({
-        title: args.input.title,
-        message: args.input.message,
-        target,
-        // ADMIN can target users + providers, never admins/super-admins.
-        allowedRoles: ['SERVICE_USER', 'SERVICE_PROVIDER'],
-        metadata,
-      });
+      // ADMIN can target users + providers, never admins/super-admins.
+      return sendAdminBroadcast(admin.userId, args.input, ['SERVICE_USER', 'SERVICE_PROVIDER']);
     },
 
     /**
      * Broadcast a notification — SUPER_ADMIN only.
      * Can additionally target the ADMIN role (e.g. ops-team announcements).
      *
-     * Rate-limited per super-admin to 50 broadcasts per 24 hours.
+     * The same checks and shared daily cap as adminBroadcastNotification.
      */
     superAdminBroadcastNotification: async (
       _: unknown,
-      args: {
-        input: {
-          title: string;
-          message: string;
-          target: {
-            mode: 'USER_IDS' | 'ROLE' | 'ALL' | 'LOCATION';
-            userIds?: string[];
-            roles?: string[];
-            city?: string;
-            state?: string;
-          };
-          metadataJson?: string | null;
-        };
-      },
+      args: { input: BroadcastInput },
       context: GraphQLContext
     ) => {
       const admin = requireSuperAdminAuth(context);
-
-      const rl = await rateLimit.check(
-        `broadcast:superadmin:${admin.userId}`,
-        50,
-        24 * 60 * 60
-      );
-      if (!rl.allowed) {
-        throw new GraphQLError(
-          `Broadcast rate limit reached (50/day). Resets in ${rl.resetIn}s.`,
-          { extensions: { code: 'RATE_LIMITED' } }
-        );
-      }
-
-      const target = buildBroadcastTarget(args.input.target);
-      const metadata = parseMetadataJson(args.input.metadataJson);
-
-      return broadcastNotification({
-        title: args.input.title,
-        message: args.input.message,
-        target,
-        // SUPER_ADMIN can additionally hit ADMIN role.
-        allowedRoles: ['SERVICE_USER', 'SERVICE_PROVIDER', 'ADMIN'],
-        metadata,
-      });
+      // SUPER_ADMIN can additionally hit ADMIN role.
+      return sendAdminBroadcast(admin.userId, args.input, [
+        'SERVICE_USER',
+        'SERVICE_PROVIDER',
+        'ADMIN',
+      ]);
     },
 
     // ==================
@@ -2740,7 +2831,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      requireRole(context, UserRole.SERVICE_PROVIDER);
+      requireProviderAuth(context);
       
       // Get provider ID
       const provider = await prisma.serviceProvider.findUnique({
@@ -2748,7 +2839,7 @@ export const resolvers = {
       });
       
       if (!provider) {
-        throw new Error('Provider profile not found');
+        throw providerNotFound();
       }
       
       return respondToReview(provider.id, args.reviewId, args.response);
@@ -2759,11 +2850,11 @@ export const resolvers = {
      */
     deleteReview: async (
       _: unknown,
-      args: { id: string },
+      args: { id: string; reason?: string | null },
       context: GraphQLContext
     ) => {
-      requireAdminAuth(context);
-      return deleteReview(args.id);
+      const admin = requireAdminAuth(context);
+      return deleteReview(args.id, { id: admin.userId, role: admin.role }, args.reason ?? undefined);
     },
 
     // ==================
@@ -2910,7 +3001,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireAdminAuth(context);
-      return resolveDispute(args.disputeId, admin.userId, args.input);
+      return resolveDispute(args.disputeId, admin.userId, args.input, admin.role);
     },
 
     /**
@@ -2922,7 +3013,7 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireAdminAuth(context);
-      return closeDispute(args.disputeId, admin.userId, args.reason);
+      return closeDispute(args.disputeId, admin.userId, args.reason, admin.role);
     },
 
     // ==================
@@ -2979,7 +3070,7 @@ export const resolvers = {
       args: { files: Array<{ base64Data: string; filename: string }> },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const urls = await uploadProviderImages(user.userId, args.files);
       return {
         success: true,
@@ -2996,9 +3087,9 @@ export const resolvers = {
       args: { imageUrl: string },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       await removeProviderImage(user.userId, args.imageUrl);
-      return { message: 'Image removed successfully' };
+      return { success: true, message: 'Image removed successfully' };
     },
 
     /**
@@ -3012,7 +3103,7 @@ export const resolvers = {
       },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const urls = await uploadServiceImages(
         user.userId,
         args.serviceId,
@@ -3033,7 +3124,7 @@ export const resolvers = {
       args: { serviceId: string; imageUrl: string },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       await removeServiceImage(user.userId, args.serviceId, args.imageUrl);
       return {
         success: true,
@@ -3049,12 +3140,29 @@ export const resolvers = {
       args: { files: Array<{ base64Data: string; filename: string }> },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       const urls = await uploadProviderDocuments(user.userId, args.files);
       return {
         success: true,
         urls,
         message: `${urls.length} document(s) uploaded successfully`,
+      };
+    },
+
+    /**
+     * Save provider documents uploaded straight to Cloudinary
+     */
+    addProviderDocuments: async (
+      _: unknown,
+      args: { documentUrls: string[] },
+      context: GraphQLContext
+    ) => {
+      const user = requireProviderAuth(context);
+      const urls = await addProviderDocuments(user.userId, args.documentUrls);
+      return {
+        success: true,
+        urls,
+        message: `${urls.length} document(s) added successfully`,
       };
     },
 
@@ -3066,7 +3174,7 @@ export const resolvers = {
       args: { documentUrl: string },
       context: GraphQLContext
     ) => {
-      const user = requireRole(context, UserRole.SERVICE_PROVIDER);
+      const user = requireProviderAuth(context);
       await removeProviderDocument(user.userId, args.documentUrl);
       return {
         success: true,
@@ -3129,7 +3237,7 @@ export const resolvers = {
     },
 
     /**
-     * Archive a conversation
+     * Archive a conversation for the signed-in user only
      */
     archiveConversation: async (
       _: unknown,
@@ -3138,6 +3246,18 @@ export const resolvers = {
     ) => {
       const user = requireAuth(context);
       return archiveConversation(user.userId, args.conversationId);
+    },
+
+    /**
+     * Bring a conversation the signed-in user archived back into their inbox
+     */
+    unarchiveConversation: async (
+      _: unknown,
+      args: { conversationId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return unarchiveConversation(user.userId, args.conversationId);
     },
 
     /**
@@ -3167,6 +3287,80 @@ export const resolvers = {
         args.input.subject,
         args.input.initialMessage
       );
+    },
+
+    // ==================
+    // Safety Mutations
+    // ==================
+
+    /**
+     * Block a user
+     */
+    blockUser: async (
+      _: unknown,
+      args: { userId: string; reason?: string | null },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return blockUser(user.userId, args.userId, args.reason);
+    },
+
+    /**
+     * Unblock a user
+     */
+    unblockUser: async (
+      _: unknown,
+      args: { userId: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return unblockUser(user.userId, args.userId);
+    },
+
+    /**
+     * Report a user or their content
+     */
+    createReport: async (
+      _: unknown,
+      args: {
+        input: {
+          targetType: ReportTargetType;
+          targetId: string;
+          reason: ReportReason;
+          details?: string | null;
+        };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return createReport(user.userId, args.input);
+    },
+
+    /**
+     * Accept the current community terms
+     */
+    acceptTerms: async (
+      _: unknown,
+      args: { version: string },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      return acceptTerms(user.userId, args.version);
+    },
+
+    /**
+     * Decide a report (Admin)
+     */
+    resolveReport: async (
+      _: unknown,
+      args: {
+        id: string;
+        input: { action: ModerationAction; notes: string; durationDays?: number | null };
+      },
+      context: GraphQLContext
+    ) => {
+      const admin = requireAdminAuth(context);
+      return resolveReport(args.id, { id: admin.userId, role: admin.role }, args.input);
     },
 
     // ==================
@@ -3222,19 +3416,16 @@ export const resolvers = {
     },
 
     /**
-     * Send system announcement (Admin only)
+     * Send system announcement (Admin only). The same role rules, checks and
+     * shared daily cap as the broadcast mutations.
      */
     sendSystemAnnouncement: async (
       _: unknown,
-      args: { input: { title: string; message: string; targetRoles?: string[] } },
+      args: { input: { title: string; message: string; targetRoles?: string[] | null } },
       context: GraphQLContext
     ) => {
-      requireAdminAuth(context);
-      await sendSystemAnnouncement(
-        args.input.title,
-        args.input.message,
-        args.input.targetRoles
-      );
+      const admin = requireAdminAuth(context);
+      await sendAdminAnnouncement(admin.userId, admin.role, args.input);
       return {
         success: true,
         message: 'Announcement sent successfully',
@@ -3258,15 +3449,15 @@ export const resolvers = {
     },
 
     /**
-     * Unregister push token
+     * Unregister push token: one device with playerId, otherwise every device
      */
     unregisterPushToken: async (
       _: unknown,
-      __: unknown,
+      args: { playerId?: string | null },
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
-      return unregisterPushToken(user.userId);
+      return unregisterPushToken(user.userId, args.playerId);
     },
 
     /**
@@ -3432,18 +3623,15 @@ export const resolvers = {
      * Admin logout
      */
     adminLogout: async (
-      _: unknown, 
-      args: { refreshToken?: string }, 
+      _: unknown,
+      args: { refreshToken?: string | null },
       context: GraphQLContext
     ) => {
-      requireAdminAuth(context);
-      if (args.refreshToken) {
-        await adminLogout(args.refreshToken);
-      }
-      return {
-        success: true,
-        message: 'Admin logged out successfully',
-      };
+      const admin = requireAdminAuth(context);
+      return adminLogout(args.refreshToken, {
+        payload: admin,
+        accessToken: getBearerToken(context.request),
+      });
     },
 
     // ==================
@@ -3514,7 +3702,8 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireRole(context, UserRole.SUPER_ADMIN);
-      return createAdmin(args.input, admin.userId);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
+      return createAdmin(args.input, admin.userId, admin.role, clientIp);
     },
 
     /**
@@ -3526,7 +3715,8 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireRole(context, UserRole.SUPER_ADMIN);
-      return suspendAdmin(args.adminId, args.reason, admin.userId);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
+      return suspendAdmin(args.adminId, args.reason, admin.userId, admin.role, clientIp);
     },
 
     /**
@@ -3537,8 +3727,9 @@ export const resolvers = {
       args: { adminId: string },
       context: GraphQLContext
     ) => {
-      requireRole(context, UserRole.SUPER_ADMIN);
-      return activateAdmin(args.adminId);
+      const admin = requireRole(context, UserRole.SUPER_ADMIN);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
+      return activateAdmin(args.adminId, admin.userId, admin.role, clientIp);
     },
 
     /**
@@ -3550,7 +3741,8 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireRole(context, UserRole.SUPER_ADMIN);
-      return updateAdminRole(args.adminId, args.role, admin.userId);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
+      return updateAdminRole(args.adminId, args.role, admin.userId, admin.role, clientIp);
     },
 
     /**
@@ -3562,7 +3754,8 @@ export const resolvers = {
       context: GraphQLContext
     ) => {
       const admin = requireRole(context, UserRole.SUPER_ADMIN);
-      return deleteAdmin(args.adminId, admin.userId);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
+      return deleteAdmin(args.adminId, admin.userId, admin.role, clientIp);
     },
 
     // ==================
@@ -3577,8 +3770,9 @@ export const resolvers = {
       args: { userId: string; reason: string },
       context: GraphQLContext
     ) => {
-      requireRole(context, UserRole.ADMIN);
-      return suspendUser(args.userId, args.reason);
+      const admin = requireRole(context, UserRole.ADMIN);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
+      return suspendUser(args.userId, args.reason, admin.userId, admin.role, clientIp);
     },
 
     /**
@@ -3589,8 +3783,9 @@ export const resolvers = {
       args: { userId: string },
       context: GraphQLContext
     ) => {
-      requireRole(context, UserRole.ADMIN);
-      return activateUser(args.userId);
+      const admin = requireRole(context, UserRole.ADMIN);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
+      return activateUser(args.userId, admin.userId, admin.role, clientIp);
     },
 
     /**
@@ -3601,8 +3796,9 @@ export const resolvers = {
       args: { id: string },
       context: GraphQLContext
     ) => {
-      requireRole(context, UserRole.ADMIN);
-      return deleteUser(args.id);
+      const admin = requireRole(context, UserRole.ADMIN);
+      const clientIp = context.request ? getClientIp(context.request) : undefined;
+      return deleteUser(args.id, admin.userId, admin.role, clientIp);
     },
 
     // ==================
@@ -3617,8 +3813,8 @@ export const resolvers = {
       args: { providerId: string },
       context: GraphQLContext
     ) => {
-      requireRole(context, UserRole.ADMIN);
-      return approveProvider(args.providerId);
+      const admin = requireRole(context, UserRole.ADMIN);
+      return approveProvider(args.providerId, moderationActor(admin, context));
     },
 
     /**
@@ -3629,8 +3825,8 @@ export const resolvers = {
       args: { providerId: string; reason: string },
       context: GraphQLContext
     ) => {
-      requireRole(context, UserRole.ADMIN);
-      return rejectProvider(args.providerId, args.reason);
+      const admin = requireRole(context, UserRole.ADMIN);
+      return rejectProvider(args.providerId, args.reason, moderationActor(admin, context));
     },
 
     // ==================
@@ -3645,8 +3841,8 @@ export const resolvers = {
       args: { serviceId: string },
       context: GraphQLContext
     ) => {
-      requireRole(context, UserRole.ADMIN);
-      return approveService(args.serviceId);
+      const admin = requireRole(context, UserRole.ADMIN);
+      return approveService(args.serviceId, moderationActor(admin, context));
     },
 
     /**
@@ -3657,8 +3853,8 @@ export const resolvers = {
       args: { serviceId: string; reason: string },
       context: GraphQLContext
     ) => {
-      requireRole(context, UserRole.ADMIN);
-      return rejectService(args.serviceId, args.reason);
+      const admin = requireRole(context, UserRole.ADMIN);
+      return rejectService(args.serviceId, args.reason, moderationActor(admin, context));
     },
 
     /**
@@ -3669,8 +3865,8 @@ export const resolvers = {
       args: { serviceId: string; reason: string },
       context: GraphQLContext
     ) => {
-      requireRole(context, UserRole.ADMIN);
-      return suspendService(args.serviceId, args.reason);
+      const admin = requireRole(context, UserRole.ADMIN);
+      return suspendService(args.serviceId, args.reason, moderationActor(admin, context));
     },
 
     // ==================
@@ -3736,7 +3932,22 @@ export const resolvers = {
    * Booking field resolvers
    */
   Booking: {
-    user: (parent: any) => parent.user,
+    // The customer's email and phone go only to the customer and admins; the
+    // booking's provider sees their name and photo
+    user: (
+      parent: {
+        user?: { id: string; email?: string | null; phone?: string | null; lastLoginAt?: Date | string | null } | null;
+      },
+      _: unknown,
+      context: GraphQLContext
+    ) => {
+      const customer = parent.user;
+      if (!customer) return customer;
+      const viewer = context.user;
+      const isAdmin = viewer?.role === UserRole.ADMIN || viewer?.role === UserRole.SUPER_ADMIN;
+      if (isAdmin || viewer?.userId === customer.id) return customer;
+      return { ...customer, email: '', phone: null, lastLoginAt: null };
+    },
     provider: (parent: any) => parent.provider,
     service: (parent: any) => parent.service,
     payment: (parent: any) => parent.payment || null,
@@ -3770,6 +3981,18 @@ export const resolvers = {
         return parent.updatedAt.toISOString();
       }
       return parent.updatedAt;
+    },
+  },
+
+  /**
+   * Withdrawal field resolvers
+   */
+  Withdrawal: {
+    // Admin lists load it with the withdrawal. Everywhere else the caller is
+    // the withdrawal's own provider or a super admin, so it's looked up.
+    provider: (parent: { providerId?: string | null; provider?: WithdrawalProviderSummary | null }) => {
+      if (parent.provider !== undefined) return parent.provider;
+      return parent.providerId ? getWithdrawalProviderSummary(parent.providerId) : null;
     },
   },
 
@@ -3809,6 +4032,10 @@ export const resolvers = {
   Review: {
     user: (parent: any) => parent.user,
     provider: (parent: any) => parent.provider,
+    // Reviews reach this type from several services, so moderation is applied here
+    isHidden: (parent: ModeratedReview) => Boolean(parent.isHidden),
+    comment: (parent: ModeratedReview) => (parent.isHidden ? null : parent.comment),
+    response: (parent: ModeratedReview) => (parent.isHidden ? null : parent.response),
     createdAt: (parent: any) => {
       if (parent.createdAt instanceof Date) {
         return parent.createdAt.toISOString();
@@ -3858,6 +4085,88 @@ export const resolvers = {
         return parent.resolvedAt.toISOString();
       }
       return parent.resolvedAt || null;
+    },
+    // Which admin took the dispute is shown to admins only
+    reviewedBy: (parent: { reviewedBy?: string | null }, _: unknown, context: GraphQLContext) => {
+      const role = context.user?.role;
+      const isAdmin = role === UserRole.ADMIN || role === UserRole.SUPER_ADMIN;
+      return isAdmin ? parent.reviewedBy ?? null : null;
+    },
+  },
+
+  /**
+   * Messages reach this type from several services. Ones saved before
+   * moderation existed have no isHidden.
+   */
+  Message: {
+    isHidden: (parent: { isHidden?: boolean | null }) => parent.isHidden ?? false,
+  },
+
+  /**
+   * Users reach this type from many services. Accounts that never switched role
+   * have no stored activeRole, and older records have no pushEnabled.
+   */
+  User: {
+    activeRole: (parent: { role: string; activeRole?: string | null }) => parent.activeRole ?? parent.role,
+    pushEnabled: (parent: { pushEnabled?: boolean | null }) => parent.pushEnabled ?? true,
+  },
+
+  /**
+   * Provider verification documents (ID, CAC) are private: only the provider
+   * and admins receive them. Everyone else gets an empty list. Private files
+   * come back as download links that expire; older public URLs are unchanged.
+   */
+  ServiceProviderProfile: {
+    images: (parent: { images?: string[] | null }) => parent.images ?? [],
+    documents: (
+      parent: { userId?: string; documents?: string[] },
+      _: unknown,
+      context: GraphQLContext
+    ) => {
+      const viewer = context.user;
+      if (!viewer) return [];
+      const isAdmin = viewer.role === UserRole.ADMIN || viewer.role === UserRole.SUPER_ADMIN;
+      const isOwner = Boolean(parent.userId) && parent.userId === viewer.userId;
+      return isAdmin || isOwner ? (parent.documents ?? []).map((url) => getDocumentViewUrl(url)) : [];
+    },
+    rejectionReason: (
+      parent: { userId?: string; rejectionReason?: string | null },
+      _: unknown,
+      context: GraphQLContext
+    ) => (isProviderOrAdmin(parent.userId, context) ? parent.rejectionReason ?? null : null),
+  },
+
+  /**
+   * Why an admin rejected or suspended a service is only returned to its
+   * provider and admins
+   */
+  Service: {
+    rejectionReason: (
+      parent: { provider?: { userId?: string } | null; rejectionReason?: string | null },
+      _: unknown,
+      context: GraphQLContext
+    ) => (isProviderOrAdmin(parent.provider?.userId, context) ? parent.rejectionReason ?? null : null),
+    suspensionReason: (
+      parent: { provider?: { userId?: string } | null; suspensionReason?: string | null },
+      _: unknown,
+      context: GraphQLContext
+    ) => (isProviderOrAdmin(parent.provider?.userId, context) ? parent.suspensionReason ?? null : null),
+  },
+
+  /**
+   * Reviews are public; the reviewer's email is only returned to the reviewer
+   * and admins.
+   */
+  ReviewUser: {
+    email: (
+      parent: { id: string; email?: string | null },
+      _: unknown,
+      context: GraphQLContext
+    ) => {
+      const viewer = context.user;
+      if (!viewer) return null;
+      const isAdmin = viewer.role === UserRole.ADMIN || viewer.role === UserRole.SUPER_ADMIN;
+      return isAdmin || viewer.userId === parent.id ? parent.email ?? null : null;
     },
   },
 };
