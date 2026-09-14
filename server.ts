@@ -10,6 +10,13 @@
  *   Production: node dist/server.js
  */
 
+// Set up Next.js's runtime globals (AsyncLocalStorage and friends) before any
+// Next module loads. `next start` does this itself; a custom server doesn't,
+// and without it requests fail with "AsyncLocalStorage accessed in runtime
+// where it is not available".
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+require('next/dist/server/node-environment');
+
 // Load environment variables first. Must stay a `require` so it runs before
 // the server module below is resolved.
 // eslint-disable-next-line @typescript-eslint/no-require-imports

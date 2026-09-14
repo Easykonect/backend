@@ -40,6 +40,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# browser automation snapshots (can contain hosting account details)
+.playwright-mcp/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
