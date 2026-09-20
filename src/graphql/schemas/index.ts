@@ -281,6 +281,9 @@ export const typeDefs = gql`
     # Why an admin suspended it. Only returned to the provider and admins
     suspensionReason: String
     images: [String!]!
+    # Distance from the coordinates the caller searched with, in km. Null when
+    # the caller sent none, or the provider has no coordinates
+    distanceKm: Float
     createdAt: String!
     updatedAt: String!
   }
@@ -886,6 +889,13 @@ export const typeDefs = gql`
     hasPreviousPage: Boolean!
   }
 
+  # Whether a page answers the words that were typed, or the alternatives the
+  # search was broadened to after those found nothing
+  enum SearchMatchType {
+    EXACT
+    RELATED
+  }
+
   type PaginatedServices {
     items: [Service!]!
     total: Int!
@@ -894,6 +904,12 @@ export const typeDefs = gql`
     totalPages: Int!
     hasNextPage: Boolean!
     hasPreviousPage: Boolean!
+    # EXACT unless the search fell back to related words. Null on listings that
+    # aren't a search (myServices, pendingServices), which are always direct
+    matchType: SearchMatchType
+    # The term these results came from: what was typed, or the alternatives
+    # used when matchType is RELATED. Null when no search term was given
+    searchedFor: String
   }
 
   type ServiceWithDistance {

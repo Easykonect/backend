@@ -694,3 +694,177 @@ describe('updateService — community terms', () => {
     expect(prisma.service.update).not.toHaveBeenCalled();
   });
 });
+
+// ==================
+// getServices — free-text search
+// ==================
+
+describe('getServices — free-text search', () => {
+  const whereOfCall = (index: number) =>
+    (prisma.service.findMany as jest.Mock).mock.calls[index][0].where;
+
+  it('searches the service name, description, category name, category slug and provider business name', async () => {
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([makeServiceRow()]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(1);
+
+    const result = await getServices({ search: 'Cleaning' }, { page: 1, limit: 10 });
+
+    expect(whereOfCall(0).OR).toEqual([
+      { name: { contains: 'Cleaning', mode: 'insensitive' } },
+      { description: { contains: 'Cleaning', mode: 'insensitive' } },
+      { category: { is: { name: { contains: 'Cleaning', mode: 'insensitive' } } } },
+      { category: { is: { slug: { contains: 'Cleaning', mode: 'insensitive' } } } },
+      { provider: { is: { businessName: { contains: 'Cleaning', mode: 'insensitive' } } } },
+    ]);
+    expect(result.matchType).toBe('EXACT');
+    expect(result.searchedFor).toBe('Cleaning');
+  });
+
+  it('matches case-insensitively on every searched field', async () => {
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(0);
+
+    await getServices({ search: 'ABC Plumbing' }, { page: 1, limit: 10 });
+
+    for (const condition of whereOfCall(0).OR) {
+      const leaf = condition.name ?? condition.description ?? condition.category?.is?.name
+        ?? condition.category?.is?.slug ?? condition.provider?.is?.businessName;
+      expect(leaf).toEqual({ contains: 'ABC Plumbing', mode: 'insensitive' });
+    }
+  });
+
+  it('broadens "painter" to painting/paint only after the typed words find nothing', async () => {
+    (prisma.service.findMany as jest.Mock)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([makeServiceRow({ id: 'svc_paint', name: 'Painting Services' })]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+
+    const result = await getServices({ search: 'painter' }, { page: 1, limit: 10 });
+
+    expect(result.matchType).toBe('RELATED');
+    expect(result.searchedFor).toBe('painting, paint');
+    expect(result.total).toBe(1);
+    expect(whereOfCall(1).OR).toEqual(
+      expect.arrayContaining([
+        { name: { contains: 'painting', mode: 'insensitive' } },
+        { name: { contains: 'paint', mode: 'insensitive' } },
+        { category: { is: { name: { contains: 'painting', mode: 'insensitive' } } } },
+      ])
+    );
+    // one broadened query, not one per alias
+    expect((prisma.service.findMany as jest.Mock)).toHaveBeenCalledTimes(2);
+  });
+
+  it('broadens "plumber" to plumbing', async () => {
+    (prisma.service.findMany as jest.Mock)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([makeServiceRow({ id: 'svc_plumb', name: 'Plumbing Services' })]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+
+    const result = await getServices({ search: 'plumber' }, { page: 1, limit: 10 });
+
+    expect(result.matchType).toBe('RELATED');
+    expect(result.searchedFor).toBe('plumbing');
+  });
+
+  it('keeps direct results and never broadens when the typed words match', async () => {
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([makeServiceRow({ name: 'Painting Services' })]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(1);
+
+    const result = await getServices({ search: 'painting' }, { page: 1, limit: 10 });
+
+    expect(result.matchType).toBe('EXACT');
+    expect((prisma.service.findMany as jest.Mock)).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays EXACT when an unknown word finds nothing', async () => {
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(0);
+
+    const result = await getServices({ search: 'zzzznotathing' }, { page: 1, limit: 10 });
+
+    expect(result.matchType).toBe('EXACT');
+    expect(result.total).toBe(0);
+    expect((prisma.service.findMany as jest.Mock)).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the category filter when searching, and when broadening', async () => {
+    (prisma.service.findMany as jest.Mock)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([makeServiceRow({ id: 'svc_paint' })]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+
+    await getServices({ search: 'painter', categoryId: 'cat1' }, { page: 1, limit: 10 });
+
+    expect(whereOfCall(0).categoryId).toBe('cat1');
+    expect(whereOfCall(1).categoryId).toBe('cat1');
+  });
+
+  it('searches with no category filter at all', async () => {
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(0);
+
+    await getServices({ search: 'cleaning' }, { page: 1, limit: 10 });
+
+    expect(whereOfCall(0).categoryId).toBeUndefined();
+  });
+
+  it('paginates search results', async () => {
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([makeServiceRow()]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(12);
+
+    const result = await getServices({ search: 'cleaning' }, { page: 2, limit: 5 });
+
+    const call = (prisma.service.findMany as jest.Mock).mock.calls[0][0];
+    expect(call.skip).toBe(5);
+    expect(call.take).toBe(5);
+    expect(result.totalPages).toBe(3);
+    expect(result.hasNextPage).toBe(true);
+    expect(result.hasPreviousPage).toBe(true);
+  });
+
+  it('returns no distance when the caller sends no coordinates', async () => {
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([makeServiceRow()]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(1);
+
+    const result = await getServices({ search: 'cleaning' }, { page: 1, limit: 10 });
+
+    expect(result.items[0]).not.toHaveProperty('distanceKm');
+  });
+
+  it('returns distanceKm for each result when coordinates are supplied', async () => {
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([
+      makeProviderRow({ id: 'p_yaba', latitude: yabaLat, longitude: yabaLng }),
+    ]);
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([
+      makeServiceRow({ id: 'svc_yaba', providerId: 'p_yaba' }),
+    ]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(1);
+
+    const result = await getServices(
+      { search: 'cleaning', latitude: lagosLat, longitude: lagosLng, radiusKm: 10 },
+      { page: 1, limit: 10 }
+    );
+
+    expect((result.items[0] as { distanceKm?: number | null }).distanceKm).toBeGreaterThan(0);
+    expect((result.items[0] as { distanceKm?: number | null }).distanceKm).toBeLessThan(10);
+  });
+
+  it('returns a null distance for a service whose provider has no coordinates', async () => {
+    (prisma.serviceProvider.findMany as jest.Mock).mockResolvedValueOnce([
+      makeProviderRow({ id: 'p_lagos', latitude: lagosLat, longitude: lagosLng }),
+    ]);
+    // a row that slipped through without a distance (provider coordinates missing)
+    (prisma.service.findMany as jest.Mock).mockResolvedValueOnce([
+      makeServiceRow({ id: 'svc_nocoords', providerId: 'p_nocoords' }),
+    ]);
+    (prisma.service.count as jest.Mock).mockResolvedValueOnce(1);
+
+    const result = await getServices(
+      { search: 'cleaning', latitude: lagosLat, longitude: lagosLng, radiusKm: 10 },
+      { page: 1, limit: 10 }
+    );
+
+    expect((result.items[0] as { distanceKm?: number | null }).distanceKm).toBeNull();
+  });
+});

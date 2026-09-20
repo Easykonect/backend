@@ -329,6 +329,9 @@ describe('services — status filter and own lists', () => {
       totalPages: 0,
       hasNextPage: false,
       hasPreviousPage: false,
+      // no search term was given, so the page is a direct listing
+      matchType: 'EXACT',
+      searchedFor: null,
     });
     expect(prisma.service.findMany).not.toHaveBeenCalled();
   });

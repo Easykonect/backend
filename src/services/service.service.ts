@@ -17,6 +17,7 @@ import {
   MAX_LENGTHS,
 } from '@/utils/security';
 import { slugify, slugSuffix } from '@/utils/slug';
+import { aliasesFor } from '@/constants/search-aliases';
 import { haversineDistance, boundingBox, MAX_NEARBY_CANDIDATES } from '@/services/browse.service';
 import { assertAcceptableText } from '@/lib/content-filter';
 import { getBlockedUserIds, isBlockedBetween } from '@/services/block.service';
@@ -113,6 +114,25 @@ const emptyPage = (page: number, limit: number) => ({
   hasNextPage: false,
   hasPreviousPage: false,
 });
+
+/**
+ * Whether a page of results answers what was typed (EXACT) or what the search
+ * was broadened to when that found nothing (RELATED)
+ */
+type SearchMatchType = 'EXACT' | 'RELATED';
+
+/**
+ * Where a free-text search term is looked for: the listing itself, the
+ * category it sits in, and the provider's business name. Callers pass an
+ * already-sanitised term.
+ */
+const searchConditions = (term: string): Prisma.ServiceWhereInput[] => [
+  { name: { contains: term, mode: 'insensitive' } },
+  { description: { contains: term, mode: 'insensitive' } },
+  { category: { is: { name: { contains: term, mode: 'insensitive' } } } },
+  { category: { is: { slug: { contains: term, mode: 'insensitive' } } } },
+  { provider: { is: { businessName: { contains: term, mode: 'insensitive' } } } },
+];
 
 /**
  * The URL, if it's an https image in the platform's Cloudinary account
@@ -305,13 +325,22 @@ export const getServices = async (
     };
   }
 
+  // Free-text search: what was typed, then (only if that finds nothing) the
+  // known alternatives for it. `categoryId` above still narrows either way.
+  let matchType: SearchMatchType = 'EXACT';
+  let searchedFor: string | null = null;
+  let aliasTerms: string[] = [];
+
   if (filters.search) {
     // Sanitize search query to prevent NoSQL injection
     const sanitizedSearch = sanitizeSearchQuery(filters.search);
-    where.OR = [
-      { name: { contains: sanitizedSearch, mode: 'insensitive' } },
-      { description: { contains: sanitizedSearch, mode: 'insensitive' } },
-    ];
+    if (sanitizedSearch) {
+      searchedFor = sanitizedSearch;
+      where.OR = searchConditions(sanitizedSearch);
+      aliasTerms = aliasesFor(filters.search)
+        .map((alias) => sanitizeSearchQuery(alias))
+        .filter(Boolean);
+    }
   }
 
   // Provider-relation filters (city, state, geo radius, exclude-self)
@@ -328,6 +357,9 @@ export const getServices = async (
       notIn: [viewerId, ...(await getBlockedUserIds(viewerId))],
     };
   }
+
+  // Distance per provider, kept only when the caller sent coordinates
+  let distanceByProvider: Map<string, number> | null = null;
 
   // Geo radius requires lat + lon. radiusKm falls back to config default.
   const { latitude, longitude } = filters;
@@ -347,15 +379,24 @@ export const getServices = async (
       take: MAX_NEARBY_CANDIDATES,
     });
 
-    const nearbyIds = candidateProviders
-      .filter((p) =>
-        haversineDistance(latitude, longitude, p.latitude!, p.longitude!) <= radius
-      )
-      .map((p) => p.id);
+    const nearbyIds: string[] = [];
+    distanceByProvider = new Map<string, number>();
+    for (const candidate of candidateProviders) {
+      const distance = haversineDistance(
+        latitude,
+        longitude,
+        candidate.latitude!,
+        candidate.longitude!
+      );
+      if (distance <= radius) {
+        nearbyIds.push(candidate.id);
+        distanceByProvider.set(candidate.id, distance);
+      }
+    }
 
     // Nobody nearby, or the requested provider isn't
     if (nearbyIds.length === 0 || (filters.providerId && !nearbyIds.includes(filters.providerId))) {
-      return emptyPage(page, limit);
+      return { ...emptyPage(page, limit), matchType, searchedFor };
     }
 
     if (!filters.providerId) {
@@ -366,30 +407,58 @@ export const getServices = async (
     where.provider = { is: providerWhere };
   }
 
-  const [items, total] = await Promise.all([
-    prisma.service.findMany({
-      where,
-      include: {
-        provider: true,
-        category: true,
-      },
-      skip,
-      take: limit,
-      orderBy: { createdAt: 'desc' },
-    }),
-    prisma.service.count({ where }),
-  ]);
+  const runPage = (pageWhere: Prisma.ServiceWhereInput) =>
+    Promise.all([
+      prisma.service.findMany({
+        where: pageWhere,
+        include: {
+          provider: true,
+          category: true,
+        },
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.service.count({ where: pageWhere }),
+    ]);
+
+  let [items, total] = await runPage(where);
+
+  // Nothing matched what they typed ("painter"): try the known alternatives
+  // ("painting", "paint") once, in one more query, and mark the page RELATED.
+  if (total === 0 && aliasTerms.length > 0) {
+    const [relatedItems, relatedTotal] = await runPage({
+      ...where,
+      OR: aliasTerms.flatMap((alias) => searchConditions(alias)),
+    });
+
+    if (relatedTotal > 0) {
+      items = relatedItems;
+      total = relatedTotal;
+      matchType = 'RELATED';
+      searchedFor = aliasTerms.join(', ');
+    }
+  }
 
   const totalPages = Math.ceil(total / limit);
+  const formatted = await formatServices(items);
+  const distances = distanceByProvider;
 
   return {
-    items: await formatServices(items),
+    items: distances
+      ? formatted.map((service, index) => ({
+          ...service,
+          distanceKm: distances.get(items[index].providerId) ?? null,
+        }))
+      : formatted,
     total,
     page,
     limit,
     totalPages,
     hasNextPage: page < totalPages,
     hasPreviousPage: page > 1,
+    matchType,
+    searchedFor,
   };
 };
 
