@@ -42,3 +42,8 @@ import('./src/lib/server').then((module) => {
     process.exit(1);
   });
 });
+
+// Keeps this file a module. Without it the consts above are globals, and the
+// declarations emitted into dist/ collide with this file on the next
+// type-check ("Cannot redeclare block-scoped variable 'Module'").
+export {};
