@@ -14,6 +14,7 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:integration": "jest --config jest.integration.config.ts",
+    "test:db": "jest --config jest.integration.config.ts src/__tests__/integration/messaging.db.test.ts",
     "docs:generate": "spectaql spectaql.config.yml",
     "docs:serve": "spectaql spectaql.config.yml --target-dir ./docs/api --port 4400",
     "prisma:generate": "prisma generate",

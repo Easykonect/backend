@@ -94,6 +94,34 @@ const server = new ApolloServer<GraphQLContext>({
           embed: true,
           includeCookies: true
         }),
+    // Clients only ever see "An internal error occurred". Log which operation
+    // failed, for whom, and the full stack, so the server log can explain it.
+    // Errors thrown on purpose carry a code and are skipped.
+    {
+      async requestDidStart() {
+        return {
+          async didEncounterErrors({ errors, operationName, contextValue }) {
+            for (const error of errors) {
+              const code = error.extensions?.code;
+              if (code && code !== 'INTERNAL_SERVER_ERROR') continue;
+
+              const cause = error.originalError ?? error;
+              console.error(
+                'Internal Error:',
+                JSON.stringify({
+                  operation: operationName ?? null,
+                  path: error.path?.join('.') ?? null,
+                  userId: contextValue.user?.userId ?? null,
+                  role: contextValue.user?.role ?? null,
+                  message: cause.message,
+                })
+              );
+              console.error(cause.stack ?? cause);
+            }
+          },
+        };
+      },
+    },
   ],
   formatError: (formattedError, error) => {
     // Capture errors in Sentry (except validation errors)
@@ -117,7 +145,7 @@ const server = new ApolloServer<GraphQLContext>({
     if (config.isProduction) {
       // Don't expose internal errors
       if (errorCode === 'INTERNAL_SERVER_ERROR') {
-        console.error('Internal Error:', error);
+        // Logged with its operation and user by the plugin above
         return {
           message: 'An internal error occurred',
           extensions: { code: 'INTERNAL_SERVER_ERROR' },
