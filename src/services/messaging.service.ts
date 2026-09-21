@@ -453,7 +453,9 @@ const findSupportAdmin = async (userId: string, userRole: string): Promise<strin
 
   const current = await prisma.conversation.findFirst({
     where: {
-      participantIds: { has: userId, hasSome: adminIds },
+      // Two separate conditions: Prisma allows only one operator per list
+      // filter, and rejects { has, hasSome } together at runtime
+      AND: [{ participantIds: { has: userId } }, { participantIds: { hasSome: adminIds } }],
       type: { in: SUPPORT_CONVERSATION_TYPES },
       isActive: true,
       ...withoutBooking,
@@ -615,6 +617,10 @@ export const createOrGetConversation = async (
       bookingId,
       subject,
       isActive: true,
+      // Written explicitly: Prisma's MongoDB filters require a list field to
+      // exist, so a conversation with no archivedBy never matches the inbox's
+      // "not archived by this user" condition and never shows up
+      archivedBy: [],
     },
   });
 

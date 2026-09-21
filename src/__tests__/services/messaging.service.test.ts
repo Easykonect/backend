@@ -1505,6 +1505,12 @@ describe('startSupportConversation', () => {
     expect(db.conversation.create.mock.calls[0][0].data.participantIds).toEqual([customerId, secondAdminId]);
   });
 
+  it('creates the chat with an empty archivedBy list so it appears in the inbox', async () => {
+    await startSupport();
+
+    expect(db.conversation.create.mock.calls[0][0].data.archivedBy).toEqual([]);
+  });
+
   it("stays with the admin already in the user's open support chat", async () => {
     const supportChat = { id: conversationId, participantIds: [customerId, thirdAdminId], messages: [] };
     db.conversation.findFirst.mockImplementation(async ({ where }: { where: Record<string, unknown> }) =>
@@ -1519,7 +1525,11 @@ describe('startSupportConversation', () => {
 
     expect(db.conversation.findFirst.mock.calls[0][0]).toEqual({
       where: {
-        participantIds: { has: customerId, hasSome: [adminId, secondAdminId, thirdAdminId] },
+        // one operator per list filter: Prisma rejects { has, hasSome } together
+        AND: [
+          { participantIds: { has: customerId } },
+          { participantIds: { hasSome: [adminId, secondAdminId, thirdAdminId] } },
+        ],
         type: { in: ['USER_ADMIN', 'ADMIN_SUPERADMIN'] },
         isActive: true,
         OR: [{ bookingId: null }, { bookingId: { isSet: false } }],
