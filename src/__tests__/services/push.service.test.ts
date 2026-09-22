@@ -481,10 +481,12 @@ describe('sendPushToUser', () => {
         }),
       })
     );
-    expect(sentBody().include_player_ids).toEqual([mockPlayerId]);
+    // Addressed by user id: OneSignal knows which devices the user has now
+    expect(sentBody().include_external_user_ids).toEqual([mockUserId]);
+    expect(sentBody().channel_for_external_user_ids).toBe('push');
   });
 
-  it("sends to every one of the user's devices", async () => {
+  it('never sends stored device ids, which can belong to an earlier OneSignal app', async () => {
     db.user.findUnique.mockResolvedValue(
       deviceOwner({ oneSignalPlayerId: 'phone', oneSignalPlayerIds: ['tablet', 'phone'] })
     );
@@ -492,17 +494,29 @@ describe('sendPushToUser', () => {
 
     await sendPushToUser(mockUserId, pushOptions);
 
-    expect(sentBody().include_player_ids).toEqual(['tablet', 'phone']);
+    expect(sentBody().include_player_ids).toBeUndefined();
+    expect(sentBody().include_external_user_ids).toEqual([mockUserId]);
   });
 
-  it('should return error if user has no registered device', async () => {
+  it('still sends to a user with no stored device id', async () => {
     db.user.findUnique.mockResolvedValue(deviceOwner({ oneSignalPlayerId: null }));
+    mockSuccessResponse({ id: 'notification-123' });
+
+    const result = await sendPushToUser(mockUserId, pushOptions);
+
+    expect(result).toEqual({ success: true, messageId: 'notification-123' });
+  });
+
+  it('reports no recipients when OneSignal has no subscribed device for the user', async () => {
+    db.user.findUnique.mockResolvedValue(deviceOwner());
+    mockSuccessResponse({ id: '', errors: ['All included players are not subscribed'] });
 
     const result = await sendPushToUser(mockUserId, pushOptions);
 
     expect(result).toEqual({
       success: false,
-      errors: ['User has no registered device'],
+      noRecipients: true,
+      errors: ['All included players are not subscribed'],
     });
   });
 
@@ -641,27 +655,67 @@ describe('sendPushToUsers', () => {
     });
   });
 
-  it('should return error if no users have push enabled', async () => {
+  it('reports no recipients when no user has push enabled', async () => {
     db.user.findMany.mockResolvedValue([]);
 
     const result = await sendPushToUsers(['user1', 'user2'], pushOptions);
 
     expect(result).toEqual({
       success: false,
+      noRecipients: true,
       errors: ['No users with push notifications enabled'],
     });
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('should filter out users without player IDs', async () => {
-    db.user.findMany.mockResolvedValue([
-      { oneSignalPlayerId: 'player1' },
-      { oneSignalPlayerId: null },
-    ]);
+  it('addresses every user with push on by user id, with or without stored device ids', async () => {
+    db.user.findMany.mockResolvedValue([{ id: 'user1' }, { id: 'user2' }]);
     mockSuccessResponse();
 
     await sendPushToUsers(['user1', 'user2'], pushOptions);
 
-    expect(sentBody().include_player_ids).toEqual(['player1']);
+    expect(db.user.findMany.mock.calls[0][0].where).toEqual({
+      id: { in: ['user1', 'user2'] },
+      pushEnabled: true,
+    });
+    expect(sentBody().include_external_user_ids).toEqual(['user1', 'user2']);
+    expect(sentBody().include_player_ids).toBeUndefined();
+  });
+
+  it('reports sent when one batch reaches a device and another reaches no one', async () => {
+    const userIds = Array.from({ length: 2500 }, (_, i) => `user-${i}`);
+    db.user.findMany.mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) =>
+      where.id.in.map((id) => ({ id }))
+    );
+    mockSuccessResponse({ id: 'batch-1' });
+    mockSuccessResponse({ id: '', errors: ['All included players are not subscribed'] });
+
+    const result = await sendPushToUsers(userIds, pushOptions);
+
+    expect(result).toEqual({ success: true, messageId: 'batch-1' });
+  });
+
+  it('reports no recipients when OneSignal reaches no device', async () => {
+    db.user.findMany.mockResolvedValue([{ id: 'user1' }]);
+    mockSuccessResponse({ id: '', errors: ['All included players are not subscribed'] });
+
+    const result = await sendPushToUsers(['user1'], { ...pushOptions, notificationIds: { user1: 'n1' } });
+
+    expect(result).toEqual({
+      success: false,
+      noRecipients: true,
+      errors: ['All included players are not subscribed'],
+    });
+    expect(db.notification.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('reports failure, not "no recipients", when OneSignal rejects the request', async () => {
+    db.user.findMany.mockResolvedValue([{ id: 'user1' }]);
+    mockErrorResponse(['Access denied']);
+
+    const result = await sendPushToUsers(['user1'], pushOptions);
+
+    expect(result).toEqual({ success: false, errors: ['Access denied'] });
   });
 
   it("leaves out users who switched this type off, and marks only the pushed users' notifications", async () => {
@@ -677,28 +731,26 @@ describe('sendPushToUsers', () => {
       notificationIds: { user1: 'n1', user2: 'n2' },
     });
 
-    expect(sentBody().include_player_ids).toEqual(['tablet1', 'player1']);
+    expect(sentBody().include_external_user_ids).toEqual(['user1']);
     expect(db.notification.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['n1'] } },
       data: { isPushed: true, pushedAt: expect.any(Date) },
     });
   });
 
-  it("keeps each request within 2,000 devices, with each user's devices together", async () => {
-    const devices = (prefix: string) => Array.from({ length: 800 }, (_, i) => `${prefix}-${i}`);
-    db.user.findMany.mockResolvedValue([
-      { id: 'a', oneSignalPlayerId: 'a-799', oneSignalPlayerIds: devices('a') },
-      { id: 'b', oneSignalPlayerId: 'b-799', oneSignalPlayerIds: devices('b') },
-      { id: 'c', oneSignalPlayerId: 'c-799', oneSignalPlayerIds: devices('c') },
-    ]);
+  it('sends at most 2,000 users per request', async () => {
+    const userIds = Array.from({ length: 2500 }, (_, i) => `user-${i}`);
+    db.user.findMany.mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) =>
+      where.id.in.map((id) => ({ id }))
+    );
     mockSuccessResponse();
     mockSuccessResponse();
 
-    await sendPushToUsers(['a', 'b', 'c'], pushOptions);
+    await sendPushToUsers(userIds, pushOptions);
 
     expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(sentBody(0).include_player_ids).toEqual([...devices('a'), ...devices('b')]);
-    expect(sentBody(1).include_player_ids).toEqual(devices('c'));
+    expect(sentBody(0).include_external_user_ids).toEqual(userIds.slice(0, 2000));
+    expect(sentBody(1).include_external_user_ids).toEqual(userIds.slice(2000));
   });
 });
 
@@ -1049,7 +1101,9 @@ describe('OneSignal App API key', () => {
     expect(url).toBe('https://api.onesignal.com/notifications');
     expect(init.headers.Authorization).toBe('Key os_v2_app_testkey');
     const body = JSON.parse(init.body);
-    expect(body.include_subscription_ids).toEqual([mockPlayerId]);
+    expect(body.include_aliases).toEqual({ external_id: [mockUserId] });
+    expect(body.target_channel).toBe('push');
+    expect(body.include_subscription_ids).toBeUndefined();
     expect(body.include_player_ids).toBeUndefined();
   });
 
@@ -1077,7 +1131,7 @@ describe('OneSignal App API key', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('reports failure when OneSignal returns 200 without targeting anyone', async () => {
+  it('reports no recipients when OneSignal returns 200 without targeting anyone', async () => {
     const { service, db: moduleDb } = loadWithAppApiKey();
     (moduleDb.user.findUnique as jest.Mock).mockResolvedValue(deviceOwner());
     mockSuccessResponse({ id: '', errors: ['All included players are not subscribed'] });
@@ -1086,6 +1140,7 @@ describe('OneSignal App API key', () => {
 
     expect(result).toEqual({
       success: false,
+      noRecipients: true,
       errors: ['All included players are not subscribed'],
     });
   });

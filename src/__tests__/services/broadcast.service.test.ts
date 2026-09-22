@@ -281,6 +281,27 @@ describe('broadcastNotification — fan-out resilience', () => {
     expect(emitToUser).toHaveBeenCalled();
   });
 
+  it('reports pushDelivery=no_recipients when no recipient has a reachable device', async () => {
+    (prisma.user.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'u1' }]);
+    (prisma.notification.createMany as jest.Mock).mockResolvedValueOnce({ count: 1 });
+    (sendPushToUsers as jest.Mock).mockResolvedValueOnce({
+      success: false,
+      noRecipients: true,
+      errors: ['All included players are not subscribed'],
+    });
+
+    const result = await broadcastNotification({
+      title: 't',
+      message: 'm',
+      target: { mode: 'USER_IDS', userIds: ['u1'] },
+      allowedRoles: ADMIN_ROLES,
+    });
+
+    expect(result.pushDelivery).toBe('no_recipients');
+    // The in-app notification is still created
+    expect(result.inAppCreated).toBe(1);
+  });
+
   it('reports pushDelivery=failed when sendPushToUsers throws', async () => {
     (prisma.user.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'u1' }]);
     (prisma.notification.createMany as jest.Mock).mockResolvedValueOnce({ count: 1 });

@@ -1068,7 +1068,8 @@ export const broadcastNotification = async (params: {
       notificationIds,
     });
     if (!result.success) {
-      pushDelivery = 'failed';
+      // Nobody had a device OneSignal could reach: not a failure of the send
+      pushDelivery = result.noRecipients ? 'no_recipients' : 'failed';
       pushError = result.errors?.join('; ');
     }
   } catch (err) {

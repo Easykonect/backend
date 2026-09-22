@@ -74,6 +74,8 @@ interface PushResult {
   success: boolean;
   messageId?: string;
   errors?: string[];
+  /** Nothing failed, but none of the users had a device OneSignal could reach */
+  noRecipients?: boolean;
 }
 
 /** Links a push to the in-app notification created for the same event */
@@ -342,6 +344,30 @@ const describeErrors = (errors: unknown): string => {
 };
 
 /**
+ * OneSignal accepted the notification but had no subscribed device to send it
+ * to (HTTP 200 with an empty id, e.g. "All included players are not
+ * subscribed"). Not a fault: the users simply have no reachable device.
+ */
+export class NoPushRecipientsError extends Error {}
+
+/**
+ * Address a notification to users by their EasyKonnet user id. The app links
+ * every device to the signed-in user with OneSignal.login(userId), so
+ * OneSignal delivers to the devices each user has now, in the configured app.
+ * Stored device ids can belong to an earlier OneSignal app or an old install.
+ */
+const targetUsers = <T extends object>(payload: T, userIds: string[]) =>
+  Object.assign(payload, { include_external_user_ids: userIds, channel_for_external_user_ids: 'push' });
+
+/**
+ * The result for a push that didn't go out
+ */
+const failedPush = (error: unknown): PushResult =>
+  error instanceof NoPushRecipientsError
+    ? { success: false, noRecipients: true, errors: [error.message] }
+    : { success: false, errors: [errorMessage(error)] };
+
+/**
  * Make a request to OneSignal API
  */
 const oneSignalRequest = async (
@@ -380,11 +406,15 @@ const oneSignalRequest = async (
     .json()
     .catch(() => ({ errors: ['Unknown error'] }))) as { id?: string; errors?: unknown };
 
-  if (!response.ok || (endpoint === '/notifications' && !data.id && data.errors)) {
+  if (!response.ok) {
     console.error(`❌ OneSignal API error (HTTP ${response.status}):`, data);
     throw new Error(
       describeErrors(data.errors) || `OneSignal API request failed (HTTP ${response.status})`
     );
+  }
+
+  if (endpoint === '/notifications' && !data.id) {
+    throw new NoPushRecipientsError(describeErrors(data.errors) || 'No subscribed devices');
   }
 
   return data;
@@ -700,16 +730,13 @@ export const sendPushToUser = async (
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {
-      ...DEVICE_SELECT,
       pushEnabled: true,
       settings: { select: PREFERENCES_SELECT },
     },
   });
 
-  const devices = devicesOf(user);
-
-  if (!user || devices.length === 0) {
-    return { success: false, errors: ['User has no registered device'] };
+  if (!user) {
+    return { success: false, errors: ['User not found'] };
   }
 
   if (!user.pushEnabled) {
@@ -721,8 +748,7 @@ export const sendPushToUser = async (
   }
 
   try {
-    const payload = buildNotificationPayload(appId, options);
-    payload.include_player_ids = devices;
+    const payload = targetUsers(buildNotificationPayload(appId, options), [userId]);
 
     const result = await oneSignalRequest('/notifications', 'POST', payload);
     const messageId: string | undefined = result.id;
@@ -736,19 +762,18 @@ export const sendPushToUser = async (
       messageId,
     };
   } catch (error) {
-    return {
-      success: false,
-      errors: [errorMessage(error)],
-    };
+    return failedPush(error);
   }
 };
 
-// Devices per OneSignal request (the legacy API caps player IDs at 2,000)
+// Users per OneSignal request (OneSignal caps a request at 2,000 external ids)
 const PUSH_BATCH_SIZE = 2000;
 
 /**
- * Send push notification to multiple users, in batches. Users with push off,
- * no device, or this type of notification switched off are skipped.
+ * Send push notification to multiple users, in batches, addressed by user id.
+ * Users with push off or this type of notification switched off are skipped.
+ * Succeeds when at least one batch reached a device; `noRecipients` when none
+ * of the users had a device OneSignal could reach.
  */
 export const sendPushToUsers = async (
   userIds: string[],
@@ -761,68 +786,60 @@ export const sendPushToUsers = async (
   }
 
   const type = pushTypeOf(options);
-  let recipients = 0;
+  let targeted = 0;
   let messageId: string | undefined;
   const errors: string[] = [];
+  const unreachable: string[] = [];
 
   for (let i = 0; i < userIds.length; i += PUSH_BATCH_SIZE) {
-    // Users in this batch with push enabled and a registered device
     const users = await prisma.user.findMany({
       where: {
         id: { in: userIds.slice(i, i + PUSH_BATCH_SIZE) },
         pushEnabled: true,
-        oneSignalPlayerId: { not: null },
       },
       select: {
         id: true,
-        ...DEVICE_SELECT,
         settings: { select: PREFERENCES_SELECT },
       },
     });
 
-    // Requests of at most PUSH_BATCH_SIZE devices, each user's devices together
-    const requests: { playerIds: string[]; userIds: string[] }[] = [];
-    for (const user of users) {
-      const devices = devicesOf(user);
-      if (devices.length === 0 || !isNotificationAllowed(user.settings, type)) continue;
+    const batch = users
+      .filter((user) => isNotificationAllowed(user.settings, type))
+      .map((user) => user.id);
+    if (batch.length === 0) continue;
+    targeted += batch.length;
 
-      let request = requests[requests.length - 1];
-      if (!request || request.playerIds.length + devices.length > PUSH_BATCH_SIZE) {
-        request = { playerIds: [], userIds: [] };
-        requests.push(request);
-      }
-      request.playerIds.push(...devices);
-      if (user.id) request.userIds.push(user.id);
-    }
+    try {
+      const payload = targetUsers(buildNotificationPayload(appId, options), batch);
 
-    for (const request of requests) {
-      recipients += request.playerIds.length;
+      const result = await oneSignalRequest('/notifications', 'POST', payload);
+      if (!messageId) messageId = result?.id;
 
-      try {
-        const payload = buildNotificationPayload(appId, options);
-        payload.include_player_ids = request.playerIds;
-
-        const result = await oneSignalRequest('/notifications', 'POST', payload);
-        if (!messageId) messageId = result?.id;
-
-        await markNotificationsPushed(
-          request.userIds
-            .map((id) => options.notificationIds?.[id])
-            .filter((id): id is string => Boolean(id))
-        );
-      } catch (error) {
-        errors.push(errorMessage(error));
-      }
+      await markNotificationsPushed(
+        batch
+          .map((id) => options.notificationIds?.[id])
+          .filter((id): id is string => Boolean(id))
+      );
+    } catch (error) {
+      if (error instanceof NoPushRecipientsError) unreachable.push(error.message);
+      else errors.push(errorMessage(error));
     }
   }
 
-  if (recipients === 0) {
-    return { success: false, errors: ['No users with push notifications enabled'] };
+  // Delivered to at least one device: sent, even if another batch failed
+  if (messageId) {
+    return errors.length > 0 ? { success: true, messageId, errors } : { success: true, messageId };
   }
 
-  return errors.length > 0
-    ? { success: false, messageId, errors }
-    : { success: true, messageId };
+  if (errors.length > 0) {
+    return { success: false, errors };
+  }
+
+  return {
+    success: false,
+    noRecipients: true,
+    errors: targeted === 0 ? ['No users with push notifications enabled'] : unreachable,
+  };
 };
 
 /**
@@ -905,13 +922,11 @@ export const sendSilentPushToUser = async (
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { ...DEVICE_SELECT, pushEnabled: true },
+    select: { pushEnabled: true },
   });
 
-  const devices = devicesOf(user);
-
-  if (!user || devices.length === 0) {
-    return { success: false, errors: ['User has no registered device'] };
+  if (!user) {
+    return { success: false, errors: ['User not found'] };
   }
 
   if (!user.pushEnabled) {
@@ -926,8 +941,7 @@ export const sendSilentPushToUser = async (
       ios: { contentAvailable: true },
     };
 
-    const payload = buildNotificationPayload(appId, options);
-    payload.include_player_ids = devices;
+    const payload = targetUsers(buildNotificationPayload(appId, options), [userId]);
 
     const result = await oneSignalRequest('/notifications', 'POST', payload);
 
@@ -936,10 +950,7 @@ export const sendSilentPushToUser = async (
       messageId: result.id,
     };
   } catch (error) {
-    return {
-      success: false,
-      errors: [errorMessage(error)],
-    };
+    return failedPush(error);
   }
 };
 
@@ -957,38 +968,27 @@ export const sendSilentPush = async (
     return { success: false, errors: ['OneSignal not configured'] };
   }
 
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: {
-      ...DEVICE_SELECT,
-      pushEnabled: true,
-    },
-  });
-
-  const devices = devicesOf(user);
-
-  if (devices.length === 0) {
-    return { success: false, errors: ['User has no registered device'] };
-  }
-
   try {
-    const result = await oneSignalRequest('/notifications', 'POST', {
-      app_id: appId,
-      include_player_ids: devices,
-      content_available: true, // iOS background push
-      data: data,
-      // No headings or contents for silent push
-    });
+    const result = await oneSignalRequest(
+      '/notifications',
+      'POST',
+      targetUsers(
+        {
+          app_id: appId,
+          content_available: true, // iOS background push
+          data: data,
+          // No headings or contents for silent push
+        },
+        [userId]
+      )
+    );
 
     return {
       success: true,
       messageId: result.id,
     };
   } catch (error) {
-    return {
-      success: false,
-      errors: [errorMessage(error)],
-    };
+    return failedPush(error);
   }
 };
 
@@ -1005,36 +1005,28 @@ export const updateBadgeCount = async (
     return { success: false, errors: ['OneSignal not configured'] };
   }
 
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: DEVICE_SELECT,
-  });
-
-  const devices = devicesOf(user);
-
-  if (devices.length === 0) {
-    return { success: false, errors: ['User has no registered device'] };
-  }
-
   try {
-    const result = await oneSignalRequest('/notifications', 'POST', {
-      app_id: appId,
-      include_player_ids: devices,
-      content_available: true,
-      ios_badgeType: 'SetTo',
-      ios_badgeCount: count,
-      // Silent notification just to update badge
-    });
+    const result = await oneSignalRequest(
+      '/notifications',
+      'POST',
+      targetUsers(
+        {
+          app_id: appId,
+          content_available: true,
+          ios_badgeType: 'SetTo',
+          ios_badgeCount: count,
+          // Silent notification just to update badge
+        },
+        [userId]
+      )
+    );
 
     return {
       success: true,
       messageId: result.id,
     };
   } catch (error) {
-    return {
-      success: false,
-      errors: [errorMessage(error)],
-    };
+    return failedPush(error);
   }
 };
 
