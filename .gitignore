@@ -27,6 +27,9 @@ env.md
 # misc
 .DS_Store
 *.pem
+# Apple keys (APNs / App Store Connect) and other private key files
+*.p8
+*.p12
 
 # debug
 npm-debug.log*
