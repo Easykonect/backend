@@ -109,7 +109,7 @@ async function sendDailyDigest(): Promise<{ sent: number }> {
       const { queueEmail } = await import('./index');
       await queueEmail({
         to: userData.email,
-        subject: `Your EasyKonnect Daily Summary`,
+        subject: `Your Easykonnet Daily Summary`,
         template: 'dailyDigest',
         templateData: {
           name: userData.firstName,
@@ -120,8 +120,8 @@ async function sendDailyDigest(): Promise<{ sent: number }> {
             <h1 style="color: #4F46E5;">Your Daily Summary</h1>
             <p>Hi ${userData.firstName},</p>
             <p>You have <strong>${user._count.id}</strong> unread notifications.</p>
-            <p>Log in to EasyKonnect to stay updated!</p>
-            <p>Best regards,<br>The EasyKonnect Team</p>
+            <p>Log in to Easykonnet to stay updated!</p>
+            <p>Best regards,<br>The Easykonnet Team</p>
           </div>
         `,
       });

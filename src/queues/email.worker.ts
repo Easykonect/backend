@@ -14,12 +14,12 @@ import { sendEmail } from '@/lib/email';
 const EMAIL_TEMPLATES: Record<string, (data: Record<string, unknown>) => { subject: string; html: string }> = {
   // Welcome email
   welcome: (data) => ({
-    subject: `Welcome to EasyKonnect, ${data.name}!`,
+    subject: `Welcome to Easykonnet, ${data.name}!`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h1 style="color: #4F46E5;">Welcome to EasyKonnect! 🎉</h1>
+        <h1 style="color: #4F46E5;">Welcome to Easykonnet! 🎉</h1>
         <p>Hi ${data.name},</p>
-        <p>Thank you for joining EasyKonnect. We're excited to have you on board!</p>
+        <p>Thank you for joining Easykonnet. We're excited to have you on board!</p>
         <p>You can now:</p>
         <ul>
           <li>Browse and book services from verified providers</li>
@@ -28,14 +28,14 @@ const EMAIL_TEMPLATES: Record<string, (data: Record<string, unknown>) => { subje
           <li>Leave reviews and ratings</li>
         </ul>
         <p>If you have any questions, our support team is here to help.</p>
-        <p>Best regards,<br>The EasyKonnect Team</p>
+        <p>Best regards,<br>The Easykonnet Team</p>
       </div>
     `,
   }),
 
   // OTP verification
   otp: (data) => ({
-    subject: `Your EasyKonnect Verification Code: ${data.otp}`,
+    subject: `Your Easykonnet Verification Code: ${data.otp}`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h1 style="color: #4F46E5;">Verification Code</h1>
@@ -46,14 +46,14 @@ const EMAIL_TEMPLATES: Record<string, (data: Record<string, unknown>) => { subje
         </div>
         <p>This code will expire in ${data.expiresIn || '10 minutes'}.</p>
         <p>If you didn't request this code, please ignore this email.</p>
-        <p>Best regards,<br>The EasyKonnect Team</p>
+        <p>Best regards,<br>The Easykonnet Team</p>
       </div>
     `,
   }),
 
   // Password reset
   passwordReset: (data) => ({
-    subject: 'Reset Your EasyKonnect Password',
+    subject: 'Reset Your Easykonnet Password',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h1 style="color: #4F46E5;">Password Reset Request</h1>
@@ -64,7 +64,7 @@ const EMAIL_TEMPLATES: Record<string, (data: Record<string, unknown>) => { subje
         </div>
         <p>This link will expire in 1 hour.</p>
         <p>If you didn't request this, you can safely ignore this email.</p>
-        <p>Best regards,<br>The EasyKonnect Team</p>
+        <p>Best regards,<br>The Easykonnet Team</p>
       </div>
     `,
   }),
@@ -85,8 +85,8 @@ const EMAIL_TEMPLATES: Record<string, (data: Record<string, unknown>) => { subje
           <p><strong>Time:</strong> ${data.bookingTime}</p>
           <p><strong>Amount:</strong> ${data.amount}</p>
         </div>
-        <p>You can track your booking status in the EasyKonnect app.</p>
-        <p>Best regards,<br>The EasyKonnect Team</p>
+        <p>You can track your booking status in the Easykonnet app.</p>
+        <p>Best regards,<br>The Easykonnet Team</p>
       </div>
     `,
   }),
@@ -102,7 +102,7 @@ const EMAIL_TEMPLATES: Record<string, (data: Record<string, unknown>) => { subje
         ${data.reason ? `<p><strong>Reason:</strong> ${data.reason}</p>` : ''}
         ${data.refundInfo ? `<p><strong>Refund:</strong> ${data.refundInfo}</p>` : ''}
         <p>If you have any questions, please contact our support team.</p>
-        <p>Best regards,<br>The EasyKonnect Team</p>
+        <p>Best regards,<br>The Easykonnet Team</p>
       </div>
     `,
   }),
@@ -118,15 +118,15 @@ const EMAIL_TEMPLATES: Record<string, (data: Record<string, unknown>) => { subje
         <div style="background: #F3F4F6; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #4F46E5;">
           <p style="margin: 0;">"${data.messagePreview}"</p>
         </div>
-        <p>Log in to EasyKonnect to reply.</p>
-        <p>Best regards,<br>The EasyKonnect Team</p>
+        <p>Log in to Easykonnet to reply.</p>
+        <p>Best regards,<br>The Easykonnet Team</p>
       </div>
     `,
   }),
 
   // Provider verification approved
   verificationApproved: (data) => ({
-    subject: 'Your EasyKonnect Provider Account is Verified! 🎉',
+    subject: 'Your Easykonnet Provider Account is Verified! 🎉',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h1 style="color: #10B981;">Verification Approved! ✅</h1>
@@ -140,7 +140,7 @@ const EMAIL_TEMPLATES: Record<string, (data: Record<string, unknown>) => { subje
           <li>Build your reputation with reviews</li>
         </ul>
         <p>Start adding your services today!</p>
-        <p>Best regards,<br>The EasyKonnect Team</p>
+        <p>Best regards,<br>The Easykonnet Team</p>
       </div>
     `,
   }),
@@ -156,7 +156,7 @@ const EMAIL_TEMPLATES: Record<string, (data: Record<string, unknown>) => { subje
         ${data.reason ? `<p><strong>Details:</strong> ${data.reason}</p>` : ''}
         <p>Please update your application with the required information.</p>
         <p>If you have questions, our support team is here to help.</p>
-        <p>Best regards,<br>The EasyKonnect Team</p>
+        <p>Best regards,<br>The Easykonnet Team</p>
       </div>
     `,
   }),
@@ -174,7 +174,7 @@ const EMAIL_TEMPLATES: Record<string, (data: Record<string, unknown>) => { subje
           <p style="margin: 0; font-style: italic;">"${data.reviewText}"</p>
         </div>
         <p>Thank them by responding to their review!</p>
-        <p>Best regards,<br>The EasyKonnect Team</p>
+        <p>Best regards,<br>The Easykonnet Team</p>
       </div>
     `,
   }),

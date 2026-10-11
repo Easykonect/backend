@@ -29,7 +29,7 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
  * Initialize the complete server with WebSockets and background workers
  */
 export async function startServer(): Promise<void> {
-  console.log('🚀 Starting EasyKonnect Server...');
+  console.log('🚀 Starting Easykonnet Server...');
 
   // Stop with a clear message if an essential setting is missing
   validateEnv();
@@ -61,7 +61,7 @@ export async function startServer(): Promise<void> {
   console.log(`
 ╔════════════════════════════════════════════════════════╗
 ║                                                        ║
-║   🎉 EasyKonnect Server Started Successfully!          ║
+║   🎉 Easykonnet Server Started Successfully!          ║
 ║                                                        ║
 ║   📍 HTTP Server:  http://${hostname}:${port}              ║
 ║   📍 GraphQL:      http://${hostname}:${port}/api/graphql  ║
